@@ -1,14 +1,14 @@
 {
   "expo": {
-    "scheme": "lyra-sync-app",
+    "scheme": "lyra",
     "userInterfaceStyle": "automatic",
     "orientation": "default",
     "web": {
       "bundler": "metro"
     },
-    "name": "lyra-sync-app",
-    "slug": "lyra-sync-app",
-    "plugins": ["expo-font"],
+    "name": "Lyra",
+    "slug": "lyra",
+    "plugins": ["expo-font", "expo-secure-store"],
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true

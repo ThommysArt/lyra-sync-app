@@ -2,8 +2,9 @@ import { Toaster } from "@lyra-sync-app/ui/components/sonner";
 import { HeadContent, Outlet, createRootRouteWithContext } from "@tanstack/react-router";
 import { TanStackRouterDevtools } from "@tanstack/react-router-devtools";
 
-import Header from "@/components/header";
+import { AppShell } from "@/components/app-shell";
 import { ThemeProvider } from "@/components/theme-provider";
+import { LyraProvider } from "@/lib/lyra";
 
 import "../index.css";
 
@@ -13,20 +14,14 @@ export const Route = createRootRouteWithContext<RouterAppContext>()({
   component: RootComponent,
   head: () => ({
     meta: [
-      {
-        title: "lyra-sync-app",
-      },
+      { title: "Lyra — Private device network" },
       {
         name: "description",
-        content: "lyra-sync-app is a web application",
+        content:
+          "Privacy-first clipboard sync, file transfer, and remote browse across your devices.",
       },
     ],
-    links: [
-      {
-        rel: "icon",
-        href: "/favicon.ico",
-      },
-    ],
+    links: [{ rel: "icon", href: "/favicon.ico" }],
   }),
 });
 
@@ -36,17 +31,19 @@ function RootComponent() {
       <HeadContent />
       <ThemeProvider
         attribute="class"
-        defaultTheme="dark"
+        defaultTheme="system"
+        enableSystem
         disableTransitionOnChange
-        storageKey="vite-ui-theme"
+        storageKey="lyra-ui-theme"
       >
-        <div className="grid grid-rows-[auto_1fr] h-svh">
-          <Header />
-          <Outlet />
-        </div>
-        <Toaster richColors />
+        <LyraProvider>
+          <AppShell>
+            <Outlet />
+          </AppShell>
+          <Toaster richColors position="bottom-right" />
+        </LyraProvider>
       </ThemeProvider>
-      <TanStackRouterDevtools position="bottom-left" />
+      {import.meta.env.DEV ? <TanStackRouterDevtools position="bottom-left" /> : null}
     </>
   );
 }

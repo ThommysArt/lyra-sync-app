@@ -1,0 +1,23 @@
+{
+  "name": "@lyra-sync-app/core",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./store": "./src/store.ts",
+    "./identity": "./src/identity.ts",
+    "./demo": "./src/demo.ts"
+  },
+  "scripts": {
+    "check-types": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@lyra-sync-app/protocol": "workspace:*",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@lyra-sync-app/config": "workspace:*",
+    "typescript": "^6"
+  }
+}

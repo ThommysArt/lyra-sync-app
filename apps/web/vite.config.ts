@@ -21,10 +21,11 @@ export default defineConfig({
     VitePWA({
       registerType: "autoUpdate",
       manifest: {
-        name: "lyra-sync-app",
-        short_name: "lyra-sync-app",
-        description: "lyra-sync-app - PWA Application",
-        theme_color: "#0c0c0c",
+        name: "Lyra",
+        short_name: "Lyra",
+        description: "Privacy-first device network — clipboard, files, and remote browse.",
+        theme_color: "#2F6BFF",
+        background_color: "#0B0F17",
       },
       pwaAssets: { disabled: false, config: true },
       devOptions: { enabled: true },

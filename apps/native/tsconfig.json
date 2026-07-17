@@ -3,7 +3,11 @@
   "compilerOptions": {
     "strict": true,
     "paths": {
-      "@/*": ["./*"]
+      "@/*": ["./*"],
+      "@lyra-sync-app/core": ["../../packages/core/src/index.ts"],
+      "@lyra-sync-app/core/*": ["../../packages/core/src/*"],
+      "@lyra-sync-app/protocol": ["../../packages/protocol/src/index.ts"],
+      "@lyra-sync-app/protocol/*": ["../../packages/protocol/src/*"]
     }
   },
   "include": ["**/*.ts", "**/*.tsx", ".expo/types/**/*.ts", "expo-env.d.ts"]

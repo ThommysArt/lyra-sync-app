@@ -1,0 +1,123 @@
+import { formatRelativeTime } from "@lyra-sync-app/core";
+import { Ionicons } from "@expo/vector-icons";
+import { useState } from "react";
+import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
+
+import { ScreenHeader, useTabBottomPadding } from "@/components/ui/screen-header";
+import { useAppTheme } from "@/contexts/app-theme-context";
+import { ACCENT, ACCENT_DARK, fonts, PAGE_BG } from "@/lib/constants";
+import { useLyraSelector, useLyraStore } from "@/lib/lyra";
+
+export default function ClipboardScreen() {
+  const store = useLyraStore();
+  const { isDark } = useAppTheme();
+  const bottomPad = useTabBottomPadding();
+  const history = useLyraSelector((s) =>
+    [...s.clipboardHistory].sort((a, b) => {
+      if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+      return b.createdAt - a.createdAt;
+    }),
+  );
+  const onlineIds = useLyraSelector((s) => s.devices.filter((d) => d.online).map((d) => d.id));
+  const [draft, setDraft] = useState("");
+  const bg = isDark ? PAGE_BG.dark : PAGE_BG.light;
+  const ink = isDark ? "#F5F7FF" : "#0B1220";
+  const muted = isDark ? "rgba(255,255,255,0.55)" : "rgba(0,0,0,0.45)";
+  const card = isDark ? "#141A26" : "#FFFFFF";
+  const accent = isDark ? ACCENT_DARK : ACCENT;
+
+  return (
+    <View style={{ backgroundColor: bg, flex: 1 }}>
+      <ScrollView contentContainerStyle={{ paddingBottom: bottomPad }}>
+        <ScreenHeader title="Clipboard" subtitle="History stays on this device" />
+
+        <View style={{ gap: 12, paddingHorizontal: 16 }}>
+          <View style={{ backgroundColor: card, borderRadius: 24, padding: 14 }}>
+            <TextInput
+              multiline
+              onChangeText={setDraft}
+              placeholder="Type or paste to send…"
+              placeholderTextColor={muted}
+              style={{
+                color: ink,
+                fontFamily: fonts.regular,
+                fontSize: 15,
+                minHeight: 88,
+                textAlignVertical: "top",
+              }}
+              value={draft}
+            />
+            <Pressable
+              disabled={!draft.trim()}
+              onPress={() => {
+                store.pushClipboardText(draft, onlineIds);
+                setDraft("");
+              }}
+              style={{
+                alignItems: "center",
+                alignSelf: "flex-start",
+                backgroundColor: accent,
+                borderRadius: 999,
+                flexDirection: "row",
+                gap: 6,
+                marginTop: 10,
+                opacity: draft.trim() ? 1 : 0.5,
+                paddingHorizontal: 14,
+                paddingVertical: 10,
+              }}
+            >
+              <Ionicons color="#fff" name="send" size={16} />
+              <Text style={{ color: "#fff", fontFamily: fonts.semiBold, fontSize: 14 }}>
+                Send to online
+              </Text>
+            </Pressable>
+          </View>
+
+          {history.map((item) => (
+            <View
+              key={item.id}
+              style={{ backgroundColor: card, borderRadius: 22, padding: 14 }}
+            >
+              <Text style={{ color: ink, fontFamily: fonts.regular, fontSize: 15 }}>
+                {item.text || "[Image]"}
+              </Text>
+              <Text style={{ color: muted, fontFamily: fonts.medium, fontSize: 12, marginTop: 8 }}>
+                {item.sourceDeviceName} · {formatRelativeTime(item.createdAt)}
+                {item.pinned ? " · Pinned" : ""}
+              </Text>
+              <View style={{ flexDirection: "row", gap: 8, marginTop: 10 }}>
+                <Action
+                  label={item.pinned ? "Unpin" : "Pin"}
+                  onPress={() => store.pinClipboardItem(item.id, !item.pinned)}
+                  ink={ink}
+                />
+                <Action
+                  label="Resend"
+                  onPress={() => store.resendClipboardItem(item.id, onlineIds)}
+                  ink={ink}
+                />
+                <Action label="Delete" onPress={() => store.removeClipboardItem(item.id)} ink={ink} />
+              </View>
+            </View>
+          ))}
+        </View>
+      </ScrollView>
+    </View>
+  );
+}
+
+function Action({ label, onPress, ink }: { label: string; onPress: () => void; ink: string }) {
+  return (
+    <Pressable
+      onPress={onPress}
+      style={{
+        backgroundColor: "rgba(127,127,127,0.12)",
+        borderRadius: 999,
+        paddingHorizontal: 12,
+        paddingVertical: 7,
+      }}
+    >
+      <Text style={{ color: ink, fontFamily: fonts.medium, fontSize: 13 }}>{label}</Text>
+    </Pressable>
+  );
+}

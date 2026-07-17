@@ -11,7 +11,11 @@
     "rootDirs": ["."],
     "paths": {
       "@/*": ["./src/*"],
-      "@lyra-sync-app/ui/*": ["../../packages/ui/src/*"]
+      "@lyra-sync-app/ui/*": ["../../packages/ui/src/*"],
+      "@lyra-sync-app/core": ["../../packages/core/src/index.ts"],
+      "@lyra-sync-app/core/*": ["../../packages/core/src/*"],
+      "@lyra-sync-app/protocol": ["../../packages/protocol/src/index.ts"],
+      "@lyra-sync-app/protocol/*": ["../../packages/protocol/src/*"]
     }
   }
 }
