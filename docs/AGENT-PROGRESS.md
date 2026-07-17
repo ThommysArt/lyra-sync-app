@@ -1,7 +1,7 @@
 # Lyra — Agent Progress Report
 
-**Last updated:** 2026-07-17 (late evening)  
-**Status:** MVP UI + demo mesh; P0 polish + P1 product completeness landed
+**Last updated:** 2026-07-17 (web + Expo browser re-test)  
+**Status:** MVP UI + demo mesh; P0 polish + P1 product completeness landed; web + Expo web verified in T3 preview
 
 ---
 
@@ -99,7 +99,7 @@ pnpm run dev:web   # http://localhost:3001 (or next free port)
 ## Left to do
 
 ### P0 — residual
-- [ ] Re-test UI in a **fresh** T3 agent thread (this session’s MCP bearer expired — see `docs/T3-CODE-BROWSER.md`)
+- [x] Re-test UI in a **fresh** T3 agent thread (2026-07-17) — see “Browser verification” below
 - [ ] Live camera QR scan on device (native module / Expo Camera) — paste path works today
 
 ### P1 — residual polish
@@ -143,6 +143,42 @@ pnpm install
 pnpm run dev:web   # http://localhost:3001
 cd apps/native && CI=true pnpm exec expo start --web --port 8081 --clear
 ```
+
+---
+
+## Browser verification (T3 preview, 2026-07-17)
+
+Web on `http://localhost:3001` via `preview_open` → `environment-port` 3001. Viewport was narrow (~477×897) — mobile shell OK.
+
+| Flow | Result |
+|------|--------|
+| Devices shell (3 demo peers, search, nav) | PASS — no max-update-depth; console only Vite HMR debug |
+| Pair dialog → Generate code + QR | PASS — code `X5LEXH`, fingerprint, `role=img` “Pairing QR code” |
+| Pair → Enter code tab | PASS — input, Pair device, Simulate incoming request |
+| Transfers list + progress | PASS — active + completed sessions |
+| Demo conflict → banner Skip/Rename/Overwrite | PASS — top banner + row actions; Rename via banner selector |
+| Settings identity / defaults / paired / shortcuts cheat sheet | PASS — Mod+K… listed; 3 paired devices |
+| Clipboard history + actions | PASS |
+| Keyboard: Ctrl+K | PASS — routes to `/` and focuses “Search devices…” |
+
+### Expo web (`:8081`, same session)
+
+Started with `cd apps/native && CI=true pnpm exec expo start --web --port 8081 --clear`. First cold navigate timed out at 60s (Metro bundled ~60s / 2359 modules); after bundle, `preview_status` showed `http://127.0.0.1:8081/` title `Lyra`. Prefer `readiness: "domContentLoaded"` or retry after log shows `Web Bundled`.
+
+| Flow | Result |
+|------|--------|
+| Devices shell + floating tab bar | PASS — 3 seeded peers, Send clipboard to all, pair icon |
+| Pair screen → generate code/QR | PASS — code `TWDD2G`, fingerprint `EC86 · 98E1 · 55D2 · 7D49` |
+| Simulate incoming + Accept | PASS — “Incoming Laptop” appears in device list (4 paired) |
+| Transfers → Conflict → Rename | PASS — banner Skip/Rename/Overwrite; resolved as `report (1).pdf` Completed |
+| Settings identity / toggles / paired | PASS — fingerprint, Dark mode, defaults, Unpair list |
+| Clipboard history | PASS — Read system, Send to online, Copy/Pin/Resend/Delete |
+| Max update depth | PASS — none |
+| Console | WARN only: deprecated `shadow*`, `pointerEvents`; font “slow network” interventions; no errors |
+
+**Expo automation notes:** RN `Pressable`s are often plain `div`s (use coords / `evaluate` click on exact text). Expo Router keeps inactive tabs mounted — `document.body.innerText` concatenates all tab screens; use URL + on-screen controls.
+
+Remaining gaps: live camera QR on device; real P2P still P2.
 
 ---
 
