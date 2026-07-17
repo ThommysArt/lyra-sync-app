@@ -6,6 +6,8 @@ import { Button } from "@lyra-sync-app/ui/components/button";
 import { Input } from "@lyra-sync-app/ui/components/input";
 import { DeviceCard } from "@/components/device-card";
 import { PairingDialog } from "@/components/pairing-dialog";
+import { readSystemClipboard } from "@/lib/clipboard";
+import { pickFiles } from "@/lib/file-picker";
 import { useLyraSelector, useLyraStore } from "@/lib/lyra";
 
 export const Route = createFileRoute("/")({
@@ -29,13 +31,29 @@ function DevicesPage() {
 
   const onlineIds = devices.filter((d) => d.online).map((d) => d.id);
 
+  const sendClipboard = async (targetIds: string[]) => {
+    const system = await readSystemClipboard();
+    const text = system || localClipboard || "Hello from Lyra";
+    store.setLocalClipboardText(text);
+    store.pushClipboardText(text, targetIds);
+  };
+
+  const sendFilesTo = async (deviceId: string) => {
+    const files = await pickFiles({ multiple: true });
+    if (files.length === 0) return;
+    store.startFileTransfer(
+      [deviceId],
+      files.map((f) => ({ name: f.name, size: f.size, mimeType: f.mimeType })),
+    );
+  };
+
   return (
     <div className="mx-auto max-w-5xl space-y-6 p-4 md:p-8">
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Devices</h1>
           <p className="text-sm text-muted-foreground">
-            Your trusted local network — no accounts, no cloud.
+            Your trusted local network — no accounts, no cloud. Drag files onto a device to send.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -43,22 +61,7 @@ function DevicesPage() {
             <Link2 className="size-4" />
             Pair device
           </Button>
-          <Button
-            onClick={() => {
-              const text =
-                localClipboard ||
-                (typeof navigator !== "undefined" ? "" : "") ||
-                "Hello from Lyra";
-              if (typeof navigator !== "undefined" && navigator.clipboard?.readText) {
-                void navigator.clipboard.readText().then(
-                  (t) => store.pushClipboardText(t || text, onlineIds),
-                  () => store.pushClipboardText(text, onlineIds),
-                );
-              } else {
-                store.pushClipboardText(text || "Hello from Lyra", onlineIds);
-              }
-            }}
-          >
+          <Button onClick={() => void sendClipboard(onlineIds)}>
             <Send className="size-4" />
             Send clipboard
           </Button>
@@ -111,24 +114,13 @@ function DevicesPage() {
             <DeviceCard
               key={device.id}
               device={device}
-              onSendClipboard={() => {
-                const fallback = localClipboard || "Shared via Lyra";
-                if (navigator.clipboard?.readText) {
-                  void navigator.clipboard.readText().then(
-                    (t) => store.pushClipboardText(t || fallback, [device.id]),
-                    () => store.pushClipboardText(fallback, [device.id]),
-                  );
-                } else {
-                  store.pushClipboardText(fallback, [device.id]);
-                }
-              }}
-              onSendFiles={() => {
+              onSendClipboard={() => void sendClipboard([device.id])}
+              onSendFiles={() => void sendFilesTo(device.id)}
+              onDropFiles={(files) => {
+                if (!device.online || files.length === 0) return;
                 store.startFileTransfer(
                   [device.id],
-                  [
-                    { name: "shared-document.pdf", size: 1_240_000, mimeType: "application/pdf" },
-                    { name: "notes.txt", size: 4_200, mimeType: "text/plain" },
-                  ],
+                  files.map((f) => ({ name: f.name, size: f.size, mimeType: f.mimeType })),
                 );
               }}
             />

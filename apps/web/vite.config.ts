@@ -28,7 +28,8 @@ export default defineConfig({
         background_color: "#0B0F17",
       },
       pwaAssets: { disabled: false, config: true },
-      devOptions: { enabled: true },
+      // Disable SW registration in dev to avoid noisy console + HMR races
+      devOptions: { enabled: false },
     }),
   ],
 });

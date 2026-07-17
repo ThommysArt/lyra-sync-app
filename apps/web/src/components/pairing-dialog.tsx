@@ -1,6 +1,7 @@
 import { formatFingerprint } from "@lyra-sync-app/core";
 import { QrCode, Shuffle } from "lucide-react";
-import { useMemo, useState } from "react";
+import { QRCodeSVG } from "qrcode.react";
+import { useState } from "react";
 
 import { Button } from "@lyra-sync-app/ui/components/button";
 import {
@@ -15,49 +16,6 @@ import { Input } from "@lyra-sync-app/ui/components/input";
 import { Label } from "@lyra-sync-app/ui/components/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@lyra-sync-app/ui/components/tabs";
 import { useLyraSelector, useLyraStore } from "@/lib/lyra";
-
-/** Minimal QR-like visual from pairing payload (no external QR lib required). */
-function PairingQrPlaceholder({ value }: { value: string }) {
-  const cells = useMemo(() => {
-    const size = 21;
-    const grid: boolean[][] = [];
-    let h = 0;
-    for (let i = 0; i < value.length; i++) h = (h * 33 + value.charCodeAt(i)) >>> 0;
-    for (let y = 0; y < size; y++) {
-      const row: boolean[] = [];
-      for (let x = 0; x < size; x++) {
-        const border = x === 0 || y === 0 || x === size - 1 || y === size - 1;
-        const finder =
-          (x < 7 && y < 7) || (x > size - 8 && y < 7) || (x < 7 && y > size - 8);
-        if (border || finder) {
-          row.push(true);
-        } else {
-          const bit = (h ^ (x * 73856093) ^ (y * 19349663)) & 1;
-          row.push(bit === 1);
-        }
-      }
-      grid.push(row);
-    }
-    return grid;
-  }, [value]);
-
-  return (
-    <div
-      className="mx-auto grid w-fit gap-px rounded-2xl bg-foreground p-3"
-      style={{ gridTemplateColumns: `repeat(${cells[0]?.length ?? 0}, 8px)` }}
-      aria-label="Pairing QR code"
-    >
-      {cells.flatMap((row, y) =>
-        row.map((on, x) => (
-          <div
-            key={`${y}-${x}`}
-            className={on ? "size-2 bg-background" : "size-2 bg-foreground"}
-          />
-        )),
-      )}
-    </div>
-  );
-}
 
 export function PairingDialog({
   trigger,
@@ -92,6 +50,8 @@ export function PairingDialog({
     }
   };
 
+  const qrValue = active ? JSON.stringify(active.payload) : "";
+
   return (
     <Dialog
       open={open}
@@ -123,7 +83,17 @@ export function PairingDialog({
           <TabsContent value="show" className="space-y-4 pt-3">
             {active ? (
               <>
-                <PairingQrPlaceholder value={JSON.stringify(active.payload)} />
+                <div className="mx-auto w-fit rounded-3xl bg-white p-4 shadow-sm ring-1 ring-border/60">
+                  <QRCodeSVG
+                    value={qrValue}
+                    size={200}
+                    level="M"
+                    includeMargin={false}
+                    bgColor="#ffffff"
+                    fgColor="#0B1220"
+                    aria-label="Pairing QR code"
+                  />
+                </div>
                 <div className="text-center">
                   <p className="text-xs text-muted-foreground">Pairing code</p>
                   <p className="mt-1 font-mono text-3xl font-semibold tracking-[0.25em] text-primary">

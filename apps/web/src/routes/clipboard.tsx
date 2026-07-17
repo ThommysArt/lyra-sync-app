@@ -1,11 +1,12 @@
 import { formatRelativeTime } from "@lyra-sync-app/core";
 import { createFileRoute } from "@tanstack/react-router";
-import { Pin, PinOff, Send, Trash2 } from "lucide-react";
+import { ClipboardPaste, Copy, Pin, PinOff, Send, Trash2 } from "lucide-react";
 import { useState } from "react";
 
 import { Button } from "@lyra-sync-app/ui/components/button";
 import { Card, CardContent } from "@lyra-sync-app/ui/components/card";
 import { Textarea } from "@lyra-sync-app/ui/components/textarea";
+import { readSystemClipboard, writeSystemClipboard } from "@/lib/clipboard";
 import { useLyraSelector, useLyraStore } from "@/lib/lyra";
 
 export const Route = createFileRoute("/clipboard")({
@@ -23,6 +24,14 @@ function ClipboardPage() {
   const onlineDevices = useLyraSelector((s) => s.devices.filter((d) => d.online));
   const [draft, setDraft] = useState("");
 
+  const importSystem = async () => {
+    const text = await readSystemClipboard();
+    if (text) {
+      setDraft(text);
+      store.setLocalClipboardText(text);
+    }
+  };
+
   return (
     <div className="mx-auto max-w-3xl space-y-6 p-4 md:p-8">
       <div className="flex flex-wrap items-end justify-between gap-3">
@@ -32,9 +41,15 @@ function ClipboardPage() {
             Local history and multi-device send. Nothing leaves your network.
           </p>
         </div>
-        <Button variant="outline" size="sm" onClick={() => store.clearClipboardHistory()}>
-          Clear unpinned
-        </Button>
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={() => void importSystem()}>
+            <ClipboardPaste className="size-4" />
+            Read system
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => store.clearClipboardHistory()}>
+            Clear unpinned
+          </Button>
+        </div>
       </div>
 
       <Card className="rounded-4xl">
@@ -53,6 +68,7 @@ function ClipboardPage() {
                   draft,
                   onlineDevices.map((d) => d.id),
                 );
+                void writeSystemClipboard(draft.trim());
                 setDraft("");
               }}
             >
@@ -64,6 +80,7 @@ function ClipboardPage() {
               disabled={!draft.trim()}
               onClick={() => {
                 store.pushClipboardText(draft, []);
+                void writeSystemClipboard(draft.trim());
                 setDraft("");
               }}
             >
@@ -90,6 +107,16 @@ function ClipboardPage() {
                   </p>
                 </div>
                 <div className="flex shrink-0 gap-1">
+                  <Button
+                    size="icon-sm"
+                    variant="ghost"
+                    onClick={() => {
+                      if (item.text) void writeSystemClipboard(item.text);
+                    }}
+                    title="Copy to system clipboard"
+                  >
+                    <Copy className="size-4" />
+                  </Button>
                   <Button
                     size="icon-sm"
                     variant="ghost"

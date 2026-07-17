@@ -98,8 +98,13 @@ export const TransferStatusSchema = z.enum([
   "failed",
   "cancelled",
   "partial",
+  /** Waiting for rename / overwrite / skip decision */
+  "conflict",
 ]);
 export type TransferStatus = z.infer<typeof TransferStatusSchema>;
+
+export const ConflictActionSchema = z.enum(["rename", "overwrite", "skip"]);
+export type ConflictAction = z.infer<typeof ConflictActionSchema>;
 
 export const TransferFileSchema = z.object({
   name: z.string(),
@@ -124,6 +129,9 @@ export const TransferSchema = z.object({
   durationMs: z.number().int().nonnegative().optional(),
   averageSpeedBps: z.number().nonnegative().optional(),
   error: z.string().optional(),
+  /** Present when status is `conflict` — name of the clashing file */
+  conflictFileName: z.string().optional(),
+  conflictResolved: ConflictActionSchema.optional(),
 });
 export type Transfer = z.infer<typeof TransferSchema>;
 

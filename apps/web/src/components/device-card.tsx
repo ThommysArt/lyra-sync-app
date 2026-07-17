@@ -12,6 +12,8 @@ import { Badge } from "@lyra-sync-app/ui/components/badge";
 import { Button } from "@lyra-sync-app/ui/components/button";
 import { Card, CardContent } from "@lyra-sync-app/ui/components/card";
 import { cn } from "@/lib/utils";
+import { DropZone } from "@/components/drop-zone";
+import type { PickedFile } from "@/lib/file-picker";
 
 function DeviceGlyph({ device }: { device: PairedDevice }) {
   const Icon =
@@ -32,16 +34,18 @@ export function DeviceCard({
   device,
   onSendClipboard,
   onSendFiles,
+  onDropFiles,
 }: {
   device: PairedDevice;
   onSendClipboard?: () => void;
   onSendFiles?: () => void;
+  onDropFiles?: (files: PickedFile[]) => void;
 }) {
   const displayName = device.nickname || device.name;
   const battery = device.status?.batteryLevel;
   const charging = device.status?.isCharging;
 
-  return (
+  const card = (
     <Card className="overflow-hidden rounded-3xl border-border/70 shadow-sm transition-shadow hover:shadow-md">
       <CardContent className="flex flex-col gap-4 p-4">
         <div className="flex items-start gap-3">
@@ -105,5 +109,18 @@ export function DeviceCard({
         </div>
       </CardContent>
     </Card>
+  );
+
+  if (!onDropFiles) return card;
+
+  return (
+    <DropZone
+      className="rounded-3xl"
+      disabled={!device.online}
+      label={`Send to ${displayName}`}
+      onDropFiles={onDropFiles}
+    >
+      {card}
+    </DropZone>
   );
 }

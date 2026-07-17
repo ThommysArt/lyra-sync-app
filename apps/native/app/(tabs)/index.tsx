@@ -4,6 +4,8 @@ import {
   platformLabel,
 } from "@lyra-sync-app/core";
 import { Ionicons } from "@expo/vector-icons";
+import * as Clipboard from "expo-clipboard";
+import * as DocumentPicker from "expo-document-picker";
 import { router } from "expo-router";
 import { Pressable, ScrollView, Text, View } from "react-native";
 
@@ -16,6 +18,10 @@ export default function DevicesScreen() {
   const store = useLyraStore();
   const { isDark } = useAppTheme();
   const bottomPad = useTabBottomPadding();
+  const hasTopBanners = useLyraSelector(
+    (s) =>
+      s.incomingPairRequests.length > 0 || s.transfers.some((t) => t.status === "conflict"),
+  );
   const devices = useLyraSelector((s) =>
     s.devices.filter((d) => d.showInMainList).sort((a, b) => Number(b.online) - Number(a.online)),
   );
@@ -25,12 +31,45 @@ export default function DevicesScreen() {
   const card = isDark ? "#141A26" : "#FFFFFF";
   const accent = isDark ? ACCENT_DARK : ACCENT;
 
+  const sendClipboard = async (targetIds: string[]) => {
+    let text = "";
+    try {
+      text = (await Clipboard.getStringAsync()) || "";
+    } catch {
+      // ignore
+    }
+    if (!text) text = store.getState().localClipboardText || "Hello from Lyra mobile";
+    store.setLocalClipboardText(text);
+    store.pushClipboardText(text, targetIds);
+  };
+
+  const pickAndSend = async (deviceId: string) => {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        multiple: true,
+        copyToCacheDirectory: true,
+      });
+      if (result.canceled || !result.assets?.length) return;
+      store.startFileTransfer(
+        [deviceId],
+        result.assets.map((a) => ({
+          name: a.name,
+          size: a.size ?? 1024,
+          mimeType: a.mimeType ?? undefined,
+        })),
+      );
+    } catch {
+      // user cancelled or picker unavailable
+    }
+  };
+
   return (
     <View style={{ backgroundColor: bg, flex: 1 }}>
       <ScrollView contentContainerStyle={{ paddingBottom: bottomPad }}>
         <ScreenHeader
           title="Devices"
           subtitle="Your trusted private network"
+          skipTopInset={hasTopBanners}
           right={
             <Pressable
               onPress={() => router.push("/pair")}
@@ -52,7 +91,7 @@ export default function DevicesScreen() {
           <Pressable
             onPress={() => {
               const online = devices.filter((d) => d.online).map((d) => d.id);
-              store.pushClipboardText("Hello from Lyra mobile", online);
+              void sendClipboard(online);
             }}
             style={{
               alignItems: "center",
@@ -112,7 +151,12 @@ export default function DevicesScreen() {
                     <View style={{ alignItems: "center", flexDirection: "row", gap: 8 }}>
                       <Text
                         numberOfLines={1}
-                        style={{ color: ink, flexShrink: 1, fontFamily: fonts.semiBold, fontSize: 16 }}
+                        style={{
+                          color: ink,
+                          flexShrink: 1,
+                          fontFamily: fonts.semiBold,
+                          fontSize: 16,
+                        }}
                       >
                         {name}
                       </Text>
@@ -125,10 +169,14 @@ export default function DevicesScreen() {
                         }}
                       />
                     </View>
-                    <Text style={{ color: muted, fontFamily: fonts.medium, fontSize: 13, marginTop: 2 }}>
+                    <Text
+                      style={{ color: muted, fontFamily: fonts.medium, fontSize: 13, marginTop: 2 }}
+                    >
                       {platformLabel(device.platform)} · {connectionLabel(device.connectionType)}
                     </Text>
-                    <Text style={{ color: muted, fontFamily: fonts.regular, fontSize: 12, marginTop: 4 }}>
+                    <Text
+                      style={{ color: muted, fontFamily: fonts.regular, fontSize: 12, marginTop: 4 }}
+                    >
                       Seen {formatRelativeTime(device.lastSeenAt)}
                       {device.status?.batteryLevel != null
                         ? ` · ${device.status.batteryLevel}% battery`
@@ -141,7 +189,7 @@ export default function DevicesScreen() {
                 <View style={{ flexDirection: "row", gap: 8, marginTop: 14 }}>
                   <Pressable
                     disabled={!device.online}
-                    onPress={() => store.pushClipboardText("Shared from mobile", [device.id])}
+                    onPress={() => void sendClipboard([device.id])}
                     style={{
                       backgroundColor: isDark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.04)",
                       borderRadius: 999,
@@ -150,16 +198,13 @@ export default function DevicesScreen() {
                       paddingVertical: 8,
                     }}
                   >
-                    <Text style={{ color: ink, fontFamily: fonts.medium, fontSize: 13 }}>Clipboard</Text>
+                    <Text style={{ color: ink, fontFamily: fonts.medium, fontSize: 13 }}>
+                      Clipboard
+                    </Text>
                   </Pressable>
                   <Pressable
                     disabled={!device.online}
-                    onPress={() =>
-                      store.startFileTransfer(
-                        [device.id],
-                        [{ name: "from-phone.jpg", size: 2_400_000, mimeType: "image/jpeg" }],
-                      )
-                    }
+                    onPress={() => void pickAndSend(device.id)}
                     style={{
                       backgroundColor: isDark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.04)",
                       borderRadius: 999,
@@ -168,7 +213,9 @@ export default function DevicesScreen() {
                       paddingVertical: 8,
                     }}
                   >
-                    <Text style={{ color: ink, fontFamily: fonts.medium, fontSize: 13 }}>Send file</Text>
+                    <Text style={{ color: ink, fontFamily: fonts.medium, fontSize: 13 }}>
+                      Send file
+                    </Text>
                   </Pressable>
                 </View>
               </Pressable>

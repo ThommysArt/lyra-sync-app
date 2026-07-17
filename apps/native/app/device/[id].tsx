@@ -5,6 +5,8 @@ import {
   formatRelativeTime,
   platformLabel,
 } from "@lyra-sync-app/core";
+import * as Clipboard from "expo-clipboard";
+import * as DocumentPicker from "expo-document-picker";
 import { Stack, useLocalSearchParams } from "expo-router";
 import { useMemo, useState } from "react";
 import { Pressable, ScrollView, Switch, Text, TextInput, View } from "react-native";
@@ -112,6 +114,67 @@ export default function DeviceDetailScreen() {
             ink={ink}
             accent={accent}
           />
+        </View>
+
+        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+          <Pressable
+            disabled={!device.online}
+            onPress={() => {
+              void (async () => {
+                let text = "";
+                try {
+                  text = (await Clipboard.getStringAsync()) || "";
+                } catch {
+                  // ignore
+                }
+                store.pushClipboardText(text || "Shared from device detail", [device.id]);
+              })();
+            }}
+            style={{
+              backgroundColor: isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)",
+              borderRadius: 999,
+              opacity: device.online ? 1 : 0.45,
+              paddingHorizontal: 14,
+              paddingVertical: 10,
+            }}
+          >
+            <Text style={{ color: ink, fontFamily: fonts.medium, fontSize: 13 }}>Send clipboard</Text>
+          </Pressable>
+          <Pressable
+            disabled={!device.online}
+            onPress={() => {
+              void (async () => {
+                try {
+                  const result = await DocumentPicker.getDocumentAsync({
+                    multiple: true,
+                    copyToCacheDirectory: true,
+                  });
+                  if (result.canceled || !result.assets?.length) return;
+                  store.startFileTransfer(
+                    [device.id],
+                    result.assets.map((a) => ({
+                      name: a.name,
+                      size: a.size ?? 1024,
+                      mimeType: a.mimeType ?? undefined,
+                    })),
+                  );
+                } catch {
+                  // cancelled
+                }
+              })();
+            }}
+            style={{
+              backgroundColor: accent,
+              borderRadius: 999,
+              opacity: device.online ? 1 : 0.45,
+              paddingHorizontal: 14,
+              paddingVertical: 10,
+            }}
+          >
+            <Text style={{ color: "#fff", fontFamily: fonts.semiBold, fontSize: 13 }}>
+              Upload files
+            </Text>
+          </Pressable>
         </View>
 
         <View style={{ backgroundColor: card, borderRadius: 24, padding: 16 }}>

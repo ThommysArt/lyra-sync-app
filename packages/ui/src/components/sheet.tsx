@@ -3,9 +3,10 @@
 import * as React from "react"
 import { Dialog as SheetPrimitive } from "@base-ui/react/dialog"
 
+import { XIcon } from "lucide-react"
+
 import { cn } from "@lyra-sync-app/ui/lib/utils"
 import { Button } from "@lyra-sync-app/ui/components/button"
-import { IconPlaceholder } from "@lyra-sync-app/ui/components/icon-placeholder"
 
 function Sheet({ ...props }: SheetPrimitive.Root.Props) {
   return <SheetPrimitive.Root data-slot="sheet" {...props} />
@@ -70,13 +71,7 @@ function SheetContent({
               />
             }
           >
-            <IconPlaceholder
-              lucide="XIcon"
-              tabler="IconX"
-              hugeicons="Cancel01Icon"
-              phosphor="XIcon"
-              remixicon="RiCloseLine"
-            />
+            <XIcon className="size-4" />
             <span className="sr-only">Close</span>
           </SheetPrimitive.Close>
         )}

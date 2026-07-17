@@ -1,4 +1,5 @@
 import { formatBytes, formatPercent, formatRelativeTime } from "@lyra-sync-app/core";
+import * as DocumentPicker from "expo-document-picker";
 import { Pressable, ScrollView, Text, View } from "react-native";
 
 import { ScreenHeader, useTabBottomPadding } from "@/components/ui/screen-header";
@@ -14,11 +15,36 @@ export default function TransfersScreen() {
     [...s.transfers].sort((a, b) => b.createdAt - a.createdAt),
   );
   const onlineIds = useLyraSelector((s) => s.devices.filter((d) => d.online).map((d) => d.id));
+  const hasTopBanners = useLyraSelector(
+    (s) =>
+      s.incomingPairRequests.length > 0 || s.transfers.some((t) => t.status === "conflict"),
+  );
   const bg = isDark ? PAGE_BG.dark : PAGE_BG.light;
   const ink = isDark ? "#F5F7FF" : "#0B1220";
   const muted = isDark ? "rgba(255,255,255,0.55)" : "rgba(0,0,0,0.45)";
   const card = isDark ? "#141A26" : "#FFFFFF";
   const accent = isDark ? ACCENT_DARK : ACCENT;
+
+  const pickAndSend = async () => {
+    if (!onlineIds[0]) return;
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        multiple: true,
+        copyToCacheDirectory: true,
+      });
+      if (result.canceled || !result.assets?.length) return;
+      store.startFileTransfer(
+        [onlineIds[0]],
+        result.assets.map((a) => ({
+          name: a.name,
+          size: a.size ?? 1024,
+          mimeType: a.mimeType ?? undefined,
+        })),
+      );
+    } catch {
+      // cancelled
+    }
+  };
 
   return (
     <View style={{ backgroundColor: bg, flex: 1 }}>
@@ -26,23 +52,36 @@ export default function TransfersScreen() {
         <ScreenHeader
           title="Transfers"
           subtitle="Pause, resume, and history"
+          skipTopInset={hasTopBanners}
           right={
-            <Pressable
-              onPress={() => {
-                if (!onlineIds[0]) return;
-                store.startFileTransfer([onlineIds[0]], [
-                  { name: "mobile-export.zip", size: 18_000_000 },
-                ]);
-              }}
-              style={{
-                backgroundColor: accent,
-                borderRadius: 999,
-                paddingHorizontal: 12,
-                paddingVertical: 8,
-              }}
-            >
-              <Text style={{ color: "#fff", fontFamily: fonts.semiBold, fontSize: 13 }}>Demo</Text>
-            </Pressable>
+            <View style={{ flexDirection: "row", gap: 8 }}>
+              <Pressable
+                onPress={() => store.simulateIncomingConflict()}
+                style={{
+                  backgroundColor: isDark ? "rgba(255,196,0,0.18)" : "rgba(255,196,0,0.25)",
+                  borderRadius: 999,
+                  paddingHorizontal: 12,
+                  paddingVertical: 8,
+                }}
+              >
+                <Text style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 13 }}>
+                  Conflict
+                </Text>
+              </Pressable>
+              <Pressable
+                onPress={() => void pickAndSend()}
+                style={{
+                  backgroundColor: accent,
+                  borderRadius: 999,
+                  paddingHorizontal: 12,
+                  paddingVertical: 8,
+                }}
+              >
+                <Text style={{ color: "#fff", fontFamily: fonts.semiBold, fontSize: 13 }}>
+                  Send
+                </Text>
+              </Pressable>
+            </View>
           }
         />
 
@@ -50,10 +89,7 @@ export default function TransfersScreen() {
           {transfers.map((tx) => {
             const pct = formatPercent(tx.transferredBytes, tx.totalBytes);
             return (
-              <View
-                key={tx.id}
-                style={{ backgroundColor: card, borderRadius: 22, padding: 14 }}
-              >
+              <View key={tx.id} style={{ backgroundColor: card, borderRadius: 22, padding: 14 }}>
                 <Text style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 15 }}>
                   {tx.files.map((f) => f.name).join(", ")}
                 </Text>
@@ -72,6 +108,27 @@ export default function TransfersScreen() {
                 >
                   {tx.status}
                 </Text>
+
+                {tx.status === "conflict" && (
+                  <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
+                    <Chip
+                      label="Skip"
+                      onPress={() => store.resolveTransferConflict(tx.id, "skip")}
+                      ink={ink}
+                    />
+                    <Chip
+                      label="Rename"
+                      onPress={() => store.resolveTransferConflict(tx.id, "rename")}
+                      ink={ink}
+                    />
+                    <Chip
+                      label="Overwrite"
+                      onPress={() => store.resolveTransferConflict(tx.id, "overwrite")}
+                      ink={ink}
+                    />
+                  </View>
+                )}
+
                 {(tx.status === "transferring" || tx.status === "paused") && (
                   <View style={{ marginTop: 10 }}>
                     <View
@@ -90,14 +147,20 @@ export default function TransfersScreen() {
                         }}
                       />
                     </View>
-                    <Text style={{ color: muted, fontFamily: fonts.regular, fontSize: 11, marginTop: 4 }}>
+                    <Text
+                      style={{ color: muted, fontFamily: fonts.regular, fontSize: 11, marginTop: 4 }}
+                    >
                       {pct}% · {formatBytes(tx.transferredBytes)}
                     </Text>
                   </View>
                 )}
                 <View style={{ flexDirection: "row", gap: 8, marginTop: 10 }}>
                   {tx.status === "transferring" && (
-                    <Chip label="Pause" onPress={() => store.setTransferStatus(tx.id, "paused")} ink={ink} />
+                    <Chip
+                      label="Pause"
+                      onPress={() => store.setTransferStatus(tx.id, "paused")}
+                      ink={ink}
+                    />
                   )}
                   {tx.status === "paused" && (
                     <Chip

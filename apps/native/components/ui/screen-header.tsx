@@ -1,18 +1,24 @@
 import type { ReactNode } from "react";
 import { Text, View } from "react-native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { fonts } from "@/lib/constants";
 import { useAppTheme } from "@/contexts/app-theme-context";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+/**
+ * Top chrome for tab screens.
+ * When `skipTopInset` is true, the parent already applied safe-area (e.g. banners).
+ */
 export function ScreenHeader({
   title,
   subtitle,
   right,
+  skipTopInset = false,
 }: {
   title: string;
   subtitle?: string;
   right?: ReactNode;
+  skipTopInset?: boolean;
 }) {
   const insets = useSafeAreaInsets();
   const { isDark } = useAppTheme();
@@ -22,7 +28,7 @@ export function ScreenHeader({
       style={{
         paddingBottom: 12,
         paddingHorizontal: 20,
-        paddingTop: Math.max(insets.top + 8, 20),
+        paddingTop: skipTopInset ? 12 : Math.max(insets.top + 8, 20),
       }}
     >
       <View style={{ alignItems: "flex-start", flexDirection: "row", gap: 12 }}>

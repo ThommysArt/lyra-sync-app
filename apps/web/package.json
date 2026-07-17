@@ -22,6 +22,7 @@
     "dotenv": "catalog:",
     "lucide-react": "catalog:",
     "next-themes": "catalog:",
+    "qrcode.react": "^4.2.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "sonner": "catalog:",

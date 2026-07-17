@@ -1,5 +1,6 @@
 import { formatRelativeTime } from "@lyra-sync-app/core";
 import { Ionicons } from "@expo/vector-icons";
+import * as Clipboard from "expo-clipboard";
 import { useState } from "react";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 
@@ -19,6 +20,10 @@ export default function ClipboardScreen() {
     }),
   );
   const onlineIds = useLyraSelector((s) => s.devices.filter((d) => d.online).map((d) => d.id));
+  const hasTopBanners = useLyraSelector(
+    (s) =>
+      s.incomingPairRequests.length > 0 || s.transfers.some((t) => t.status === "conflict"),
+  );
   const [draft, setDraft] = useState("");
   const bg = isDark ? PAGE_BG.dark : PAGE_BG.light;
   const ink = isDark ? "#F5F7FF" : "#0B1220";
@@ -26,10 +31,50 @@ export default function ClipboardScreen() {
   const card = isDark ? "#141A26" : "#FFFFFF";
   const accent = isDark ? ACCENT_DARK : ACCENT;
 
+  const importSystem = async () => {
+    try {
+      const text = await Clipboard.getStringAsync();
+      if (text) {
+        setDraft(text);
+        store.setLocalClipboardText(text);
+      }
+    } catch {
+      // ignore
+    }
+  };
+
+  const sendDraft = async (targets: string[]) => {
+    if (!draft.trim()) return;
+    store.pushClipboardText(draft, targets);
+    try {
+      await Clipboard.setStringAsync(draft.trim());
+    } catch {
+      // ignore
+    }
+    setDraft("");
+  };
+
   return (
     <View style={{ backgroundColor: bg, flex: 1 }}>
       <ScrollView contentContainerStyle={{ paddingBottom: bottomPad }}>
-        <ScreenHeader title="Clipboard" subtitle="History stays on this device" />
+        <ScreenHeader
+          title="Clipboard"
+          subtitle="History stays on this device"
+          skipTopInset={hasTopBanners}
+          right={
+            <Pressable
+              onPress={() => void importSystem()}
+              style={{
+                backgroundColor: isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)",
+                borderRadius: 999,
+                paddingHorizontal: 12,
+                paddingVertical: 8,
+              }}
+            >
+              <Text style={{ color: ink, fontFamily: fonts.medium, fontSize: 13 }}>Read system</Text>
+            </Pressable>
+          }
+        />
 
         <View style={{ gap: 12, paddingHorizontal: 16 }}>
           <View style={{ backgroundColor: card, borderRadius: 24, padding: 14 }}>
@@ -49,10 +94,7 @@ export default function ClipboardScreen() {
             />
             <Pressable
               disabled={!draft.trim()}
-              onPress={() => {
-                store.pushClipboardText(draft, onlineIds);
-                setDraft("");
-              }}
+              onPress={() => void sendDraft(onlineIds)}
               style={{
                 alignItems: "center",
                 alignSelf: "flex-start",
@@ -74,10 +116,7 @@ export default function ClipboardScreen() {
           </View>
 
           {history.map((item) => (
-            <View
-              key={item.id}
-              style={{ backgroundColor: card, borderRadius: 22, padding: 14 }}
-            >
+            <View key={item.id} style={{ backgroundColor: card, borderRadius: 22, padding: 14 }}>
               <Text style={{ color: ink, fontFamily: fonts.regular, fontSize: 15 }}>
                 {item.text || "[Image]"}
               </Text>
@@ -85,7 +124,14 @@ export default function ClipboardScreen() {
                 {item.sourceDeviceName} · {formatRelativeTime(item.createdAt)}
                 {item.pinned ? " · Pinned" : ""}
               </Text>
-              <View style={{ flexDirection: "row", gap: 8, marginTop: 10 }}>
+              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
+                <Action
+                  label="Copy"
+                  onPress={() => {
+                    if (item.text) void Clipboard.setStringAsync(item.text);
+                  }}
+                  ink={ink}
+                />
                 <Action
                   label={item.pinned ? "Unpin" : "Pin"}
                   onPress={() => store.pinClipboardItem(item.id, !item.pinned)}

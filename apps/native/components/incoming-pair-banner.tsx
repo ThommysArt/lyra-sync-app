@@ -1,0 +1,76 @@
+import { Pressable, Text, View } from "react-native";
+
+import { useAppTheme } from "@/contexts/app-theme-context";
+import { ACCENT, ACCENT_DARK, fonts } from "@/lib/constants";
+import { useLyraSelector, useLyraStore } from "@/lib/lyra";
+
+export function IncomingPairBanner() {
+  const store = useLyraStore();
+  const { isDark } = useAppTheme();
+  const requests = useLyraSelector((s) => s.incomingPairRequests);
+  const accent = isDark ? ACCENT_DARK : ACCENT;
+
+  if (requests.length === 0) return null;
+  const req = requests[0]!;
+
+  return (
+    <View
+      style={{
+        backgroundColor: isDark ? "rgba(122,162,255,0.18)" : "rgba(47,107,255,0.12)",
+        borderBottomColor: isDark ? "rgba(122,162,255,0.35)" : "rgba(47,107,255,0.25)",
+        borderBottomWidth: 1,
+        gap: 10,
+        paddingHorizontal: 16,
+        paddingVertical: 12,
+      }}
+    >
+      <View>
+        <Text style={{ color: isDark ? "#F5F7FF" : "#0B1220", fontFamily: fonts.semiBold, fontSize: 14 }}>
+          Pairing request from {req.payload.name}
+        </Text>
+        <Text
+          style={{
+            color: isDark ? "rgba(255,255,255,0.55)" : "rgba(0,0,0,0.45)",
+            fontFamily: fonts.medium,
+            fontSize: 12,
+            marginTop: 2,
+          }}
+        >
+          {req.payload.platform} · fingerprint {req.payload.fingerprint.slice(0, 8)}…
+        </Text>
+      </View>
+      <View style={{ flexDirection: "row", gap: 8 }}>
+        <Pressable
+          onPress={() => store.rejectIncomingPair(req.id)}
+          style={{
+            backgroundColor: isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)",
+            borderRadius: 999,
+            paddingHorizontal: 14,
+            paddingVertical: 8,
+          }}
+        >
+          <Text
+            style={{
+              color: isDark ? "#F5F7FF" : "#0B1220",
+              fontFamily: fonts.medium,
+              fontSize: 13,
+            }}
+          >
+            Decline
+          </Text>
+        </Pressable>
+        <Pressable
+          onPress={() => store.confirmIncomingPair(req.id)}
+          style={{
+            backgroundColor: accent,
+            borderRadius: 999,
+            paddingHorizontal: 14,
+            paddingVertical: 8,
+          }}
+        >
+          <Text style={{ color: "#fff", fontFamily: fonts.semiBold, fontSize: 13 }}>Accept</Text>
+        </Pressable>
+      </View>
+    </View>
+  );
+}

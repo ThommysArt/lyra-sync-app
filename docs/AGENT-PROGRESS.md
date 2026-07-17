@@ -1,7 +1,7 @@
 # Lyra — Agent Progress Report
 
-**Last updated:** 2026-07-17 (evening)  
-**Status:** MVP UI + demo mesh; **max update depth fixed** on web and Expo web
+**Last updated:** 2026-07-17 (late evening)  
+**Status:** MVP UI + demo mesh; P0 polish + P1 product completeness landed
 
 ---
 
@@ -24,24 +24,38 @@ Ship a usable Lyra MVP per `docs/Lyra-Product-Spec.md` with:
 - [x] Blue brand CSS in `packages/ui/src/styles/globals.css`
 - [x] Components reinstalled + `IconPlaceholder` shim
 - [x] Expo blue theme + Manrope (`apps/native/global.css`)
+- [x] Dialog/Sheet close buttons use lucide `XIcon` directly
 
 ### Domain
-- [x] `packages/protocol` — Zod schemas
+- [x] `packages/protocol` — Zod schemas (+ `conflict` transfer status, `ConflictAction`)
 - [x] `packages/core` — identity, store, demo peers, formatters
 - [x] Pairing code + simulate incoming; simulated transfers
+- [x] Conflict resolve: rename / overwrite / skip
+- [x] `applyPairingPayload` for QR scan handshake (demo)
+- [x] File transfer options: direction + forceConflict
 
 ### Web (`apps/web`)
 - [x] Shell, Devices, Clipboard, Transfers, Settings, Device detail + remote FS
-- [x] Pairing dialog
+- [x] Pairing dialog with **real QR** (`qrcode.react`)
+- [x] Incoming pair banner + **conflict banner**
+- [x] File picker (File API) on devices / transfers / remote upload
+- [x] System clipboard read/write helpers
+- [x] Drag-and-drop onto device cards + remote file explorer
+- [x] Keyboard shortcuts (spec §5.10) + Settings cheat sheet
+- [x] PWA service worker disabled in dev (less console noise)
 - [x] Vite production build OK
 - [x] **Fixed max update depth** (`useLyraSelector` snapshot cache + shallowEqual)
-- [x] Playwright verified: home, clipboard, transfers, settings — no pageErrors
+- [x] happy-dom smoke: selector stability PASS
 
 ### Native (`apps/native`)
 - [x] Floating glass tab bar (Lyra blue)
 - [x] Tabs + pair + device detail
+- [x] **Incoming pairing banner** + conflict banner (tabs layout)
+- [x] Real QR display (`react-native-qrcode-svg`)
+- [x] QR payload paste / apply scan path
+- [x] `expo-clipboard` read/write
+- [x] `expo-document-picker` send files
 - [x] Same selector fix as web
-- [x] Expo web Playwright verified after Metro `--clear` — Devices list renders, no max-depth
 
 ### Docs / tooling
 - [x] README
@@ -74,8 +88,8 @@ Also: `ToastListener` dismiss via `queueMicrotask` + last-id guard.
 # Headless selector smoke
 cd apps/web && pnpm exec tsx scripts/smoke-render.mjs
 
-# Playwright (requires browsers in ~/.cache/ms-playwright)
-# Web :3001 and Expo :8081 should show UI without max-depth pageErrors
+# Web dev
+pnpm run dev:web   # http://localhost:3001 (or next free port)
 ```
 
 **Note:** Expo in `CI=true` disables Metro reload — restart with `--clear` after store hook changes.
@@ -84,20 +98,13 @@ cd apps/web && pnpm exec tsx scripts/smoke-render.mjs
 
 ## Left to do
 
-### P0 — Polish / remaining UX bugs
-- [ ] Re-test with t3-code browser when MCP handshake works in agent session
-- [ ] Incoming pairing banner on **native** (web only today)
-- [ ] Dialog/Sheet close icons + any Base UI edge cases
-- [ ] Real QR library (replace placeholder grid)
-- [ ] Filter noisy console (PWA/service worker in dev if any)
+### P0 — residual
+- [ ] Re-test with t3-code browser when MCP auth works in agent session
+- [ ] Live camera QR scan on device (native module / Expo Camera) — paste path works today
 
-### P1 — Product completeness (demo backend OK)
-- [ ] File picker (web File API / Expo DocumentPicker)
-- [ ] System clipboard read/write
-- [ ] Mobile QR scan
-- [ ] Conflict handling UI (rename / overwrite / skip)
-- [ ] Keyboard shortcuts (spec §5.10)
-- [ ] Drag-and-drop (spec §5.9)
+### P1 — residual polish
+- [ ] Optional: auto-monitor system clipboard (desktop) vs manual “Read system”
+- [ ] Richer multi-file conflict batch UI
 
 ### P2 — Real networking
 - [ ] Local HTTP(S) peer server
@@ -145,3 +152,5 @@ cd apps/native && CI=true pnpm exec expo start --web --port 8081 --clear
 2. Keep web + native `useLyraSelector` in sync (or extract shared package).
 3. After changing native store hooks: **restart Expo with `--clear`** if `CI=true`.
 4. Update this file when closing milestones.
+5. Keyboard shortcuts live in `apps/web/src/components/keyboard-shortcuts.tsx`.
+6. Conflict demo: Transfers → “Demo conflict”, or download a PDF from remote FS.

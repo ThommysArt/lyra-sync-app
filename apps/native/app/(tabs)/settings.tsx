@@ -14,6 +14,10 @@ export default function SettingsScreen() {
   const identity = useLyraSelector((s) => s.identity);
   const settings = useLyraSelector((s) => s.settings);
   const devices = useLyraSelector((s) => s.devices);
+  const hasTopBanners = useLyraSelector(
+    (s) =>
+      s.incomingPairRequests.length > 0 || s.transfers.some((t) => t.status === "conflict"),
+  );
   const [name, setName] = useState(identity?.name ?? "");
   const bg = isDark ? PAGE_BG.dark : PAGE_BG.light;
   const ink = isDark ? "#F5F7FF" : "#0B1220";
@@ -24,7 +28,11 @@ export default function SettingsScreen() {
   return (
     <View style={{ backgroundColor: bg, flex: 1 }}>
       <ScrollView contentContainerStyle={{ paddingBottom: bottomPad }}>
-        <ScreenHeader title="Settings" subtitle="Identity and defaults" />
+        <ScreenHeader
+          title="Settings"
+          subtitle="Identity and defaults"
+          skipTopInset={hasTopBanners}
+        />
 
         <View style={{ gap: 16, paddingHorizontal: 16 }}>
           <View style={{ backgroundColor: card, borderRadius: 24, padding: 16 }}>

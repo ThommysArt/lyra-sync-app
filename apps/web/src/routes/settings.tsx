@@ -130,6 +130,29 @@ function SettingsPage() {
 
       <Card className="rounded-4xl">
         <CardHeader>
+          <CardTitle>Keyboard shortcuts</CardTitle>
+          <CardDescription>In-app power-user bindings (Ctrl on Windows/Linux, ⌘ on macOS).</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-2 text-sm">
+          {[
+            ["Mod+K", "Focus device search"],
+            ["Mod+,", "Open settings"],
+            ["Mod+E", "Open first online device explorer"],
+            ["Mod+Shift+V", "Send system clipboard to online devices"],
+            ["Mod+Shift+C", "Open clipboard history"],
+            ["Mod+Shift+T", "Open transfers"],
+            ["Mod+Shift+P", "Pause / resume active transfers"],
+          ].map(([keys, desc]) => (
+            <div key={keys} className="flex items-center justify-between gap-3">
+              <span className="text-muted-foreground">{desc}</span>
+              <kbd className="rounded-full bg-muted px-2.5 py-1 font-mono text-xs">{keys}</kbd>
+            </div>
+          ))}
+        </CardContent>
+      </Card>
+
+      <Card className="rounded-4xl">
+        <CardHeader>
           <CardTitle>Paired devices</CardTitle>
           <CardDescription>
             {devices.length} device{devices.length === 1 ? "" : "s"} in your trusted network.

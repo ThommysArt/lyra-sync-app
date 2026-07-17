@@ -13,7 +13,9 @@ import { useTheme } from "next-themes";
 import { Button } from "@lyra-sync-app/ui/components/button";
 import { cn } from "@/lib/utils";
 import { useLyraSelector } from "@/lib/lyra";
+import { ConflictBanner } from "@/components/conflict-banner";
 import { IncomingPairBanner } from "@/components/incoming-pair-banner";
+import { KeyboardShortcuts } from "@/components/keyboard-shortcuts";
 import { ToastListener } from "@/components/toast-listener";
 
 const nav = [
@@ -102,6 +104,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </header>
 
         <IncomingPairBanner />
+        <ConflictBanner />
         <main className="min-h-0 flex-1 overflow-auto">{children}</main>
 
         <nav className="flex border-t border-border/70 bg-background/95 px-2 py-2 backdrop-blur md:hidden">
@@ -124,6 +127,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </nav>
       </div>
       <ToastListener />
+      <KeyboardShortcuts />
     </div>
   );
 }

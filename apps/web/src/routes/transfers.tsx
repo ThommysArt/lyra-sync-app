@@ -5,12 +5,13 @@ import {
   formatSpeed,
 } from "@lyra-sync-app/core";
 import { createFileRoute } from "@tanstack/react-router";
-import { Pause, Play, X } from "lucide-react";
+import { AlertTriangle, Pause, Play, Upload, X } from "lucide-react";
 
 import { Badge } from "@lyra-sync-app/ui/components/badge";
 import { Button } from "@lyra-sync-app/ui/components/button";
 import { Card, CardContent } from "@lyra-sync-app/ui/components/card";
 import { Progress } from "@lyra-sync-app/ui/components/progress";
+import { pickFiles } from "@/lib/file-picker";
 import { useLyraSelector, useLyraStore } from "@/lib/lyra";
 
 export const Route = createFileRoute("/transfers")({
@@ -21,6 +22,7 @@ function statusVariant(status: string): "default" | "secondary" | "destructive" 
   if (status === "completed") return "default";
   if (status === "failed" || status === "cancelled") return "destructive";
   if (status === "transferring") return "secondary";
+  if (status === "conflict") return "outline";
   return "outline";
 }
 
@@ -31,6 +33,16 @@ function TransfersPage() {
   );
   const onlineIds = useLyraSelector((s) => s.devices.filter((d) => d.online).map((d) => d.id));
 
+  const pickAndSend = async () => {
+    if (onlineIds.length === 0) return;
+    const files = await pickFiles({ multiple: true });
+    if (files.length === 0) return;
+    store.startFileTransfer(
+      onlineIds.slice(0, 2),
+      files.map((f) => ({ name: f.name, size: f.size, mimeType: f.mimeType })),
+    );
+  };
+
   return (
     <div className="mx-auto max-w-3xl space-y-6 p-4 md:p-8">
       <div className="flex flex-wrap items-end justify-between gap-3">
@@ -40,17 +52,18 @@ function TransfersPage() {
             Active sessions and history. Pause, resume, or cancel anytime.
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
+          <Button size="sm" onClick={() => void pickAndSend()}>
+            <Upload className="size-4" />
+            Send files
+          </Button>
           <Button
             size="sm"
-            onClick={() => {
-              if (onlineIds.length === 0) return;
-              store.startFileTransfer(onlineIds.slice(0, 2), [
-                { name: "photos-export.zip", size: 64_000_000, mimeType: "application/zip" },
-              ]);
-            }}
+            variant="outline"
+            onClick={() => store.simulateIncomingConflict()}
           >
-            Demo send
+            <AlertTriangle className="size-4" />
+            Demo conflict
           </Button>
           <Button size="sm" variant="outline" onClick={() => store.clearTransferHistory()}>
             Clear history
@@ -81,7 +94,39 @@ function TransfersPage() {
                     </Badge>
                   </div>
 
-                  {(tx.status === "transferring" || tx.status === "paused" || tx.status === "pending") && (
+                  {tx.status === "conflict" && (
+                    <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-3">
+                      <p className="text-sm font-medium">
+                        “{tx.conflictFileName ?? names}” already exists
+                      </p>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => store.resolveTransferConflict(tx.id, "skip")}
+                        >
+                          Skip
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => store.resolveTransferConflict(tx.id, "rename")}
+                        >
+                          Rename
+                        </Button>
+                        <Button
+                          size="sm"
+                          onClick={() => store.resolveTransferConflict(tx.id, "overwrite")}
+                        >
+                          Overwrite
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+
+                  {(tx.status === "transferring" ||
+                    tx.status === "paused" ||
+                    tx.status === "pending") && (
                     <div className="space-y-1.5">
                       <Progress value={pct} className="h-2" />
                       <div className="flex justify-between text-xs text-muted-foreground">
@@ -97,6 +142,7 @@ function TransfersPage() {
                     <p className="text-xs text-muted-foreground">
                       Done in {tx.durationMs ? `${Math.round(tx.durationMs / 1000)}s` : "—"} · avg{" "}
                       {formatSpeed(tx.averageSpeedBps)}
+                      {tx.conflictResolved ? ` · resolved via ${tx.conflictResolved}` : ""}
                     </p>
                   )}
 

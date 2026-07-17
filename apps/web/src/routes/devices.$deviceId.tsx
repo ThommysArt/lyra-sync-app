@@ -23,6 +23,9 @@ import { Input } from "@lyra-sync-app/ui/components/input";
 import { Label } from "@lyra-sync-app/ui/components/label";
 import { Separator } from "@lyra-sync-app/ui/components/separator";
 import { Switch } from "@lyra-sync-app/ui/components/switch";
+import { DropZone } from "@/components/drop-zone";
+import { readSystemClipboard } from "@/lib/clipboard";
+import { pickFiles } from "@/lib/file-picker";
 import { useLyraSelector, useLyraStore } from "@/lib/lyra";
 
 export const Route = createFileRoute("/devices/$deviceId")({
@@ -56,6 +59,33 @@ function DeviceDetailPage() {
   const displayName = device.nickname || device.name;
   const parentPath =
     path === "/" ? null : path.split("/").slice(0, -1).join("/") || "/";
+
+  const uploadLocal = async () => {
+    const files = await pickFiles({ multiple: true });
+    if (files.length === 0) return;
+    store.startFileTransfer(
+      [device.id],
+      files.map((f) => ({ name: f.name, size: f.size, mimeType: f.mimeType })),
+    );
+  };
+
+  const downloadSelected = () => {
+    const files = entries
+      .filter((e) => selected.includes(e.path) && !e.isDirectory)
+      .map((e) => ({
+        name: e.name,
+        size: e.size ?? 1024,
+        mimeType: e.mimeType,
+      }));
+    if (files.length === 0) return;
+    // Demo: first file triggers conflict UI when named report.pdf or always for multi-select first
+    const forceConflict = files.some((f) => f.name === "report.pdf" || f.name.endsWith(".pdf"));
+    store.startFileTransfer([device.id], files, {
+      direction: "received",
+      forceConflict,
+    });
+    setSelected([]);
+  };
 
   return (
     <div className="mx-auto max-w-4xl space-y-6 p-4 md:p-8">
@@ -98,10 +128,7 @@ function DeviceDetailPage() {
                   placeholder={device.name}
                   className="rounded-full"
                 />
-                <Button
-                  size="sm"
-                  onClick={() => store.renameDevice(device.id, nickname)}
-                >
+                <Button size="sm" onClick={() => store.renameDevice(device.id, nickname)}>
                   Save
                 </Button>
               </div>
@@ -131,22 +158,17 @@ function DeviceDetailPage() {
               <Button
                 variant="outline"
                 disabled={!device.online}
-                onClick={() => store.pushClipboardText("Quick share from device detail", [device.id])}
+                onClick={() => {
+                  void readSystemClipboard().then((text) => {
+                    store.pushClipboardText(text || "Quick share from device detail", [device.id]);
+                  });
+                }}
               >
                 Send clipboard
               </Button>
-              <Button
-                variant="outline"
-                disabled={!device.online}
-                onClick={() =>
-                  store.startFileTransfer(
-                    [device.id],
-                    [{ name: "upload.bin", size: 8_000_000 }],
-                  )
-                }
-              >
+              <Button variant="outline" disabled={!device.online} onClick={() => void uploadLocal()}>
                 <Upload className="size-4" />
-                Upload sample
+                Upload files
               </Button>
               <Button variant="destructive" onClick={() => store.unpairDevice(device.id)}>
                 Unpair device
@@ -155,109 +177,119 @@ function DeviceDetailPage() {
           </CardContent>
         </Card>
 
-        <Card className="rounded-4xl lg:col-span-3">
-          <CardHeader className="flex-row items-center justify-between space-y-0">
-            <CardTitle className="text-base">Remote files</CardTitle>
-            <div className="flex gap-2">
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={selected.length === 0 || !device.online}
-                onClick={() => {
-                  const files = entries
-                    .filter((e) => selected.includes(e.path) && !e.isDirectory)
-                    .map((e) => ({
-                      name: e.name,
-                      size: e.size ?? 1024,
-                      mimeType: e.mimeType,
-                    }));
-                  if (files.length) {
-                    store.startFileTransfer([device.id], files);
-                    setSelected([]);
-                  }
-                }}
-              >
-                <Download className="size-4" />
-                Download
-              </Button>
-            </div>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <div className="flex items-center gap-2 text-xs text-muted-foreground">
-              {parentPath !== null && (
-                <button
-                  type="button"
-                  className="text-primary hover:underline"
-                  onClick={() => {
-                    setPath(parentPath);
-                    setSelected([]);
-                  }}
+        <DropZone
+          className="rounded-4xl lg:col-span-3"
+          disabled={!device.online}
+          label={`Upload to ${path}`}
+          onDropFiles={(files) => {
+            store.startFileTransfer(
+              [device.id],
+              files.map((f) => ({ name: f.name, size: f.size, mimeType: f.mimeType })),
+            );
+          }}
+        >
+          <Card className="h-full rounded-4xl">
+            <CardHeader className="flex-row items-center justify-between space-y-0">
+              <CardTitle className="text-base">Remote files</CardTitle>
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={!device.online}
+                  onClick={() => void uploadLocal()}
                 >
-                  Up
-                </button>
-              )}
-              <span className="truncate font-mono">{path}</span>
-            </div>
-
-            {!device.online ? (
-              <p className="py-8 text-center text-sm text-muted-foreground">
-                Device offline — browse when it comes back.
-              </p>
-            ) : (
-              <div className="divide-y divide-border/60 overflow-hidden rounded-3xl border border-border/70">
-                {entries.map((entry) => {
-                  const isSelected = selected.includes(entry.path);
-                  return (
-                    <div
-                      key={entry.path}
-                      className="flex items-center gap-2 px-3 py-2.5 hover:bg-muted/40"
-                    >
-                      <input
-                        type="checkbox"
-                        className="size-4 rounded"
-                        checked={isSelected}
-                        onChange={() => {
-                          setSelected((prev) =>
-                            isSelected
-                              ? prev.filter((p) => p !== entry.path)
-                              : [...prev, entry.path],
-                          );
-                        }}
-                      />
-                      <button
-                        type="button"
-                        className="flex min-w-0 flex-1 items-center gap-2 text-left"
-                        onClick={() => {
-                          if (entry.isDirectory) {
-                            setPath(entry.path);
-                            setSelected([]);
-                          }
-                        }}
-                      >
-                        {entry.isDirectory ? (
-                          <Folder className="size-4 shrink-0 text-primary" />
-                        ) : (
-                          <File className="size-4 shrink-0 text-muted-foreground" />
-                        )}
-                        <span className="truncate text-sm">{entry.name}</span>
-                        {entry.isDirectory ? (
-                          <ChevronRight className="ml-auto size-4 shrink-0 text-muted-foreground" />
-                        ) : (
-                          <span className="ml-auto shrink-0 text-xs text-muted-foreground">
-                            {entry.size != null ? formatBytes(entry.size) : ""}
-                          </span>
-                        )}
-                      </button>
-                    </div>
-                  );
-                })}
+                  <Upload className="size-4" />
+                  Upload
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={selected.length === 0 || !device.online}
+                  onClick={downloadSelected}
+                >
+                  <Download className="size-4" />
+                  Download
+                </Button>
               </div>
-            )}
-            <p className="text-xs text-muted-foreground">
-              Smart folders (Photos, Documents, Downloads, Desktop, Screenshots) appear at the root.
-            </p>
-          </CardContent>
-        </Card>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                {parentPath !== null && (
+                  <button
+                    type="button"
+                    className="text-primary hover:underline"
+                    onClick={() => {
+                      setPath(parentPath);
+                      setSelected([]);
+                    }}
+                  >
+                    Up
+                  </button>
+                )}
+                <span className="truncate font-mono">{path}</span>
+              </div>
+
+              {!device.online ? (
+                <p className="py-8 text-center text-sm text-muted-foreground">
+                  Device offline — browse when it comes back.
+                </p>
+              ) : (
+                <div className="divide-y divide-border/60 overflow-hidden rounded-3xl border border-border/70">
+                  {entries.map((entry) => {
+                    const isSelected = selected.includes(entry.path);
+                    return (
+                      <div
+                        key={entry.path}
+                        className="flex items-center gap-2 px-3 py-2.5 hover:bg-muted/40"
+                      >
+                        <input
+                          type="checkbox"
+                          className="size-4 rounded"
+                          checked={isSelected}
+                          onChange={() => {
+                            setSelected((prev) =>
+                              isSelected
+                                ? prev.filter((p) => p !== entry.path)
+                                : [...prev, entry.path],
+                            );
+                          }}
+                        />
+                        <button
+                          type="button"
+                          className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                          onClick={() => {
+                            if (entry.isDirectory) {
+                              setPath(entry.path);
+                              setSelected([]);
+                            }
+                          }}
+                        >
+                          {entry.isDirectory ? (
+                            <Folder className="size-4 shrink-0 text-primary" />
+                          ) : (
+                            <File className="size-4 shrink-0 text-muted-foreground" />
+                          )}
+                          <span className="truncate text-sm">{entry.name}</span>
+                          {entry.isDirectory ? (
+                            <ChevronRight className="ml-auto size-4 shrink-0 text-muted-foreground" />
+                          ) : (
+                            <span className="ml-auto shrink-0 text-xs text-muted-foreground">
+                              {entry.size != null ? formatBytes(entry.size) : ""}
+                            </span>
+                          )}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              <p className="text-xs text-muted-foreground">
+                Smart folders appear at the root. Drop files here to upload. Downloading a PDF may
+                prompt conflict resolution.
+              </p>
+            </CardContent>
+          </Card>
+        </DropZone>
       </div>
     </div>
   );

@@ -1,6 +1,7 @@
 import type {
   AppSettings,
   ClipboardItem,
+  ConflictAction,
   DeviceIdentity,
   FileEntry,
   PairedDevice,
@@ -74,11 +75,23 @@ export type LyraStore = {
   removeClipboardItem: (id: string) => void;
   resendClipboardItem: (id: string, targetDeviceIds: string[]) => void;
   setLocalClipboardText: (text: string) => void;
-  startFileTransfer: (deviceIds: string[], files: { name: string; size: number; mimeType?: string }[]) => void;
+  startFileTransfer: (
+    deviceIds: string[],
+    files: { name: string; size: number; mimeType?: string }[],
+    options?: { direction?: "sent" | "received"; forceConflict?: boolean },
+  ) => void;
   setTransferStatus: (id: string, status: TransferStatus) => void;
+  /** Resolve a transfer waiting on rename / overwrite / skip */
+  resolveTransferConflict: (id: string, action: ConflictAction) => void;
+  /** Demo: receive a file that already exists locally */
+  simulateIncomingConflict: () => void;
   clearTransferHistory: () => void;
   listRemoteFiles: (deviceId: string, path: string) => FileEntry[];
   sendUrl: (url: string, deviceIds: string[]) => void;
+  /** Apply a pairing payload from a scanned QR (demo handshake) */
+  applyPairingPayload: (
+    payload: PairingPayload | string,
+  ) => { ok: true; device: PairedDevice } | { ok: false; error: string };
   dismissToast: () => void;
 };
 
@@ -118,6 +131,46 @@ function notify(
     ...s,
     toast: { id: generateId("toast"), message, tone },
   }));
+}
+
+function renameWithSuffix(name: string): string {
+  const dot = name.lastIndexOf(".");
+  if (dot <= 0) return `${name} (1)`;
+  return `${name.slice(0, dot)} (1)${name.slice(dot)}`;
+}
+
+function simulateTransferProgress(
+  store: LyraStore,
+  set: (fn: (s: LyraState) => LyraState) => void,
+  transferId: string,
+) {
+  const initial = store.getState().transfers.find((t) => t.id === transferId);
+  let progress =
+    initial && initial.totalBytes > 0 ? initial.transferredBytes / initial.totalBytes : 0;
+  const tick = () => {
+    const current = store.getState().transfers.find((t) => t.id === transferId);
+    if (!current || current.status !== "transferring") return;
+    progress += 0.12 + Math.random() * 0.15;
+    if (progress >= 1) {
+      store.setTransferStatus(transferId, "completed");
+      return;
+    }
+    set((st) => ({
+      ...st,
+      transfers: st.transfers.map((t) =>
+        t.id === transferId
+          ? {
+              ...t,
+              transferredBytes: Math.floor(t.totalBytes * progress),
+              updatedAt: Date.now(),
+              status: "transferring" as const,
+            }
+          : t,
+      ),
+    }));
+    setTimeout(tick, 400);
+  };
+  setTimeout(tick, 300);
 }
 
 export function createLyraStore(options?: {
@@ -457,16 +510,19 @@ export function createLyraStore(options?: {
     setLocalClipboardText: (text) => {
       set((s) => ({ ...s, localClipboardText: text }));
     },
-    startFileTransfer: (deviceIds, files) => {
+    startFileTransfer: (deviceIds, files, options) => {
       const s = getState();
       if (!s.identity || files.length === 0 || deviceIds.length === 0) return;
+      const direction = options?.direction ?? "sent";
+      const forceConflict = options?.forceConflict ?? false;
       const totalBytes = files.reduce((acc, f) => acc + f.size, 0);
       const now = Date.now();
       const newTransfers: Transfer[] = deviceIds.map((deviceId) => {
         const device = s.devices.find((d) => d.id === deviceId);
+        const status: TransferStatus = forceConflict ? "conflict" : "transferring";
         return {
           id: generateId("tx"),
-          direction: "sent" as const,
+          direction,
           deviceId,
           deviceName: device?.nickname || device?.name || "Device",
           files: files.map((f) => ({
@@ -476,43 +532,33 @@ export function createLyraStore(options?: {
           })),
           totalBytes,
           transferredBytes: 0,
-          status: "transferring" as const,
+          status,
           createdAt: now,
           updatedAt: now,
+          conflictFileName: forceConflict ? files[0]?.name : undefined,
         };
       });
       set((st) => ({ ...st, transfers: [...newTransfers, ...st.transfers] }));
       persist();
-      notify(set, `Sending to ${deviceIds.length} device(s)…`, "info");
+      if (forceConflict) {
+        notify(set, "File conflict — choose rename, overwrite, or skip", "info");
+        return;
+      }
+      notify(
+        set,
+        direction === "sent"
+          ? `Sending to ${deviceIds.length} device(s)…`
+          : `Receiving from ${deviceIds.length} device(s)…`,
+        "info",
+      );
 
       // Simulate progress for demo
       for (const tx of newTransfers) {
-        let progress = 0;
-        const tick = () => {
-          progress += 0.12 + Math.random() * 0.15;
-          if (progress >= 1) {
-            store.setTransferStatus(tx.id, "completed");
-            return;
-          }
-          set((st) => ({
-            ...st,
-            transfers: st.transfers.map((t) =>
-              t.id === tx.id
-                ? {
-                    ...t,
-                    transferredBytes: Math.floor(t.totalBytes * progress),
-                    updatedAt: Date.now(),
-                    status: "transferring" as const,
-                  }
-                : t,
-            ),
-          }));
-          setTimeout(tick, 400);
-        };
-        setTimeout(tick, 300);
+        simulateTransferProgress(store, set, tx.id);
       }
     },
     setTransferStatus: (id, status) => {
+      const prev = getState().transfers.find((t) => t.id === id);
       set((s) => ({
         ...s,
         transfers: s.transfers.map((t) => {
@@ -533,12 +579,91 @@ export function createLyraStore(options?: {
         }),
       }));
       persist();
+      // Resume simulation only when entering transferring from a non-active state
+      if (status === "transferring" && prev && prev.status !== "transferring") {
+        simulateTransferProgress(store, set, id);
+      }
+    },
+    resolveTransferConflict: (id, action) => {
+      const s = getState();
+      const tx = s.transfers.find((t) => t.id === id);
+      if (!tx || tx.status !== "conflict") return;
+
+      if (action === "skip") {
+        set((st) => ({
+          ...st,
+          transfers: st.transfers.map((t) =>
+            t.id === id
+              ? {
+                  ...t,
+                  status: "cancelled" as const,
+                  conflictResolved: action,
+                  updatedAt: Date.now(),
+                }
+              : t,
+          ),
+        }));
+        persist();
+        notify(set, `Skipped ${tx.conflictFileName ?? "file"}`, "info");
+        return;
+      }
+
+      const renamedFiles =
+        action === "rename"
+          ? tx.files.map((f, i) =>
+              i === 0 || f.name === tx.conflictFileName
+                ? { ...f, name: renameWithSuffix(f.name) }
+                : f,
+            )
+          : tx.files;
+
+      set((st) => ({
+        ...st,
+        transfers: st.transfers.map((t) =>
+          t.id === id
+            ? {
+                ...t,
+                files: renamedFiles,
+                status: "transferring" as const,
+                conflictResolved: action,
+                conflictFileName: undefined,
+                updatedAt: Date.now(),
+              }
+            : t,
+        ),
+      }));
+      persist();
+      notify(
+        set,
+        action === "rename"
+          ? `Renamed and continuing transfer`
+          : `Overwriting ${tx.conflictFileName ?? "file"}…`,
+        "info",
+      );
+      simulateTransferProgress(store, set, id);
+    },
+    simulateIncomingConflict: () => {
+      const s = getState();
+      const peer = s.devices.find((d) => d.online) ?? s.devices[0];
+      if (!peer) {
+        notify(set, "Pair a device first to simulate a conflict", "error");
+        return;
+      }
+      store.startFileTransfer(
+        [peer.id],
+        [{ name: "report.pdf", size: 2_400_000, mimeType: "application/pdf" }],
+        { direction: "received", forceConflict: true },
+      );
     },
     clearTransferHistory: () => {
       set((s) => ({
         ...s,
-        transfers: s.transfers.filter((t) =>
-          t.status === "transferring" || t.status === "paused" || t.status === "pending",
+        transfers: s.transfers.filter(
+          (t) =>
+            t.status === "transferring" ||
+            t.status === "paused" ||
+            t.status === "pending" ||
+            t.status === "conflict",
         ),
       }));
       persist();
@@ -551,6 +676,53 @@ export function createLyraStore(options?: {
         `URL sent to ${deviceIds.length} device${deviceIds.length === 1 ? "" : "s"}`,
         "success",
       );
+    },
+    applyPairingPayload: (raw) => {
+      const s = getState();
+      if (!s.identity) return { ok: false as const, error: "Not ready" };
+
+      let payload: PairingPayload;
+      try {
+        payload = typeof raw === "string" ? (JSON.parse(raw) as PairingPayload) : raw;
+      } catch {
+        return { ok: false as const, error: "Invalid QR payload" };
+      }
+
+      if (!payload || payload.version !== 1 || !payload.deviceId || !payload.fingerprint) {
+        return { ok: false as const, error: "Unrecognized pairing data" };
+      }
+      if (payload.deviceId === s.identity.id) {
+        return { ok: false as const, error: "Cannot pair with this device" };
+      }
+      if (payload.expiresAt && payload.expiresAt < Date.now()) {
+        return { ok: false as const, error: "Pairing code expired" };
+      }
+
+      const now = Date.now();
+      const device: PairedDevice = {
+        id: payload.deviceId,
+        name: payload.name || "Scanned device",
+        type: payload.type ?? "desktop",
+        platform: payload.platform ?? "unknown",
+        fingerprint: payload.fingerprint,
+        publicKey: payload.publicKey || generateId("pub"),
+        pairedAt: now,
+        lastSeenAt: now,
+        online: true,
+        connectionType: "local",
+        autoAcceptTransfers: s.settings.autoAcceptTransfers,
+        autoAcceptClipboard: s.settings.autoAcceptClipboard,
+        showInMainList: true,
+      };
+
+      set((st) => ({
+        ...st,
+        devices: [device, ...st.devices.filter((d) => d.id !== device.id)],
+        activePairing: null,
+      }));
+      persist();
+      notify(set, `Paired with ${device.name}`, "success");
+      return { ok: true as const, device };
     },
     dismissToast: () => {
       set((s) => ({ ...s, toast: null }));
