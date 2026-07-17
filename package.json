@@ -1,0 +1,39 @@
+{
+  "name": "lyra-sync-app",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "type": "module",
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "check-types": "turbo run check-types",
+    "dev:native": "turbo run dev -F native",
+    "dev:web": "turbo run dev -F web",
+    "deploy:setup": "vercel link",
+    "dev:vercel": "vercel dev -L",
+    "env:preview": "tsx scripts/sync-vercel-env.ts preview",
+    "env:production": "tsx scripts/sync-vercel-env.ts production",
+    "deploy": "vercel deploy",
+    "deploy:prod": "vercel deploy --prod",
+    "deploy:check": "vercel deploy --dry",
+    "check": "biome check --write ."
+  },
+  "dependencies": {
+    "@lyra-sync-app/env": "workspace:*",
+    "dotenv": "catalog:",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.2",
+    "@lyra-sync-app/config": "workspace:*",
+    "@types/node": "^22.13.14",
+    "tsx": "^4.22.5",
+    "turbo": "^2.10.2",
+    "typescript": "^6",
+    "vercel": "^54.18.6"
+  },
+  "packageManager": "pnpm@10.33.2"
+}
