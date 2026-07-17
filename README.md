@@ -16,9 +16,24 @@ Built from the product spec in [`docs/Lyra-Product-Spec.md`](docs/Lyra-Product-S
 
 ```bash
 pnpm install
-pnpm run dev:web      # http://localhost:3001
-pnpm run dev:native  # Expo (use `pnpm web` in apps/native for Expo web)
+pnpm run dev:web      # http://localhost:3001  (canonical — free the port if Vite jumps to 3002)
+pnpm run dev:native  # Expo (use `pnpm web` in apps/native for Expo web → :8081)
 ```
+
+### Free stuck ports (common after agent sessions)
+
+```bash
+fuser -k 3001/tcp 2>/dev/null || true
+fuser -k 8081/tcp 2>/dev/null || true
+```
+
+### Agent browser (T3 Code)
+
+Agents should drive the **T3 Code collaborative preview**, not ad-hoc Playwright, when working from the T3 desktop app. Full procedure, auth model, and failure fixes:
+
+→ **[`docs/T3-CODE-BROWSER.md`](docs/T3-CODE-BROWSER.md)**
+
+**Critical:** `t3-code` MCP uses a **session Bearer** (30m idle timeout). Long chats without browser use fail with `Auth required` until you **start a new agent thread**.
 
 ## Project layout
 

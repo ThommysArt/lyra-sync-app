@@ -99,7 +99,7 @@ pnpm run dev:web   # http://localhost:3001 (or next free port)
 ## Left to do
 
 ### P0 — residual
-- [ ] Re-test with t3-code browser when MCP auth works in agent session
+- [ ] Re-test UI in a **fresh** T3 agent thread (this session’s MCP bearer expired — see `docs/T3-CODE-BROWSER.md`)
 - [ ] Live camera QR scan on device (native module / Expo Camera) — paste path works today
 
 ### P1 — residual polish
