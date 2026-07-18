@@ -10,7 +10,8 @@
     "./demo": "./src/demo.ts"
   },
   "scripts": {
-    "check-types": "tsc --noEmit"
+    "check-types": "tsc --noEmit",
+    "test": "tsx --test src/store.test.ts"
   },
   "dependencies": {
     "@lyra-sync-app/net": "workspace:*",
@@ -19,6 +20,8 @@
   },
   "devDependencies": {
     "@lyra-sync-app/config": "workspace:*",
+    "@types/node": "^22.13.14",
+    "tsx": "^4.22.5",
     "typescript": "^6"
   }
 }

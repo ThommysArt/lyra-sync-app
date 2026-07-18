@@ -73,6 +73,23 @@ function TransfersPage() {
             <AlertTriangle className="size-4" />
             Demo batch
           </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => {
+              if (onlineIds.length === 0) return;
+              store.startFileTransfer(
+                [onlineIds[0]!],
+                [
+                  { name: "movie.mp4", size: 80_000_000, mimeType: "video/mp4" },
+                  { name: "sidecar.json", size: 4_000, mimeType: "application/json" },
+                ],
+                { initialOffset: 32_000_000, verifyIntegrity: true },
+              );
+            }}
+          >
+            Demo resume
+          </Button>
           <Button size="sm" variant="outline" onClick={() => store.clearTransferHistory()}>
             Clear history
           </Button>
@@ -160,6 +177,18 @@ function TransfersPage() {
                       Done in {tx.durationMs ? `${Math.round(tx.durationMs / 1000)}s` : "—"} · avg{" "}
                       {formatSpeed(tx.averageSpeedBps)}
                       {tx.conflictResolved ? ` · resolved via ${tx.conflictResolved}` : ""}
+                      {tx.integrityOk === true
+                        ? " · integrity verified"
+                        : tx.integrityOk === false
+                          ? " · integrity failed"
+                          : ""}
+                    </p>
+                  )}
+
+                  {tx.status === "paused" && (tx.resumeOffset ?? tx.transferredBytes) > 0 && (
+                    <p className="text-xs text-muted-foreground">
+                      Resumable from {formatBytes(tx.resumeOffset ?? tx.transferredBytes)} (
+                      {formatPercent(tx.transferredBytes, tx.totalBytes)}%)
                     </p>
                   )}
 
@@ -177,7 +206,8 @@ function TransfersPage() {
                       <Button
                         size="icon-sm"
                         variant="ghost"
-                        onClick={() => store.setTransferStatus(tx.id, "transferring")}
+                        onClick={() => store.resumeTransfer(tx.id)}
+                        aria-label="Resume transfer"
                       >
                         <Play className="size-4" />
                       </Button>

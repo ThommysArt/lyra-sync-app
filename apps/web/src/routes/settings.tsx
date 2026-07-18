@@ -2,12 +2,14 @@ import { formatFingerprint } from "@lyra-sync-app/core";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useState } from "react";
 
+import { Badge } from "@lyra-sync-app/ui/components/badge";
 import { Button } from "@lyra-sync-app/ui/components/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@lyra-sync-app/ui/components/card";
 import { Input } from "@lyra-sync-app/ui/components/input";
 import { Label } from "@lyra-sync-app/ui/components/label";
 import { Separator } from "@lyra-sync-app/ui/components/separator";
 import { Switch } from "@lyra-sync-app/ui/components/switch";
+import { isDesktopShell } from "@/lib/desktop-bridge";
 import { useLyraSelector, useLyraStore } from "@/lib/lyra";
 
 export const Route = createFileRoute("/settings")({
@@ -19,7 +21,11 @@ function SettingsPage() {
   const identity = useLyraSelector((s) => s.identity);
   const settings = useLyraSelector((s) => s.settings);
   const devices = useLyraSelector((s) => s.devices);
+  const peerServer = useLyraSelector((s) => s.peerServer);
+  const lastProbeSummary = useLyraSelector((s) => s.lastProbeSummary);
   const [name, setName] = useState(identity?.name ?? "");
+  const [probeBusy, setProbeBusy] = useState(false);
+  const desktop = isDesktopShell();
 
   return (
     <div className="mx-auto max-w-2xl space-y-6 p-4 md:p-8">
@@ -114,6 +120,13 @@ function SettingsPage() {
             onCheckedChange={(v) => store.updateSettings({ tailscaleEnabled: v })}
           />
           <Separator />
+          <SettingRow
+            label="Verify transfer integrity"
+            description="Check SHA-256 after transfers complete when checksums are available."
+            checked={settings.verifyTransferIntegrity}
+            onCheckedChange={(v) => store.updateSettings({ verifyTransferIntegrity: v })}
+          />
+          <Separator />
           <div className="flex items-center justify-between gap-4">
             <div>
               <p className="text-sm font-medium">Clipboard history limit</p>
@@ -132,6 +145,95 @@ function SettingsPage() {
               }
             />
           </div>
+          <Separator />
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <p className="text-sm font-medium">Peer listen port</p>
+              <p className="text-xs text-muted-foreground">
+                HTTP port used by the desktop peer server (default 53317).
+              </p>
+            </div>
+            <Input
+              type="number"
+              min={1024}
+              max={65535}
+              className="w-28 rounded-full"
+              value={settings.peerListenPort}
+              onChange={(e) =>
+                store.updateSettings({
+                  peerListenPort: Math.min(65535, Math.max(1024, Number(e.target.value) || 53317)),
+                })
+              }
+            />
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card className="rounded-4xl">
+        <CardHeader>
+          <CardTitle>Network</CardTitle>
+          <CardDescription>
+            Local peer server, discovery, and Tailscale probing.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant={peerServer.running ? "default" : "secondary"}>
+              {peerServer.running ? "Peer server running" : "Peer server idle"}
+            </Badge>
+            <Badge variant={peerServer.discoveryActive ? "default" : "outline"}>
+              {peerServer.discoveryActive ? "Discovery active" : "Discovery off"}
+            </Badge>
+            {desktop ? (
+              <Badge variant="outline">Desktop shell</Badge>
+            ) : (
+              <Badge variant="outline">Browser</Badge>
+            )}
+          </div>
+          <div className="rounded-3xl bg-muted/60 px-4 py-3 text-sm">
+            <p className="text-xs text-muted-foreground">Listen endpoint</p>
+            <p className="font-mono text-sm">
+              {peerServer.url ??
+                (desktop
+                  ? "Starting…"
+                  : `Browser mode — run desktop shell or peer-server on :${settings.peerListenPort}`)}
+            </p>
+            {peerServer.lastError ? (
+              <p className="mt-2 text-xs text-destructive">{peerServer.lastError}</p>
+            ) : null}
+            {lastProbeSummary ? (
+              <p className="mt-2 text-xs text-muted-foreground">{lastProbeSummary}</p>
+            ) : null}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={probeBusy}
+              onClick={() => {
+                setProbeBusy(true);
+                void Promise.resolve(store.refreshDiscovery()).finally(() => setProbeBusy(false));
+              }}
+            >
+              Refresh discovery
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={probeBusy || !settings.tailscaleEnabled}
+              onClick={() => {
+                setProbeBusy(true);
+                void store.probeTailscalePeers().finally(() => setProbeBusy(false));
+              }}
+            >
+              Probe Tailscale peers
+            </Button>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Real sockets run in the Electron desktop shell or{" "}
+            <code className="rounded bg-muted px-1">pnpm peer-server</code>. The browser UI probes
+            known hosts via HTTP <code className="rounded bg-muted px-1">/lyra/info</code>.
+          </p>
         </CardContent>
       </Card>
 

@@ -57,9 +57,11 @@ function DevicesPage() {
   };
 
   const addManual = () => {
+    const host = manualHost.trim();
+    const port = Number(manualPort) || 53317;
     const result = store.addManualPeer({
-      host: manualHost,
-      port: Number(manualPort) || 53317,
+      host,
+      port,
       name: manualName || undefined,
     });
     if (!result.ok) {
@@ -70,6 +72,8 @@ function DevicesPage() {
     setManualHost("");
     setManualName("");
     setManualPort("53317");
+    // Live HTTP probe when a peer server is reachable
+    void store.probePeerAddress({ host, port });
   };
 
   return (

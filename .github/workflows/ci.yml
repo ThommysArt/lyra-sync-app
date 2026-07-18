@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @lyra-sync-app/net test
+      - run: pnpm --filter @lyra-sync-app/core test
+      - run: pnpm --filter @lyra-sync-app/core check-types
+      - run: pnpm --filter @lyra-sync-app/protocol check-types
+      - name: happy-dom selector smoke
+        run: pnpm --filter web test:unit
+
+  e2e:
+    name: Playwright e2e
+    runs-on: ubuntu-latest
+    needs: unit
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Install Playwright browser
+        run: pnpm --filter web exec playwright install --with-deps chromium
+      - name: Run e2e
+        run: pnpm --filter web test:e2e
+        env:
+          CI: true
