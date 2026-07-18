@@ -68,8 +68,19 @@ export const PairedDeviceSchema = z.object({
   autoAcceptClipboard: z.boolean(),
   showInMainList: z.boolean(),
   status: DeviceStatusSchema.optional(),
+  /** Reachability for manual / Tailscale / discovered peers */
+  host: z.string().optional(),
+  port: z.number().int().positive().optional(),
 });
 export type PairedDevice = z.infer<typeof PairedDeviceSchema>;
+
+/** Well-known peer listen endpoint (P2 transport). */
+export const PeerEndpointSchema = z.object({
+  host: z.string().min(1),
+  port: z.number().int().positive().default(53317),
+  protocol: z.enum(["http", "https"]).default("http"),
+});
+export type PeerEndpoint = z.infer<typeof PeerEndpointSchema>;
 
 export const ClipboardContentTypeSchema = z.enum(["text", "image"]);
 export type ClipboardContentType = z.infer<typeof ClipboardContentTypeSchema>;

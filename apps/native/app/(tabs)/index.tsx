@@ -7,7 +7,8 @@ import { Ionicons } from "@expo/vector-icons";
 import * as Clipboard from "expo-clipboard";
 import * as DocumentPicker from "expo-document-picker";
 import { router } from "expo-router";
-import { Pressable, ScrollView, Text, View } from "react-native";
+import { useState } from "react";
+import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 
 import { ScreenHeader, useTabBottomPadding } from "@/components/ui/screen-header";
 import { useAppTheme } from "@/contexts/app-theme-context";
@@ -25,6 +26,8 @@ export default function DevicesScreen() {
   const devices = useLyraSelector((s) =>
     s.devices.filter((d) => d.showInMainList).sort((a, b) => Number(b.online) - Number(a.online)),
   );
+  const discoveryEnabled = useLyraSelector((s) => s.settings.discoveryEnabled);
+  const [manualHost, setManualHost] = useState("");
   const bg = isDark ? PAGE_BG.dark : PAGE_BG.light;
   const ink = isDark ? "#F5F7FF" : "#0B1220";
   const muted = isDark ? "rgba(255,255,255,0.55)" : "rgba(0,0,0,0.45)";
@@ -71,23 +74,81 @@ export default function DevicesScreen() {
           subtitle="Your trusted private network"
           skipTopInset={hasTopBanners}
           right={
-            <Pressable
-              onPress={() => router.push("/pair")}
-              style={{
-                alignItems: "center",
-                backgroundColor: accent,
-                borderRadius: 999,
-                height: 40,
-                justifyContent: "center",
-                width: 40,
-              }}
-            >
-              <Ionicons color="#fff" name="link" size={20} />
-            </Pressable>
+            <View style={{ flexDirection: "row", gap: 8 }}>
+              <Pressable
+                disabled={!discoveryEnabled}
+                onPress={() => store.refreshDiscovery()}
+                style={{
+                  alignItems: "center",
+                  backgroundColor: isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)",
+                  borderRadius: 999,
+                  height: 40,
+                  justifyContent: "center",
+                  opacity: discoveryEnabled ? 1 : 0.45,
+                  width: 40,
+                }}
+              >
+                <Ionicons color={ink} name="radio-outline" size={20} />
+              </Pressable>
+              <Pressable
+                onPress={() => router.push("/pair")}
+                style={{
+                  alignItems: "center",
+                  backgroundColor: accent,
+                  borderRadius: 999,
+                  height: 40,
+                  justifyContent: "center",
+                  width: 40,
+                }}
+              >
+                <Ionicons color="#fff" name="link" size={20} />
+              </Pressable>
+            </View>
           }
         />
 
         <View style={{ gap: 12, paddingHorizontal: 16 }}>
+          <View style={{ backgroundColor: card, borderRadius: 22, gap: 10, padding: 14 }}>
+            <Text style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 14 }}>
+              Add by address
+            </Text>
+            <TextInput
+              onChangeText={setManualHost}
+              placeholder="IP or hostname"
+              placeholderTextColor={muted}
+              style={{
+                backgroundColor: isDark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.04)",
+                borderRadius: 14,
+                color: ink,
+                fontFamily: fonts.regular,
+                fontSize: 15,
+                paddingHorizontal: 12,
+                paddingVertical: 10,
+              }}
+              value={manualHost}
+            />
+            <Pressable
+              disabled={!manualHost.trim()}
+              onPress={() => {
+                const result = store.addManualPeer({ host: manualHost });
+                if (result.ok) setManualHost("");
+              }}
+              style={{
+                alignItems: "center",
+                alignSelf: "flex-start",
+                backgroundColor: accent,
+                borderRadius: 999,
+                opacity: manualHost.trim() ? 1 : 0.5,
+                paddingHorizontal: 14,
+                paddingVertical: 8,
+              }}
+            >
+              <Text style={{ color: "#fff", fontFamily: fonts.semiBold, fontSize: 13 }}>
+                Add peer
+              </Text>
+            </Pressable>
+          </View>
+
           <Pressable
             onPress={() => {
               const online = devices.filter((d) => d.online).map((d) => d.id);

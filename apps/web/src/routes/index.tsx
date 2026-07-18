@@ -1,9 +1,11 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { Link2, Plus, Send } from "lucide-react";
+import { Link2, Plus, Radar, Send } from "lucide-react";
 import { useState } from "react";
 
 import { Button } from "@lyra-sync-app/ui/components/button";
+import { Card, CardContent } from "@lyra-sync-app/ui/components/card";
 import { Input } from "@lyra-sync-app/ui/components/input";
+import { Label } from "@lyra-sync-app/ui/components/label";
 import { DeviceCard } from "@/components/device-card";
 import { PairingDialog } from "@/components/pairing-dialog";
 import { readSystemClipboard } from "@/lib/clipboard";
@@ -20,13 +22,20 @@ function DevicesPage() {
     s.devices.filter((d) => d.showInMainList).sort((a, b) => Number(b.online) - Number(a.online)),
   );
   const localClipboard = useLyraSelector((s) => s.localClipboardText);
+  const discoveryEnabled = useLyraSelector((s) => s.settings.discoveryEnabled);
   const [query, setQuery] = useState("");
   const [pairOpen, setPairOpen] = useState(false);
   const [url, setUrl] = useState("");
+  const [manualHost, setManualHost] = useState("");
+  const [manualPort, setManualPort] = useState("53317");
+  const [manualName, setManualName] = useState("");
+  const [manualError, setManualError] = useState<string | null>(null);
 
   const filtered = devices.filter((d) => {
     const name = (d.nickname || d.name).toLowerCase();
-    return name.includes(query.toLowerCase());
+    const host = (d.host ?? "").toLowerCase();
+    const q = query.toLowerCase();
+    return name.includes(q) || host.includes(q);
   });
 
   const onlineIds = devices.filter((d) => d.online).map((d) => d.id);
@@ -47,6 +56,22 @@ function DevicesPage() {
     );
   };
 
+  const addManual = () => {
+    const result = store.addManualPeer({
+      host: manualHost,
+      port: Number(manualPort) || 53317,
+      name: manualName || undefined,
+    });
+    if (!result.ok) {
+      setManualError(result.error);
+      return;
+    }
+    setManualError(null);
+    setManualHost("");
+    setManualName("");
+    setManualPort("53317");
+  };
+
   return (
     <div className="mx-auto max-w-5xl space-y-6 p-4 md:p-8">
       <div className="flex flex-wrap items-end justify-between gap-4">
@@ -57,6 +82,19 @@ function DevicesPage() {
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
+          <Button
+            variant="outline"
+            onClick={() => store.refreshDiscovery()}
+            disabled={!discoveryEnabled}
+            title={
+              discoveryEnabled
+                ? "Refresh LAN / known peer discovery"
+                : "Enable network discovery in Settings"
+            }
+          >
+            <Radar className="size-4" />
+            Refresh discovery
+          </Button>
           <Button variant="outline" onClick={() => setPairOpen(true)}>
             <Link2 className="size-4" />
             Pair device
@@ -67,6 +105,62 @@ function DevicesPage() {
           </Button>
         </div>
       </div>
+
+      <Card className="rounded-4xl">
+        <CardContent className="space-y-3 p-4">
+          <div>
+            <p className="text-sm font-medium">Add device by address</p>
+            <p className="text-xs text-muted-foreground">
+              Manual IP / hostname when multicast discovery cannot see a peer (default port 53317).
+            </p>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-[1fr_7rem_1fr_auto]">
+            <div className="space-y-1.5">
+              <Label htmlFor="manual-host" className="text-xs">
+                Host / IP
+              </Label>
+              <Input
+                id="manual-host"
+                value={manualHost}
+                onChange={(e) => setManualHost(e.target.value)}
+                placeholder="192.168.1.42 or laptop.tailnet"
+                className="rounded-full"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="manual-port" className="text-xs">
+                Port
+              </Label>
+              <Input
+                id="manual-port"
+                value={manualPort}
+                onChange={(e) => setManualPort(e.target.value)}
+                className="rounded-full"
+                inputMode="numeric"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="manual-name" className="text-xs">
+                Nickname (optional)
+              </Label>
+              <Input
+                id="manual-name"
+                value={manualName}
+                onChange={(e) => setManualName(e.target.value)}
+                placeholder="Office laptop"
+                className="rounded-full"
+              />
+            </div>
+            <div className="flex items-end">
+              <Button disabled={!manualHost.trim()} onClick={addManual} className="w-full sm:w-auto">
+                <Plus className="size-4" />
+                Add peer
+              </Button>
+            </div>
+          </div>
+          {manualError ? <p className="text-xs text-destructive">{manualError}</p> : null}
+        </CardContent>
+      </Card>
 
       <div className="flex flex-col gap-3 sm:flex-row">
         <Input

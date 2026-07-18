@@ -63,6 +63,17 @@ export type LyraStore = {
   /** Demo helper: simulate an incoming pair request */
   simulateIncomingPair: () => void;
   unpairDevice: (deviceId: string) => void;
+  /**
+   * Manually add a peer by host/IP (and optional port). Used when multicast
+   * discovery cannot see the device (different subnet, Tailscale, etc.).
+   */
+  addManualPeer: (input: {
+    host: string;
+    port?: number;
+    name?: string;
+  }) => { ok: true; device: PairedDevice } | { ok: false; error: string };
+  /** Demo/P2 stub: re-probe known peers and refresh online / lastSeen */
+  refreshDiscovery: () => void;
   renameDevice: (deviceId: string, nickname: string) => void;
   updateDeviceSettings: (
     deviceId: string,
@@ -450,6 +461,104 @@ export function createLyraStore(options?: {
       }));
       persist();
       notify(set, "Device unpaired", "info");
+    },
+    addManualPeer: (input) => {
+      const s = getState();
+      if (!s.identity) return { ok: false as const, error: "Not ready" };
+      const host = input.host.trim();
+      if (!host) return { ok: false as const, error: "Host or IP is required" };
+
+      // Basic host validation: hostname, IPv4, or IPv6-ish
+      if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]*$/.test(host) && !host.includes(":")) {
+        return { ok: false as const, error: "Invalid host" };
+      }
+
+      const port = input.port && input.port > 0 ? input.port : 53317;
+      const existing = s.devices.find(
+        (d) => d.host === host && (d.port ?? 53317) === port,
+      );
+      if (existing) {
+        return { ok: false as const, error: "A peer with that address already exists" };
+      }
+
+      const now = Date.now();
+      const name = (input.name?.trim() || `Peer ${host}`).slice(0, 64);
+      const device: PairedDevice = {
+        id: generateId("manual"),
+        name,
+        type: "desktop",
+        platform: "unknown",
+        fingerprint: generateId("fp").replace("fp_", "").slice(0, 32),
+        publicKey: generateId("pub"),
+        pairedAt: now,
+        lastSeenAt: now,
+        online: true,
+        connectionType: "manual",
+        autoAcceptTransfers: s.settings.autoAcceptTransfers,
+        autoAcceptClipboard: s.settings.autoAcceptClipboard,
+        showInMainList: true,
+        host,
+        port,
+        status: {
+          deviceId: "",
+          batteryLevel: null,
+          isCharging: null,
+          networkType: "unknown",
+          networkName: null,
+          freeStorageBytes: null,
+          updatedAt: now,
+        },
+      };
+      device.status = { ...device.status!, deviceId: device.id };
+
+      set((st) => ({
+        ...st,
+        devices: [device, ...st.devices],
+      }));
+      persist();
+      notify(set, `Added ${name} at ${host}:${port}`, "success");
+      return { ok: true as const, device };
+    },
+    refreshDiscovery: () => {
+      const s = getState();
+      if (!s.settings.discoveryEnabled) {
+        notify(set, "Network discovery is disabled in Settings", "info");
+        return;
+      }
+      const now = Date.now();
+      // Demo mesh: known demo peers come online; manual peers stay reachable;
+      // devices offline > 24h stay offline unless manual.
+      set((st) => ({
+        ...st,
+        devices: st.devices.map((d) => {
+          if (d.connectionType === "manual") {
+            return { ...d, online: true, lastSeenAt: now };
+          }
+          if (d.id.startsWith("demo_") || d.online) {
+            return {
+              ...d,
+              online: true,
+              lastSeenAt: now,
+              status: d.status
+                ? { ...d.status, updatedAt: now }
+                : d.status,
+            };
+          }
+          // Bring offline demo windows PC online if discovery is on
+          if (d.id === "demo_windows") {
+            return {
+              ...d,
+              online: true,
+              lastSeenAt: now,
+              connectionType: d.connectionType === "tailscale" ? "both" : d.connectionType,
+            };
+          }
+          return d;
+        }),
+      }));
+      persist();
+      const online = getState().devices.filter((d) => d.online).length;
+      notify(set, `Discovery refreshed · ${online} device(s) online`, "success");
     },
     renameDevice: (deviceId, nickname) => {
       set((s) => ({

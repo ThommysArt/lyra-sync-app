@@ -1,7 +1,7 @@
 # Lyra — Agent Progress Report
 
-**Last updated:** 2026-07-18 (P1 residual polish)  
-**Status:** MVP UI + demo mesh; P0 + P1 residual polish landed; P2 real networking still open
+**Last updated:** 2026-07-18 (P1 done + P2 discovery foundation)  
+**Status:** MVP UI + demo mesh; P0/P1 done; P2 foundation (manual peers + discovery refresh) started
 
 ---
 
@@ -107,11 +107,14 @@ pnpm run dev:web   # http://localhost:3001 (or next free port)
 - [x] Optional: auto-monitor system clipboard (desktop + foreground native) vs manual “Read system”
 - [x] Richer multi-file conflict batch UI (banner list, Skip/Rename/Overwrite all, multi-file demo)
 
-### P2 — Real networking (next)
-- [ ] Local HTTP(S) peer server
-- [ ] UDP multicast discovery
-- [ ] Auth via fingerprints / keys
-- [ ] Tailscale + manual IP
+### P2 — Real networking
+- [x] Protocol: `discover_announce` / `discover_response`, `PeerEndpoint`, device `host`/`port`
+- [x] Manual peer add by host/IP + port (store + Devices UI web/native)
+- [x] Discovery refresh stub (brings known peers online; respects Settings toggle)
+- [ ] Local HTTP(S) peer server (real sockets)
+- [ ] UDP multicast discovery (real LAN announce)
+- [ ] Auth via fingerprints / keys on wire
+- [ ] Live Tailscale probing (manual IP path exists)
 - [ ] Resumable transfers + integrity
 - [ ] Electron desktop shell
 
@@ -205,6 +208,29 @@ pnpm run dev:web   # :3001
 # Transfers → Demo multi-file / Demo batch → banner batch actions
 cd apps/web && pnpm exec tsx scripts/smoke-render.mjs
 ```
+
+### Browser verification (T3 preview, 2026-07-18)
+
+| Flow | Result |
+|------|--------|
+| Devices shell | PASS |
+| Clipboard auto-monitor toggle + “Watching…” copy | PASS |
+| Settings “Auto-monitor system clipboard” row | PASS |
+| Transfers → Demo multi-file → Rename all | PASS — conflict banner cleared, transfer resumed |
+| Transfers → Demo batch → Skip all | PASS — 3 sessions cancelled; “5 files already exist” banner |
+| Devices → Add peer `100.64.0.12` / Tailscale Node | PASS — Manual badge + host shown |
+| Refresh discovery | PASS — 4 online (Office PC brought online) |
+| happy-dom smoke | PASS |
+
+---
+
+## P2 foundation (2026-07-18)
+
+- Protocol discover message types + peer endpoint schema
+- `addManualPeer` / `refreshDiscovery` on the core store
+- Devices: “Add device by address” + “Refresh discovery” (web); native address form + radio refresh
+
+Still demo-mesh under the hood — no real HTTP listener or multicast yet.
 
 ---
 

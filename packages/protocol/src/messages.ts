@@ -13,6 +13,8 @@ import {
 export const MessageTypeSchema = z.enum([
   "hello",
   "status",
+  "discover_announce",
+  "discover_response",
   "pair_request",
   "pair_confirm",
   "pair_reject",
@@ -46,7 +48,25 @@ export type Envelope = z.infer<typeof EnvelopeSchema>;
 export const HelloPayloadSchema = z.object({
   identity: DeviceIdentitySchema,
   status: DeviceStatusSchema.optional(),
+  host: z.string().optional(),
+  port: z.number().int().positive().optional(),
 });
+
+/** Multicast / LAN announce (P2 discovery). */
+export const DiscoverAnnouncePayloadSchema = z.object({
+  identity: DeviceIdentitySchema.pick({
+    id: true,
+    name: true,
+    type: true,
+    platform: true,
+    fingerprint: true,
+    publicKey: true,
+  }),
+  host: z.string().min(1),
+  port: z.number().int().positive(),
+  protocolVersion: z.number().int().positive(),
+});
+export type DiscoverAnnouncePayload = z.infer<typeof DiscoverAnnouncePayloadSchema>;
 
 export const PairRequestPayloadSchema = PairingPayloadSchema;
 export const PairConfirmPayloadSchema = z.object({

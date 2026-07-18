@@ -64,6 +64,7 @@ export function DeviceCard({
             <p className="truncate text-xs text-muted-foreground">
               {platformLabel(device.platform)}
               {device.model ? ` · ${device.model}` : ""}
+              {device.host ? ` · ${device.host}${device.port ? `:${device.port}` : ""}` : ""}
             </p>
           </div>
           <Badge variant="secondary" className="rounded-full shrink-0">
@@ -74,7 +75,9 @@ export function DeviceCard({
         <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
           <span className="inline-flex items-center gap-1">
             <Wifi className="size-3.5" />
-            {device.status?.networkName ?? (device.online ? "Connected" : "Offline")}
+            {device.host
+              ? `${device.host}${device.port ? `:${device.port}` : ""}`
+              : (device.status?.networkName ?? (device.online ? "Connected" : "Offline"))}
           </span>
           {battery != null && (
             <span className="inline-flex items-center gap-1">
