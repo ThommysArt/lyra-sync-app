@@ -420,9 +420,6 @@ importers:
       '@lyra-sync-app/config':
         specifier: workspace:*
         version: link:../config
-      '@lyra-sync-app/core':
-        specifier: workspace:*
-        version: link:../core
       '@types/node':
         specifier: ^22.13.14
         version: 22.20.1

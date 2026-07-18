@@ -22,7 +22,6 @@
   },
   "devDependencies": {
     "@lyra-sync-app/config": "workspace:*",
-    "@lyra-sync-app/core": "workspace:*",
     "@types/node": "^22.13.14",
     "tsx": "^4.22.5",
     "typescript": "^6"
