@@ -307,6 +307,9 @@ importers:
 
   packages/core:
     dependencies:
+      '@lyra-sync-app/net':
+        specifier: workspace:*
+        version: link:../net
       '@lyra-sync-app/protocol':
         specifier: workspace:*
         version: link:../protocol

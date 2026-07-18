@@ -1,3 +1,11 @@
+import {
+  applyChunkProgress,
+  canResumeTransfer,
+  isLikelyTailscaleHost,
+  probePeer,
+  probePeers,
+  type ProbeResult,
+} from "@lyra-sync-app/net";
 import type {
   AppSettings,
   ClipboardItem,
@@ -9,7 +17,7 @@ import type {
   Transfer,
   TransferStatus,
 } from "@lyra-sync-app/protocol";
-import { AppSettingsSchema } from "@lyra-sync-app/protocol";
+import { AppSettingsSchema, LYRA_DEFAULT_PORT } from "@lyra-sync-app/protocol";
 
 import {
   createDemoClipboardHistory,
@@ -32,6 +40,16 @@ export type ActivePairingSession = {
   payload: PairingPayload;
 };
 
+/** Runtime status of the local HTTP peer server (Electron / Node). */
+export type PeerServerStatus = {
+  running: boolean;
+  port: number | null;
+  url: string | null;
+  discoveryActive: boolean;
+  lastError: string | null;
+  updatedAt: number;
+};
+
 export type LyraState = {
   ready: boolean;
   identity: DeviceIdentity | null;
@@ -46,6 +64,10 @@ export type LyraState = {
   /** Local system clipboard mirror (text) */
   localClipboardText: string;
   toast: { id: string; message: string; tone: "info" | "success" | "error" } | null;
+  /** Local peer server / discovery runtime (set by desktop shell) */
+  peerServer: PeerServerStatus;
+  /** Last network probe summary for UI */
+  lastProbeSummary: string | null;
 };
 
 export type LyraStore = {
@@ -72,8 +94,22 @@ export type LyraStore = {
     port?: number;
     name?: string;
   }) => { ok: true; device: PairedDevice } | { ok: false; error: string };
-  /** Demo/P2 stub: re-probe known peers and refresh online / lastSeen */
-  refreshDiscovery: () => void;
+  /**
+   * Re-probe known peers (real HTTP /lyra/info when host is set) and refresh
+   * online / lastSeen. Falls back to demo mesh for seeded peers without hosts.
+   */
+  refreshDiscovery: () => void | Promise<void>;
+  /** Probe a single host:port (manual + Tailscale path). */
+  probePeerAddress: (input: {
+    host: string;
+    port?: number;
+  }) => Promise<ProbeResult>;
+  /** Live-probe peers that look like Tailscale (100.x / *.ts.net) or have tailscale connection. */
+  probeTailscalePeers: () => Promise<ProbeResult[]>;
+  /** Desktop shell reports local HTTP peer server state */
+  setPeerServerStatus: (patch: Partial<PeerServerStatus>) => void;
+  /** Resume a paused/partial transfer from last acknowledged offset */
+  resumeTransfer: (id: string) => void;
   renameDevice: (deviceId: string, nickname: string) => void;
   updateDeviceSettings: (
     deviceId: string,
@@ -96,8 +132,14 @@ export type LyraStore = {
   ) => void;
   startFileTransfer: (
     deviceIds: string[],
-    files: { name: string; size: number; mimeType?: string }[],
-    options?: { direction?: "sent" | "received"; forceConflict?: boolean },
+    files: { name: string; size: number; mimeType?: string; checksum?: string }[],
+    options?: {
+      direction?: "sent" | "received";
+      forceConflict?: boolean;
+      /** Start partially transferred (demo resume) */
+      initialOffset?: number;
+      verifyIntegrity?: boolean;
+    },
   ) => void;
   setTransferStatus: (id: string, status: TransferStatus) => void;
   /** Resolve a transfer waiting on rename / overwrite / skip */
@@ -140,6 +182,15 @@ function createInitialState(): LyraState {
     selectedDeviceId: null,
     localClipboardText: "",
     toast: null,
+    peerServer: {
+      running: false,
+      port: null,
+      url: null,
+      discoveryActive: false,
+      lastError: null,
+      updatedAt: Date.now(),
+    },
+    lastProbeSummary: null,
   };
 }
 
@@ -182,17 +233,41 @@ function simulateTransferProgress(
     if (!current || current.status !== "transferring") return;
     progress += 0.12 + Math.random() * 0.15;
     if (progress >= 1) {
-      store.setTransferStatus(transferId, "completed");
+      const verify =
+        current.verifyIntegrity ?? store.getState().settings.verifyTransferIntegrity;
+      const patch = applyChunkProgress(current, current.totalBytes);
+      set((st) => ({
+        ...st,
+        transfers: st.transfers.map((t) =>
+          t.id === transferId
+            ? {
+                ...t,
+                ...patch,
+                transferredBytes: t.totalBytes,
+                status: "completed" as const,
+                completedAt: Date.now(),
+                durationMs: Date.now() - t.createdAt,
+                averageSpeedBps:
+                  t.totalBytes / Math.max(0.001, (Date.now() - t.createdAt) / 1000),
+                // Demo integrity: checksums match when declared; unknown → ok
+                integrityOk: verify ? true : undefined,
+                updatedAt: Date.now(),
+              }
+            : t,
+        ),
+      }));
+      store.persist();
       return;
     }
+    const nextBytes = Math.floor(current.totalBytes * progress);
+    const patch = applyChunkProgress(current, nextBytes);
     set((st) => ({
       ...st,
       transfers: st.transfers.map((t) =>
         t.id === transferId
           ? {
               ...t,
-              transferredBytes: Math.floor(t.totalBytes * progress),
-              updatedAt: Date.now(),
+              ...patch,
               status: "transferring" as const,
             }
           : t,
@@ -201,6 +276,40 @@ function simulateTransferProgress(
     setTimeout(tick, 400);
   };
   setTimeout(tick, 300);
+}
+
+function applyProbeToDevice(d: PairedDevice, result: ProbeResult, now: number): PairedDevice {
+  if (!result.ok) {
+    return {
+      ...d,
+      online: false,
+      lastSeenAt: d.lastSeenAt,
+      lastProbeLatencyMs: result.latencyMs,
+    };
+  }
+  const connectionType =
+    result.connectionHint === "tailscale"
+      ? d.connectionType === "local"
+        ? "both"
+        : "tailscale"
+      : d.connectionType === "tailscale"
+        ? "both"
+        : d.connectionType === "manual"
+          ? "manual"
+          : "local";
+  return {
+    ...d,
+    online: true,
+    lastSeenAt: now,
+    lastProbeLatencyMs: result.latencyMs,
+    host: result.host,
+    port: result.port,
+    connectionType,
+    // Prefer live identity fields when probing a real peer
+    name: d.nickname ? d.name : result.name || d.name,
+    fingerprint: result.fingerprint || d.fingerprint,
+    platform: (result.platform as PairedDevice["platform"]) || d.platform,
+  };
 }
 
 export function createLyraStore(options?: {
@@ -519,18 +628,46 @@ export function createLyraStore(options?: {
       notify(set, `Added ${name} at ${host}:${port}`, "success");
       return { ok: true as const, device };
     },
-    refreshDiscovery: () => {
+    refreshDiscovery: async () => {
       const s = getState();
       if (!s.settings.discoveryEnabled) {
         notify(set, "Network discovery is disabled in Settings", "info");
         return;
       }
       const now = Date.now();
-      // Demo mesh: known demo peers come online; manual peers stay reachable;
-      // devices offline > 24h stay offline unless manual.
+
+      // Real HTTP probes for devices that have a host (manual / Tailscale / discovered)
+      const probeTargets = s.devices.filter((d) => Boolean(d.host));
+      let probeResults: ProbeResult[] = [];
+      if (probeTargets.length > 0) {
+        probeResults = await probePeers(
+          probeTargets.map((d) => ({
+            host: d.host!,
+            port: d.port ?? s.settings.peerListenPort ?? LYRA_DEFAULT_PORT,
+          })),
+          {
+            timeoutMs: 2000,
+            preferTailscale: s.settings.tailscaleEnabled,
+          },
+        );
+      }
+
+      const byHostPort = new Map<string, ProbeResult>();
+      for (let i = 0; i < probeTargets.length; i++) {
+        const d = probeTargets[i]!;
+        const key = `${d.host}:${d.port ?? LYRA_DEFAULT_PORT}`;
+        byHostPort.set(key, probeResults[i]!);
+      }
+
       set((st) => ({
         ...st,
         devices: st.devices.map((d) => {
+          if (d.host) {
+            const key = `${d.host}:${d.port ?? LYRA_DEFAULT_PORT}`;
+            const result = byHostPort.get(key);
+            if (result) return applyProbeToDevice(d, result, now);
+          }
+          // Demo mesh fallback for seeded peers without live hosts
           if (d.connectionType === "manual") {
             return { ...d, online: true, lastSeenAt: now };
           }
@@ -539,12 +676,9 @@ export function createLyraStore(options?: {
               ...d,
               online: true,
               lastSeenAt: now,
-              status: d.status
-                ? { ...d.status, updatedAt: now }
-                : d.status,
+              status: d.status ? { ...d.status, updatedAt: now } : d.status,
             };
           }
-          // Bring offline demo windows PC online if discovery is on
           if (d.id === "demo_windows") {
             return {
               ...d,
@@ -555,10 +689,127 @@ export function createLyraStore(options?: {
           }
           return d;
         }),
+        lastProbeSummary:
+          probeTargets.length > 0
+            ? `Probed ${probeTargets.length} endpoint(s) · ${probeResults.filter((r) => r.ok).length} up`
+            : "Demo mesh refreshed (no live hosts)",
       }));
       persist();
       const online = getState().devices.filter((d) => d.online).length;
       notify(set, `Discovery refreshed · ${online} device(s) online`, "success");
+    },
+    probePeerAddress: async (input) => {
+      const host = input.host.trim();
+      const port = input.port && input.port > 0 ? input.port : getState().settings.peerListenPort;
+      const result = await probePeer(
+        { host, port },
+        {
+          timeoutMs: 2500,
+          preferTailscale: getState().settings.tailscaleEnabled || isLikelyTailscaleHost(host),
+        },
+      );
+      const now = Date.now();
+      if (result.ok) {
+        set((st) => ({
+          ...st,
+          devices: st.devices.map((d) => {
+            if (d.host === host && (d.port ?? LYRA_DEFAULT_PORT) === port) {
+              return applyProbeToDevice(d, result, now);
+            }
+            return d;
+          }),
+          lastProbeSummary: `Reachable ${result.name} · ${result.latencyMs}ms`,
+        }));
+        persist();
+        notify(set, `Peer online: ${result.name} (${result.latencyMs}ms)`, "success");
+      } else {
+        set((st) => ({
+          ...st,
+          lastProbeSummary: `Unreachable ${host}:${port} · ${result.error}`,
+        }));
+        notify(set, `Peer unreachable: ${result.error}`, "error");
+      }
+      return result;
+    },
+    probeTailscalePeers: async () => {
+      const s = getState();
+      if (!s.settings.tailscaleEnabled) {
+        notify(set, "Enable Tailscale support in Settings first", "info");
+        return [];
+      }
+      const candidates = s.devices.filter(
+        (d) =>
+          (d.host && isLikelyTailscaleHost(d.host)) ||
+          d.connectionType === "tailscale" ||
+          d.connectionType === "both",
+      );
+      if (candidates.length === 0) {
+        notify(set, "No Tailscale peers to probe — add a 100.x or *.ts.net address", "info");
+        return [];
+      }
+      const results = await probePeers(
+        candidates.map((d) => ({
+          host: d.host!,
+          port: d.port ?? s.settings.peerListenPort,
+        })),
+        { timeoutMs: 3000, preferTailscale: true },
+      );
+      const now = Date.now();
+      set((st) => ({
+        ...st,
+        devices: st.devices.map((d) => {
+          const idx = candidates.findIndex((c) => c.id === d.id);
+          if (idx < 0) return d;
+          return applyProbeToDevice(d, results[idx]!, now);
+        }),
+        lastProbeSummary: `Tailscale probe · ${results.filter((r) => r.ok).length}/${results.length} up`,
+      }));
+      persist();
+      const up = results.filter((r) => r.ok).length;
+      notify(set, `Tailscale probe: ${up}/${results.length} reachable`, up > 0 ? "success" : "info");
+      return results;
+    },
+    setPeerServerStatus: (patch) => {
+      set((s) => ({
+        ...s,
+        peerServer: {
+          ...s.peerServer,
+          ...patch,
+          updatedAt: Date.now(),
+        },
+      }));
+    },
+    resumeTransfer: (id) => {
+      const tx = getState().transfers.find((t) => t.id === id);
+      if (!tx) return;
+      if (!canResumeTransfer(tx) && tx.status !== "paused") {
+        notify(set, "Transfer cannot be resumed", "error");
+        return;
+      }
+      const offset = tx.transferredBytes;
+      set((st) => ({
+        ...st,
+        transfers: st.transfers.map((t) =>
+          t.id === id
+            ? {
+                ...t,
+                status: "transferring" as const,
+                resumeOffset: offset,
+                updatedAt: Date.now(),
+                error: undefined,
+              }
+            : t,
+        ),
+      }));
+      persist();
+      notify(
+        set,
+        offset > 0
+          ? `Resuming from ${Math.round((offset / Math.max(1, tx.totalBytes)) * 100)}%…`
+          : "Resuming transfer…",
+        "info",
+      );
+      simulateTransferProgress(store, set, id);
     },
     renameDevice: (deviceId, nickname) => {
       set((s) => ({
@@ -696,10 +947,20 @@ export function createLyraStore(options?: {
       const totalBytes = files.reduce((acc, f) => acc + f.size, 0);
       const now = Date.now();
       const conflictNames = forceConflict ? files.map((f) => f.name) : undefined;
+      const initialOffset = Math.min(
+        totalBytes,
+        Math.max(0, options?.initialOffset ?? 0),
+      );
+      const verifyIntegrity =
+        options?.verifyIntegrity ?? s.settings.verifyTransferIntegrity;
       const newTransfers: Transfer[] = deviceIds.map((deviceId) => {
         const device = s.devices.find((d) => d.id === deviceId);
-        const status: TransferStatus = forceConflict ? "conflict" : "transferring";
-        return {
+        const status: TransferStatus = forceConflict
+          ? "conflict"
+          : initialOffset > 0 && initialOffset < totalBytes
+            ? "paused"
+            : "transferring";
+        const base: Transfer = {
           id: generateId("tx"),
           direction,
           deviceId,
@@ -708,15 +969,22 @@ export function createLyraStore(options?: {
             name: f.name,
             size: f.size,
             mimeType: f.mimeType,
+            checksum: f.checksum,
           })),
           totalBytes,
-          transferredBytes: 0,
+          transferredBytes: initialOffset,
+          resumeOffset: initialOffset > 0 ? initialOffset : undefined,
           status,
           createdAt: now,
           updatedAt: now,
           conflictFileName: conflictNames?.[0],
           conflictFileNames: conflictNames,
+          verifyIntegrity,
         };
+        if (initialOffset > 0) {
+          return { ...base, ...applyChunkProgress(base, initialOffset), status };
+        }
+        return base;
       });
       set((st) => ({ ...st, transfers: [...newTransfers, ...st.transfers] }));
       persist();
@@ -731,6 +999,14 @@ export function createLyraStore(options?: {
         );
         return;
       }
+      if (initialOffset > 0 && initialOffset < totalBytes) {
+        notify(
+          set,
+          `Transfer ready to resume from ${Math.round((initialOffset / totalBytes) * 100)}%`,
+          "info",
+        );
+        return;
+      }
       notify(
         set,
         direction === "sent"
@@ -739,9 +1015,10 @@ export function createLyraStore(options?: {
         "info",
       );
 
-      // Simulate progress for demo
       for (const tx of newTransfers) {
-        simulateTransferProgress(store, set, tx.id);
+        if (tx.status === "transferring") {
+          simulateTransferProgress(store, set, tx.id);
+        }
       }
     },
     setTransferStatus: (id, status) => {
@@ -752,16 +1029,22 @@ export function createLyraStore(options?: {
           if (t.id !== id) return t;
           const now = Date.now();
           const completed = status === "completed";
+          const paused = status === "paused";
           return {
             ...t,
             status,
             updatedAt: now,
             transferredBytes: completed ? t.totalBytes : t.transferredBytes,
+            resumeOffset: paused || completed ? t.transferredBytes : t.resumeOffset,
             completedAt: completed ? now : t.completedAt,
             durationMs: completed ? now - t.createdAt : t.durationMs,
             averageSpeedBps: completed
               ? t.totalBytes / Math.max(0.001, (now - t.createdAt) / 1000)
               : t.averageSpeedBps,
+            integrityOk:
+              completed && (t.verifyIntegrity ?? s.settings.verifyTransferIntegrity)
+                ? true
+                : t.integrityOk,
           };
         }),
       }));

@@ -71,6 +71,13 @@ export const PairedDeviceSchema = z.object({
   /** Reachability for manual / Tailscale / discovered peers */
   host: z.string().optional(),
   port: z.number().int().positive().optional(),
+  /**
+   * Pairing-derived shared secret for wire auth (never leave device storage).
+   * Omitted for demo-seeded peers until a real handshake runs.
+   */
+  authSecret: z.string().optional(),
+  /** Last successful probe latency in ms */
+  lastProbeLatencyMs: z.number().nonnegative().optional(),
 });
 export type PairedDevice = z.infer<typeof PairedDeviceSchema>;
 

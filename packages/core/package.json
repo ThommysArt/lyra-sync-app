@@ -13,6 +13,7 @@
     "check-types": "tsc --noEmit"
   },
   "dependencies": {
+    "@lyra-sync-app/net": "workspace:*",
     "@lyra-sync-app/protocol": "workspace:*",
     "zod": "catalog:"
   },
