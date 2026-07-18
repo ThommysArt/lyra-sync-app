@@ -11,6 +11,8 @@ import {
   type ReactNode,
 } from "react";
 
+import { getDesktopApi } from "./desktop-bridge";
+
 const StoreContext = createContext<LyraStore | null>(null);
 
 /** Shallow compare so selectors that return new arrays/objects don't infinite-loop useSyncExternalStore. */
@@ -60,6 +62,20 @@ export function LyraProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
+  }, [store]);
+
+  // Sync Electron peer-server status into the domain store when running in desktop shell
+  useEffect(() => {
+    const api = getDesktopApi();
+    if (!api) return;
+    let unsub = () => {};
+    void api.getPeerStatus().then((status) => {
+      store.setPeerServerStatus(status);
+    });
+    unsub = api.onPeerStatus((status) => {
+      store.setPeerServerStatus(status);
+    });
+    return () => unsub();
   }, [store]);
 
   if (!ready) {
