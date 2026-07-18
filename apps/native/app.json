@@ -3,11 +3,38 @@
     "scheme": "lyra",
     "userInterfaceStyle": "automatic",
     "orientation": "default",
+    "version": "1.0.0",
     "web": {
       "bundler": "metro"
     },
     "name": "Lyra",
     "slug": "lyra",
+    "icon": "./assets/images/icon.png",
+    "splash": {
+      "image": "./assets/images/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0B0F17"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "app.lyra.sync",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Allow Lyra to access your camera to scan pairing QR codes.",
+        "NSLocalNetworkUsageDescription": "Lyra discovers and connects to your other devices on the local network."
+      }
+    },
+    "android": {
+      "package": "app.lyra.sync",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/images/android-icon-foreground.png",
+        "backgroundImage": "./assets/images/android-icon-background.png"
+      },
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE"
+      ]
+    },
     "plugins": [
       "expo-font",
       "expo-secure-store",
@@ -24,6 +51,12 @@
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
-    }
+    },
+    "extra": {
+      "eas": {
+        "projectId": "00000000-0000-4000-8000-000000000001"
+      }
+    },
+    "owner": "lyra"
   }
 }
