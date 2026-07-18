@@ -13,6 +13,7 @@ import { useTheme } from "next-themes";
 import { Button } from "@lyra-sync-app/ui/components/button";
 import { cn } from "@/lib/utils";
 import { useLyraSelector } from "@/lib/lyra";
+import { ClipboardMonitor } from "@/components/clipboard-monitor";
 import { ConflictBanner } from "@/components/conflict-banner";
 import { IncomingPairBanner } from "@/components/incoming-pair-banner";
 import { KeyboardShortcuts } from "@/components/keyboard-shortcuts";
@@ -128,6 +129,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       </div>
       <ToastListener />
       <KeyboardShortcuts />
+      <ClipboardMonitor />
     </div>
   );
 }

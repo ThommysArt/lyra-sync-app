@@ -80,6 +80,13 @@ function SettingsPage() {
           />
           <Separator />
           <SettingRow
+            label="Auto-monitor system clipboard"
+            description="While Lyra is open and focused, detect new copies on this desktop and capture them (browser may ask for clipboard permission)."
+            checked={settings.autoMonitorClipboard}
+            onCheckedChange={(v) => store.updateSettings({ autoMonitorClipboard: v })}
+          />
+          <Separator />
+          <SettingRow
             label="Auto-accept transfers"
             description="Receive files from paired devices without a prompt."
             checked={settings.autoAcceptTransfers}

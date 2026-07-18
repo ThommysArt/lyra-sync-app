@@ -1,10 +1,11 @@
 import { formatRelativeTime } from "@lyra-sync-app/core";
 import { createFileRoute } from "@tanstack/react-router";
-import { ClipboardPaste, Copy, Pin, PinOff, Send, Trash2 } from "lucide-react";
-import { useState } from "react";
+import { ClipboardPaste, Copy, Pin, PinOff, Radio, Send, Trash2 } from "lucide-react";
+import { useEffect, useState } from "react";
 
 import { Button } from "@lyra-sync-app/ui/components/button";
 import { Card, CardContent } from "@lyra-sync-app/ui/components/card";
+import { Switch } from "@lyra-sync-app/ui/components/switch";
 import { Textarea } from "@lyra-sync-app/ui/components/textarea";
 import { readSystemClipboard, writeSystemClipboard } from "@/lib/clipboard";
 import { useLyraSelector, useLyraStore } from "@/lib/lyra";
@@ -22,7 +23,16 @@ function ClipboardPage() {
     }),
   );
   const onlineDevices = useLyraSelector((s) => s.devices.filter((d) => d.online));
+  const autoMonitor = useLyraSelector((s) => s.settings.autoMonitorClipboard);
+  const syncEnabled = useLyraSelector((s) => s.settings.clipboardSyncEnabled);
+  const localClipboardText = useLyraSelector((s) => s.localClipboardText);
   const [draft, setDraft] = useState("");
+
+  // Reflect monitored clipboard into the draft when empty
+  useEffect(() => {
+    if (!autoMonitor || !localClipboardText) return;
+    setDraft((prev) => (prev.trim() ? prev : localClipboardText));
+  }, [autoMonitor, localClipboardText]);
 
   const importSystem = async () => {
     const text = await readSystemClipboard();
@@ -51,6 +61,31 @@ function ClipboardPage() {
           </Button>
         </div>
       </div>
+
+      <Card className="rounded-4xl border-primary/20 bg-primary/5">
+        <CardContent className="flex flex-wrap items-center justify-between gap-3 p-4">
+          <div className="flex min-w-0 items-start gap-3">
+            <div className="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-2xl bg-primary/15 text-primary">
+              <Radio className="size-4" />
+            </div>
+            <div className="min-w-0">
+              <p className="text-sm font-medium">Auto-monitor system clipboard</p>
+              <p className="text-xs text-muted-foreground">
+                {autoMonitor
+                  ? syncEnabled
+                    ? "Watching while this tab is focused · new copies sync to online devices"
+                    : "Watching while this tab is focused · capture only (sync is off)"
+                  : "Off — use “Read system” for a one-shot import"}
+              </p>
+            </div>
+          </div>
+          <Switch
+            checked={autoMonitor}
+            onCheckedChange={(v) => store.updateSettings({ autoMonitorClipboard: v })}
+            aria-label="Auto-monitor system clipboard"
+          />
+        </CardContent>
+      </Card>
 
       <Card className="rounded-4xl">
         <CardContent className="space-y-3 p-4">

@@ -1,7 +1,7 @@
 # Lyra — Agent Progress Report
 
-**Last updated:** 2026-07-18 (live camera QR scan on native)  
-**Status:** MVP UI + demo mesh; P0 residual QR camera scan landed; web + Expo web previously verified
+**Last updated:** 2026-07-18 (P1 residual polish)  
+**Status:** MVP UI + demo mesh; P0 + P1 residual polish landed; P2 real networking still open
 
 ---
 
@@ -103,11 +103,11 @@ pnpm run dev:web   # http://localhost:3001 (or next free port)
 - [x] Re-test UI in a **fresh** T3 agent thread (2026-07-17) — see “Browser verification” below
 - [x] Live camera QR scan on device (`expo-camera` CameraView) — paste path remains as fallback
 
-### P1 — residual polish (next)
-- [ ] Optional: auto-monitor system clipboard (desktop) vs manual “Read system”
-- [ ] Richer multi-file conflict batch UI
+### P1 — residual polish
+- [x] Optional: auto-monitor system clipboard (desktop + foreground native) vs manual “Read system”
+- [x] Richer multi-file conflict batch UI (banner list, Skip/Rename/Overwrite all, multi-file demo)
 
-### P2 — Real networking
+### P2 — Real networking (next)
 - [ ] Local HTTP(S) peer server
 - [ ] UDP multicast discovery
 - [ ] Auth via fingerprints / keys
@@ -179,7 +179,32 @@ Started with `cd apps/native && CI=true pnpm exec expo start --web --port 8081 -
 
 **Expo automation notes:** RN `Pressable`s are often plain `div`s (use coords / `evaluate` click on exact text). Expo Router keeps inactive tabs mounted — `document.body.innerText` concatenates all tab screens; use URL + on-screen controls.
 
-Remaining gaps: real P2P still P2; optional P1 clipboard auto-monitor + multi-file conflict batch UI.
+Remaining gaps after P0/P1: **P2 real networking** and **P3 packaging/quality**.
+
+---
+
+## P1 residual polish (2026-07-18)
+
+### Clipboard auto-monitor
+- Settings: `autoMonitorClipboard` (default off) on web + native.
+- Web: `ClipboardMonitor` polls system clipboard (~1.5s) while the tab is focused/visible; seeds baseline on enable so existing clipboard isn’t re-pushed.
+- Native: foreground poll (~2.5s) via `expo-clipboard` + `AppState` (no true background OS clipboard hooks).
+- Store: `ingestSystemClipboardText` updates local mirror; when clipboard sync is on, appends history and targets online auto-accept peers.
+- Clipboard page (web): monitor card with status copy + switch; “Read system” remains.
+
+### Multi-file / batch conflicts
+- Transfer schema: `conflictFileNames[]` alongside legacy `conflictFileName`.
+- Store: multi-file forceConflict, `resolveAllTransferConflicts`, `simulateIncomingConflict({ multiFile, batch })`.
+- Web + native banners: file/session counts, **Skip/Rename/Overwrite all**, expandable per-session actions.
+- Transfers demos: **Demo multi-file** and **Demo batch**.
+
+### Verify
+```bash
+pnpm run dev:web   # :3001
+# Settings → enable Auto-monitor system clipboard
+# Transfers → Demo multi-file / Demo batch → banner batch actions
+cd apps/web && pnpm exec tsx scripts/smoke-render.mjs
+```
 
 ---
 
@@ -212,5 +237,6 @@ cd apps/native && pnpm exec expo start --clear
 4. Update this file when closing milestones.
 5. Keyboard shortcuts live in `apps/web/src/components/keyboard-shortcuts.tsx`.
 6. Conflict demo: Transfers → “Demo conflict”, or download a PDF from remote FS.
-7. Next planned work: **P1 residual** (desktop clipboard auto-monitor, multi-file conflict batch UI), then **P2 real networking**.
+7. Next planned work: **P2 real networking** (local HTTP peer server, discovery, auth), then **P3 packaging**.
 8. Live QR scan needs a physical device or simulator with a camera; Expo web keeps paste-only.
+9. Clipboard auto-monitor needs a focused/secure context; browsers may prompt for clipboard permission once.

@@ -129,8 +129,10 @@ export const TransferSchema = z.object({
   durationMs: z.number().int().nonnegative().optional(),
   averageSpeedBps: z.number().nonnegative().optional(),
   error: z.string().optional(),
-  /** Present when status is `conflict` — name of the clashing file */
+  /** Present when status is `conflict` — primary clashing file (legacy / first) */
   conflictFileName: z.string().optional(),
+  /** All clashing file names when multiple files in the session conflict */
+  conflictFileNames: z.array(z.string()).optional(),
   conflictResolved: ConflictActionSchema.optional(),
 });
 export type Transfer = z.infer<typeof TransferSchema>;
@@ -174,6 +176,11 @@ export const AppSettingsSchema = z.object({
   autoAcceptTransfers: z.boolean().default(true),
   autoAcceptClipboard: z.boolean().default(true),
   clipboardSyncEnabled: z.boolean().default(true),
+  /**
+   * Desktop/web: poll the system clipboard while the app is focused.
+   * Mobile keeps manual “Read system” (background clipboard APIs are restricted).
+   */
+  autoMonitorClipboard: z.boolean().default(false),
   theme: z.enum(["system", "light", "dark"]).default("system"),
   discoveryEnabled: z.boolean().default(true),
   tailscaleEnabled: z.boolean().default(false),

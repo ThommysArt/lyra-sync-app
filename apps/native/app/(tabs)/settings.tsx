@@ -87,6 +87,13 @@ export default function SettingsScreen() {
               accent={accent}
             />
             <Row
+              label="Auto-monitor clipboard"
+              value={settings.autoMonitorClipboard}
+              onValueChange={(v) => store.updateSettings({ autoMonitorClipboard: v })}
+              ink={ink}
+              accent={accent}
+            />
+            <Row
               label="Auto-accept transfers"
               value={settings.autoAcceptTransfers}
               onValueChange={(v) => store.updateSettings({ autoAcceptTransfers: v })}

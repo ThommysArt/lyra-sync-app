@@ -75,6 +75,14 @@ export type LyraStore = {
   removeClipboardItem: (id: string) => void;
   resendClipboardItem: (id: string, targetDeviceIds: string[]) => void;
   setLocalClipboardText: (text: string) => void;
+  /**
+   * Called by the desktop clipboard monitor when system clipboard text changes.
+   * Updates the local mirror and optionally syncs to online devices / history.
+   */
+  ingestSystemClipboardText: (
+    text: string,
+    options?: { sync?: boolean; silent?: boolean },
+  ) => void;
   startFileTransfer: (
     deviceIds: string[],
     files: { name: string; size: number; mimeType?: string }[],
@@ -83,8 +91,10 @@ export type LyraStore = {
   setTransferStatus: (id: string, status: TransferStatus) => void;
   /** Resolve a transfer waiting on rename / overwrite / skip */
   resolveTransferConflict: (id: string, action: ConflictAction) => void;
-  /** Demo: receive a file that already exists locally */
-  simulateIncomingConflict: () => void;
+  /** Apply the same conflict action to every transfer currently in `conflict` */
+  resolveAllTransferConflicts: (action: ConflictAction) => void;
+  /** Demo: receive file(s) that already exist locally */
+  simulateIncomingConflict: (options?: { multiFile?: boolean; batch?: boolean }) => void;
   clearTransferHistory: () => void;
   listRemoteFiles: (deviceId: string, path: string) => FileEntry[];
   sendUrl: (url: string, deviceIds: string[]) => void;
@@ -137,6 +147,15 @@ function renameWithSuffix(name: string): string {
   const dot = name.lastIndexOf(".");
   if (dot <= 0) return `${name} (1)`;
   return `${name.slice(0, dot)} (1)${name.slice(dot)}`;
+}
+
+function conflictNameSet(tx: Transfer): Set<string> {
+  if (tx.conflictFileNames && tx.conflictFileNames.length > 0) {
+    return new Set(tx.conflictFileNames);
+  }
+  if (tx.conflictFileName) return new Set([tx.conflictFileName]);
+  if (tx.files[0]?.name) return new Set([tx.files[0].name]);
+  return new Set();
 }
 
 function simulateTransferProgress(
@@ -510,6 +529,56 @@ export function createLyraStore(options?: {
     setLocalClipboardText: (text) => {
       set((s) => ({ ...s, localClipboardText: text }));
     },
+    ingestSystemClipboardText: (text, options) => {
+      const trimmed = text.trim();
+      if (!trimmed) return;
+      const s = getState();
+      if (trimmed === s.localClipboardText.trim()) return;
+
+      const shouldSync =
+        options?.sync ?? (s.settings.clipboardSyncEnabled && s.settings.autoMonitorClipboard);
+      const silent = options?.silent ?? true;
+
+      if (!shouldSync || !s.identity) {
+        set((st) => ({ ...st, localClipboardText: trimmed }));
+        return;
+      }
+
+      // Avoid duplicate consecutive history entries for the same text
+      const newest = s.clipboardHistory[0];
+      if (newest?.text?.trim() === trimmed) {
+        set((st) => ({ ...st, localClipboardText: trimmed }));
+        return;
+      }
+
+      const targets = s.devices
+        .filter((d) => d.online && d.showInMainList && d.autoAcceptClipboard)
+        .map((d) => d.id);
+      const item: ClipboardItem = {
+        id: generateId("clip"),
+        type: "text",
+        text: trimmed,
+        sourceDeviceId: s.identity.id,
+        sourceDeviceName: s.identity.name,
+        createdAt: Date.now(),
+        pinned: false,
+      };
+      set((st) => ({
+        ...st,
+        localClipboardText: trimmed,
+        clipboardHistory: [item, ...st.clipboardHistory].slice(0, st.settings.clipboardHistoryLimit),
+      }));
+      persist();
+      if (!silent) {
+        notify(
+          set,
+          targets.length > 0
+            ? `Clipboard synced to ${targets.length} device${targets.length === 1 ? "" : "s"}`
+            : "Clipboard captured",
+          "success",
+        );
+      }
+    },
     startFileTransfer: (deviceIds, files, options) => {
       const s = getState();
       if (!s.identity || files.length === 0 || deviceIds.length === 0) return;
@@ -517,6 +586,7 @@ export function createLyraStore(options?: {
       const forceConflict = options?.forceConflict ?? false;
       const totalBytes = files.reduce((acc, f) => acc + f.size, 0);
       const now = Date.now();
+      const conflictNames = forceConflict ? files.map((f) => f.name) : undefined;
       const newTransfers: Transfer[] = deviceIds.map((deviceId) => {
         const device = s.devices.find((d) => d.id === deviceId);
         const status: TransferStatus = forceConflict ? "conflict" : "transferring";
@@ -535,13 +605,21 @@ export function createLyraStore(options?: {
           status,
           createdAt: now,
           updatedAt: now,
-          conflictFileName: forceConflict ? files[0]?.name : undefined,
+          conflictFileName: conflictNames?.[0],
+          conflictFileNames: conflictNames,
         };
       });
       set((st) => ({ ...st, transfers: [...newTransfers, ...st.transfers] }));
       persist();
       if (forceConflict) {
-        notify(set, "File conflict — choose rename, overwrite, or skip", "info");
+        const n = conflictNames?.length ?? 1;
+        notify(
+          set,
+          n > 1
+            ? `${n} file conflicts — choose rename, overwrite, or skip`
+            : "File conflict — choose rename, overwrite, or skip",
+          "info",
+        );
         return;
       }
       notify(
@@ -589,6 +667,8 @@ export function createLyraStore(options?: {
       const tx = s.transfers.find((t) => t.id === id);
       if (!tx || tx.status !== "conflict") return;
 
+      const conflictNames = conflictNameSet(tx);
+
       if (action === "skip") {
         set((st) => ({
           ...st,
@@ -598,22 +678,26 @@ export function createLyraStore(options?: {
                   ...t,
                   status: "cancelled" as const,
                   conflictResolved: action,
+                  conflictFileName: undefined,
+                  conflictFileNames: undefined,
                   updatedAt: Date.now(),
                 }
               : t,
           ),
         }));
         persist();
-        notify(set, `Skipped ${tx.conflictFileName ?? "file"}`, "info");
+        const label =
+          conflictNames.size > 1
+            ? `${conflictNames.size} files`
+            : (tx.conflictFileName ?? "file");
+        notify(set, `Skipped ${label}`, "info");
         return;
       }
 
       const renamedFiles =
         action === "rename"
-          ? tx.files.map((f, i) =>
-              i === 0 || f.name === tx.conflictFileName
-                ? { ...f, name: renameWithSuffix(f.name) }
-                : f,
+          ? tx.files.map((f) =>
+              conflictNames.has(f.name) ? { ...f, name: renameWithSuffix(f.name) } : f,
             )
           : tx.files;
 
@@ -627,6 +711,7 @@ export function createLyraStore(options?: {
                 status: "transferring" as const,
                 conflictResolved: action,
                 conflictFileName: undefined,
+                conflictFileNames: undefined,
                 updatedAt: Date.now(),
               }
             : t,
@@ -636,24 +721,112 @@ export function createLyraStore(options?: {
       notify(
         set,
         action === "rename"
-          ? `Renamed and continuing transfer`
-          : `Overwriting ${tx.conflictFileName ?? "file"}…`,
+          ? conflictNames.size > 1
+            ? `Renamed ${conflictNames.size} files and continuing`
+            : "Renamed and continuing transfer"
+          : conflictNames.size > 1
+            ? `Overwriting ${conflictNames.size} files…`
+            : `Overwriting ${tx.conflictFileName ?? "file"}…`,
         "info",
       );
       simulateTransferProgress(store, set, id);
     },
-    simulateIncomingConflict: () => {
+    resolveAllTransferConflicts: (action) => {
+      const conflicts = getState().transfers.filter((t) => t.status === "conflict");
+      if (conflicts.length === 0) return;
+      if (conflicts.length === 1) {
+        store.resolveTransferConflict(conflicts[0]!.id, action);
+        return;
+      }
+
+      const now = Date.now();
+      const idsToResume =
+        action === "skip" ? [] : conflicts.map((t) => t.id);
+
+      set((st) => ({
+        ...st,
+        transfers: st.transfers.map((t) => {
+          if (t.status !== "conflict") return t;
+          if (action === "skip") {
+            return {
+              ...t,
+              status: "cancelled" as const,
+              conflictResolved: action,
+              conflictFileName: undefined,
+              conflictFileNames: undefined,
+              updatedAt: now,
+            };
+          }
+          const names = conflictNameSet(t);
+          const files =
+            action === "rename"
+              ? t.files.map((f) =>
+                  names.has(f.name) ? { ...f, name: renameWithSuffix(f.name) } : f,
+                )
+              : t.files;
+          return {
+            ...t,
+            files,
+            status: "transferring" as const,
+            conflictResolved: action,
+            conflictFileName: undefined,
+            conflictFileNames: undefined,
+            updatedAt: now,
+          };
+        }),
+      }));
+      persist();
+      notify(
+        set,
+        `Applied “${action}” to ${conflicts.length} conflict sessions`,
+        "success",
+      );
+      for (const id of idsToResume) {
+        simulateTransferProgress(store, set, id);
+      }
+    },
+    simulateIncomingConflict: (options) => {
       const s = getState();
       const peer = s.devices.find((d) => d.online) ?? s.devices[0];
       if (!peer) {
         notify(set, "Pair a device first to simulate a conflict", "error");
         return;
       }
-      store.startFileTransfer(
-        [peer.id],
-        [{ name: "report.pdf", size: 2_400_000, mimeType: "application/pdf" }],
-        { direction: "received", forceConflict: true },
-      );
+
+      if (options?.batch) {
+        // Several separate conflict sessions (batch UI)
+        const batches: { name: string; size: number; mimeType: string }[][] = [
+          [
+            { name: "report.pdf", size: 2_400_000, mimeType: "application/pdf" },
+            { name: "slides.pptx", size: 8_100_000, mimeType: "application/vnd.ms-powerpoint" },
+          ],
+          [{ name: "notes.md", size: 12_000, mimeType: "text/markdown" }],
+          [
+            { name: "photo.jpg", size: 3_200_000, mimeType: "image/jpeg" },
+            { name: "export.zip", size: 15_000_000, mimeType: "application/zip" },
+          ],
+        ];
+        for (const files of batches) {
+          store.startFileTransfer([peer.id], files, {
+            direction: "received",
+            forceConflict: true,
+          });
+        }
+        return;
+      }
+
+      const files = options?.multiFile
+        ? [
+            { name: "report.pdf", size: 2_400_000, mimeType: "application/pdf" },
+            { name: "budget.xlsx", size: 540_000, mimeType: "application/vnd.ms-excel" },
+            { name: "cover.png", size: 1_100_000, mimeType: "image/png" },
+          ]
+        : [{ name: "report.pdf", size: 2_400_000, mimeType: "application/pdf" }];
+
+      store.startFileTransfer([peer.id], files, {
+        direction: "received",
+        forceConflict: true,
+      });
     },
     clearTransferHistory: () => {
       set((s) => ({

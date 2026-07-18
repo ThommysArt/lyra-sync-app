@@ -14,6 +14,7 @@ import { useEffect } from "react";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { KeyboardProvider } from "react-native-keyboard-controller";
 
+import { ClipboardMonitor } from "@/components/clipboard-monitor";
 import { AppThemeProvider, useAppTheme } from "@/contexts/app-theme-context";
 import { LyraProvider } from "@/lib/lyra";
 
@@ -80,6 +81,7 @@ export default function Layout() {
           <HeroUINativeProvider>
             <LyraProvider>
               <RootNavigator />
+              <ClipboardMonitor />
             </LyraProvider>
           </HeroUINativeProvider>
         </AppThemeProvider>

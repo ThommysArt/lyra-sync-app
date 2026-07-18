@@ -12,11 +12,10 @@ import { generateId } from "./identity";
 /** Seed paired demo devices so the UI is useful before real network peers exist. */
 export function createDemoPairedDevices(self: DeviceIdentity): PairedDevice[] {
   const now = Date.now();
-  return [
+  const devices: PairedDevice[] = [
     {
       id: "demo_macbook",
       name: "Thommy's MacBook",
-      nickname: undefined,
       type: "desktop",
       platform: "macos",
       fingerprint: "a1b2c3d4e5f60718a1b2c3d4e5f60718",
@@ -92,7 +91,8 @@ export function createDemoPairedDevices(self: DeviceIdentity): PairedDevice[] {
         updatedAt: now - 1000 * 60 * 60 * 26,
       },
     },
-  ].filter((d) => d.id !== self.id);
+  ];
+  return devices.filter((d) => d.id !== self.id);
 }
 
 export function createDemoClipboardHistory(self: DeviceIdentity): ClipboardItem[] {
