@@ -18,6 +18,7 @@
     "@gorhom/bottom-sheet": "^5.2.14",
     "@lyra-sync-app/core": "workspace:*",
     "@lyra-sync-app/env": "workspace:*",
+    "@lyra-sync-app/hooks": "workspace:*",
     "@lyra-sync-app/protocol": "workspace:*",
     "dotenv": "catalog:",
     "expo": "~57.0.1",

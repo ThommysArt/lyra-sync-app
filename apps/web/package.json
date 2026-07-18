@@ -9,12 +9,15 @@
     "serve": "vite preview",
     "start": "vite",
     "check-types": "vite build && tsc --noEmit",
-    "generate-pwa-assets": "pwa-assets-generator"
+    "generate-pwa-assets": "pwa-assets-generator",
+    "test:e2e": "playwright test",
+    "test:unit": "pnpm exec tsx scripts/smoke-render.mjs"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.4.0",
     "@lyra-sync-app/core": "workspace:*",
     "@lyra-sync-app/env": "workspace:*",
+    "@lyra-sync-app/hooks": "workspace:*",
     "@lyra-sync-app/protocol": "workspace:*",
     "@lyra-sync-app/ui": "workspace:*",
     "@tailwindcss/vite": "^4.3.2",
@@ -38,6 +41,7 @@
     "@types/react-dom": "catalog:",
     "@vite-pwa/assets-generator": "^1.0.2",
     "@vitejs/plugin-react": "^6.0.3",
+    "@playwright/test": "^1.54.1",
     "happy-dom": "^20.10.6",
     "postcss": "^8.5.16",
     "tailwindcss": "catalog:",

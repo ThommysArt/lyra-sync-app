@@ -1,0 +1,11 @@
+{
+  "extends": "@lyra-sync-app/config/tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ESNext", "DOM"],
+    "jsx": "react-jsx",
+    "types": [],
+    "noEmit": true,
+    "rootDir": "src"
+  },
+  "include": ["src"]
+}

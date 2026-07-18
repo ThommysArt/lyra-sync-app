@@ -1,0 +1,25 @@
+{
+  "name": "@lyra-sync-app/hooks",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./lyra": "./src/lyra.tsx"
+  },
+  "scripts": {
+    "check-types": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "react": ">=18"
+  },
+  "dependencies": {
+    "@lyra-sync-app/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@lyra-sync-app/config": "workspace:*",
+    "@types/react": "^19.2.17",
+    "react": "^19.2.7",
+    "typescript": "^6"
+  }
+}
