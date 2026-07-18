@@ -236,7 +236,7 @@ cd apps/native && pnpm exec expo start --clear
 3. After changing native store hooks: **restart Expo with `--clear`** if `CI=true`.
 4. Update this file when closing milestones.
 5. Keyboard shortcuts live in `apps/web/src/components/keyboard-shortcuts.tsx`.
-6. Conflict demo: Transfers → “Demo conflict”, or download a PDF from remote FS.
+6. Conflict demo: Transfers → “Demo multi-file” / “Demo batch”, or download a PDF from remote FS.
 7. Next planned work: **P2 real networking** (local HTTP peer server, discovery, auth), then **P3 packaging**.
 8. Live QR scan needs a physical device or simulator with a camera; Expo web keeps paste-only.
 9. Clipboard auto-monitor needs a focused/secure context; browsers may prompt for clipboard permission once.
