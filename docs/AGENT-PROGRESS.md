@@ -143,6 +143,38 @@ Web on `http://localhost:3001` via `preview_open` → `environment-port` 3001.
 | Transfers → Demo resume | PASS — `movie.mp4` + “Resumable from …” |
 | Unit tests `pnpm test` | PASS (net 9 + core 4) |
 
+### Deep verification (2026-07-18, same session + later)
+
+**Automated**
+| Check | Result |
+|-------|--------|
+| `pnpm test` (net + core unit) | PASS |
+| happy-dom selector smoke | PASS |
+| Dual peer-server integration (`packages/core/scripts/integration-net.mjs`) | PASS — auth, ping/pong, store probe, resume |
+| `pnpm --filter @lyra-sync-app/core check-types` | PASS (tests excluded from tsc) |
+| Vite production `web` build | PASS |
+
+**Web + live Node peer (`pnpm peer-server` :53317)**
+| Flow | Result |
+|------|--------|
+| Add peer `127.0.0.1` → live probe | PASS — card becomes **Test Peer Server** / Linux · 127.0.0.1:53317 |
+| Pair dialog → Generate code + QR | PASS — code e.g. `BA4JQY`, fingerprint, SVG QR |
+| Transfers → Demo multi-file → Rename all | PASS — banner cleared, transfer continues |
+| Clipboard history + auto-monitor copy | PASS — “Watching while this tab is focused…” |
+| Settings Network / integrity / Tailscale controls | PASS |
+
+**Expo web (`:8081`, iPhone 12 Pro viewport)**
+| Flow | Result |
+|------|--------|
+| Devices + floating tab bar | PASS — demo peers + Add by address |
+| Pair → Tap to generate QR/code | PASS — e.g. `ZZZQDA`, SVG QR, camera explained as native-only |
+| Simulate incoming request | PASS |
+| Transfers → Multi conflict → Rename all | PASS — “3 files already exist” banner + resolve |
+| Settings identity / toggles / unpair list | PASS |
+| Clipboard history actions | PASS |
+| Add peer `127.0.0.1` | PASS — peer appears (auto-probe parity added) |
+| Max update depth / Metro errors | PASS — none; only shadow*/pointerEvents deprecation warns |
+
 ---
 
 ---

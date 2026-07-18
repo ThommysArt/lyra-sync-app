@@ -130,8 +130,13 @@ export default function DevicesScreen() {
             <Pressable
               disabled={!manualHost.trim()}
               onPress={() => {
-                const result = store.addManualPeer({ host: manualHost });
-                if (result.ok) setManualHost("");
+                const host = manualHost.trim();
+                const result = store.addManualPeer({ host });
+                if (result.ok) {
+                  setManualHost("");
+                  // Live HTTP probe when a peer server is reachable (same as web)
+                  void store.probePeerAddress({ host });
+                }
               }}
               style={{
                 alignItems: "center",
