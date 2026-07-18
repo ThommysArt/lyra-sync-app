@@ -343,6 +343,31 @@ importers:
         specifier: ^6
         version: 6.0.3
 
+  packages/net:
+    dependencies:
+      '@lyra-sync-app/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      zod:
+        specifier: 'catalog:'
+        version: 4.4.3
+    devDependencies:
+      '@lyra-sync-app/config':
+        specifier: workspace:*
+        version: link:../config
+      '@lyra-sync-app/core':
+        specifier: workspace:*
+        version: link:../core
+      '@types/node':
+        specifier: ^22.13.14
+        version: 22.20.1
+      tsx:
+        specifier: ^4.22.5
+        version: 4.23.1
+      typescript:
+        specifier: ^6
+        version: 6.0.3
+
   packages/protocol:
     dependencies:
       zod:

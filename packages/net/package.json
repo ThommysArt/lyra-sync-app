@@ -1,0 +1,30 @@
+{
+  "name": "@lyra-sync-app/net",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./auth": "./src/auth.ts",
+    "./integrity": "./src/integrity.ts",
+    "./peer-client": "./src/peer-client.ts",
+    "./probe": "./src/probe.ts",
+    "./node": "./src/node/index.ts"
+  },
+  "scripts": {
+    "check-types": "tsc --noEmit",
+    "test": "tsx --test src/auth.test.ts src/integrity.test.ts src/node/peer-server.test.ts",
+    "peer-server": "tsx src/node/cli.ts"
+  },
+  "dependencies": {
+    "@lyra-sync-app/protocol": "workspace:*",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@lyra-sync-app/config": "workspace:*",
+    "@lyra-sync-app/core": "workspace:*",
+    "@types/node": "^22.13.14",
+    "tsx": "^4.22.5",
+    "typescript": "^6"
+  }
+}

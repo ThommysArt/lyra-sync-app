@@ -18,6 +18,10 @@ export const MessageTypeSchema = z.enum([
   "pair_request",
   "pair_confirm",
   "pair_reject",
+  "auth_challenge",
+  "auth_response",
+  "auth_ok",
+  "auth_fail",
   "clipboard_push",
   "clipboard_ack",
   "transfer_offer",
@@ -27,6 +31,7 @@ export const MessageTypeSchema = z.enum([
   "transfer_cancel",
   "transfer_pause",
   "transfer_resume",
+  "transfer_chunk_ack",
   "fs_list",
   "fs_list_response",
   "open_url",
@@ -86,7 +91,57 @@ export const TransferOfferPayloadSchema = TransferSchema.pick({
   totalBytes: true,
   deviceId: true,
   deviceName: true,
+}).extend({
+  /** Optional per-file SHA-256 hex for integrity verification */
+  checksums: z.array(z.string()).optional(),
+  /** Resume from byte offset when partial data already exists */
+  resumeOffset: z.number().int().nonnegative().optional(),
 });
+
+/** Auth challenge: prove knowledge of the private key bound to a fingerprint. */
+export const AuthChallengePayloadSchema = z.object({
+  challengeId: z.string().min(1),
+  nonce: z.string().min(8),
+  /** Server fingerprint the client should expect */
+  serverFingerprint: z.string().min(8),
+  expiresAt: z.number().int().nonnegative(),
+});
+export type AuthChallengePayload = z.infer<typeof AuthChallengePayloadSchema>;
+
+export const AuthResponsePayloadSchema = z.object({
+  challengeId: z.string().min(1),
+  deviceId: z.string().min(1),
+  fingerprint: z.string().min(8),
+  publicKey: z.string().min(1),
+  /** HMAC-style proof: hex(sha256(nonce + privateKey material)) */
+  proof: z.string().min(8),
+});
+export type AuthResponsePayload = z.infer<typeof AuthResponsePayloadSchema>;
+
+export const AuthOkPayloadSchema = z.object({
+  sessionToken: z.string().min(1),
+  deviceId: z.string().min(1),
+  fingerprint: z.string().min(8),
+  expiresAt: z.number().int().nonnegative(),
+});
+export type AuthOkPayload = z.infer<typeof AuthOkPayloadSchema>;
+
+export const TransferResumePayloadSchema = z.object({
+  transferId: z.string().min(1),
+  /** Bytes already received/stored on the destination */
+  offset: z.number().int().nonnegative(),
+  /** Optional expected checksum of the full file for integrity */
+  expectedChecksum: z.string().optional(),
+});
+export type TransferResumePayload = z.infer<typeof TransferResumePayloadSchema>;
+
+export const TransferChunkAckPayloadSchema = z.object({
+  transferId: z.string().min(1),
+  offset: z.number().int().nonnegative(),
+  receivedBytes: z.number().int().nonnegative(),
+  checksumOk: z.boolean().optional(),
+});
+export type TransferChunkAckPayload = z.infer<typeof TransferChunkAckPayloadSchema>;
 
 export const FsListPayloadSchema = z.object({
   path: z.string(),

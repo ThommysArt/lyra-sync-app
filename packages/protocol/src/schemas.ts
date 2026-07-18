@@ -122,6 +122,10 @@ export const TransferFileSchema = z.object({
   size: z.number().int().nonnegative(),
   mimeType: z.string().optional(),
   relativePath: z.string().optional(),
+  /** SHA-256 hex of full file contents when available */
+  checksum: z.string().optional(),
+  /** Bytes already acknowledged (for resume) */
+  transferredBytes: z.number().int().nonnegative().optional(),
 });
 export type TransferFile = z.infer<typeof TransferFileSchema>;
 
@@ -145,6 +149,12 @@ export const TransferSchema = z.object({
   /** All clashing file names when multiple files in the session conflict */
   conflictFileNames: z.array(z.string()).optional(),
   conflictResolved: ConflictActionSchema.optional(),
+  /** When true, verify file checksums after transfer completes */
+  verifyIntegrity: z.boolean().optional(),
+  /** Aggregate integrity result after verification */
+  integrityOk: z.boolean().optional(),
+  /** Resume offset across the session (sum of acknowledged file bytes) */
+  resumeOffset: z.number().int().nonnegative().optional(),
 });
 export type Transfer = z.infer<typeof TransferSchema>;
 
@@ -195,5 +205,9 @@ export const AppSettingsSchema = z.object({
   theme: z.enum(["system", "light", "dark"]).default("system"),
   discoveryEnabled: z.boolean().default(true),
   tailscaleEnabled: z.boolean().default(false),
+  /** Verify SHA-256 after transfers complete (desktop/native peer path) */
+  verifyTransferIntegrity: z.boolean().default(true),
+  /** Preferred local peer listen port (Electron / Node peer server) */
+  peerListenPort: z.number().int().positive().default(53317),
 });
 export type AppSettings = z.infer<typeof AppSettingsSchema>;
