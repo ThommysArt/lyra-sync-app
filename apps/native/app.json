@@ -8,7 +8,19 @@
     },
     "name": "Lyra",
     "slug": "lyra",
-    "plugins": ["expo-font", "expo-secure-store", "expo-document-picker"],
+    "plugins": [
+      "expo-font",
+      "expo-secure-store",
+      "expo-document-picker",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow Lyra to access your camera to scan pairing QR codes.",
+          "recordAudioAndroid": false,
+          "barcodeScannerEnabled": true
+        }
+      ]
+    ],
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true

@@ -1,9 +1,10 @@
 import { formatFingerprint } from "@lyra-sync-app/core";
 import { Stack } from "expo-router";
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import QRCode from "react-native-qrcode-svg";
 
+import { QrScanner } from "@/components/qr-scanner";
 import { useAppTheme } from "@/contexts/app-theme-context";
 import { ACCENT, ACCENT_DARK, fonts, PAGE_BG } from "@/lib/constants";
 import { useLyraSelector, useLyraStore } from "@/lib/lyra";
@@ -26,6 +27,17 @@ export default function PairScreen() {
   const qrValue = useMemo(
     () => (active ? JSON.stringify(active.payload) : ""),
     [active],
+  );
+
+  const applyScannedPayload = useCallback(
+    (data: string) => {
+      const result = store.applyPairingPayload(data.trim());
+      if (!result.ok) {
+        return { ok: false as const, error: result.error };
+      }
+      return { ok: true as const, deviceName: result.device.name };
+    },
+    [store],
   );
 
   return (
@@ -79,6 +91,15 @@ export default function PairScreen() {
           ) : null}
         </Pressable>
 
+        <QrScanner
+          isDark={isDark}
+          accent={accent}
+          ink={ink}
+          muted={muted}
+          card={card}
+          onScanned={applyScannedPayload}
+        />
+
         <Text style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 16, marginTop: 28 }}>
           Enter code
         </Text>
@@ -124,10 +145,10 @@ export default function PairScreen() {
         </Pressable>
 
         <Text style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 16, marginTop: 28 }}>
-          Scan / paste QR payload
+          Paste QR payload
         </Text>
         <Text style={{ color: muted, fontFamily: fonts.medium, fontSize: 13, marginTop: 6 }}>
-          Paste the JSON from a desktop QR scan (camera scan lands with native builds).
+          Fallback when the camera is unavailable — paste the JSON encoded in the desktop QR.
         </Text>
         <TextInput
           multiline
@@ -171,7 +192,7 @@ export default function PairScreen() {
           }}
         >
           <Text style={{ color: accent, fontFamily: fonts.semiBold, fontSize: 15 }}>
-            Apply scanned QR
+            Apply pasted QR
           </Text>
         </Pressable>
 

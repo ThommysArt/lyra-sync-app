@@ -1,0 +1,8 @@
+{
+  "name": "barcode-detector",
+  "version": "3.2.1",
+  "description": "Stub for native-only builds",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "license": "MIT"
+}

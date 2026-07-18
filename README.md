@@ -27,13 +27,120 @@ fuser -k 3001/tcp 2>/dev/null || true
 fuser -k 8081/tcp 2>/dev/null || true
 ```
 
-### Agent browser (T3 Code)
+## Testing guide (for agents)
 
-Agents should drive the **T3 Code collaborative preview**, not ad-hoc Playwright, when working from the T3 desktop app. Full procedure, auth model, and failure fixes:
+Use this after UI/store changes. Product context: [`docs/Lyra-Product-Spec.md`](docs/Lyra-Product-Spec.md). Progress / last verification notes: [`docs/AGENT-PROGRESS.md`](docs/AGENT-PROGRESS.md).
 
-→ **[`docs/T3-CODE-BROWSER.md`](docs/T3-CODE-BROWSER.md)**
+### 1. Headless smoke (no browser)
 
-**Critical:** `t3-code` MCP uses a **session Bearer** (30m idle timeout). Long chats without browser use fail with `Auth required` until you **start a new agent thread**.
+```bash
+cd apps/web && pnpm exec tsx scripts/smoke-render.mjs
+```
+
+Expect **selector stability PASS**. Catches the classic `useSyncExternalStore` infinite re-render (`Maximum update depth exceeded` / “getSnapshot should be cached”).
+
+Also useful after larger edits:
+
+```bash
+pnpm run check-types
+pnpm run check
+```
+
+### 2. Dev servers (fixed ports)
+
+| App | Command | Port |
+|-----|---------|------|
+| Web | `pnpm run dev:web` | **3001** |
+| Expo web | `cd apps/native && CI=true pnpm exec expo start --web --port 8081 --clear` | **8081** |
+
+```bash
+# Free stragglers from previous agent sessions
+fuser -k 3001/tcp 2>/dev/null || true
+fuser -k 8081/tcp 2>/dev/null || true
+
+# Confirm listeners
+ss -tlnp | grep -E ':3001|:8081' || true
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:3001/
+```
+
+If Vite binds **3002**, something still owns 3001 — free it and restart. For Expo, wait until the log shows `Web Bundled` (cold Metro can take ~60s).
+
+### 3. T3 Code collaborative browser
+
+Agents launched **from T3 Code** should drive the in-app preview via MCP — not ad-hoc Playwright.
+
+Full auth model, failures, and tool list: **[`docs/T3-CODE-BROWSER.md`](docs/T3-CODE-BROWSER.md)**.
+
+**Critical**
+
+- `t3-code` uses a **session Bearer** (idle **30 minutes**). Long chats without MCP use fail with `Auth required` → human must **start a new agent thread**.
+- Listing tools ≠ authenticated. Use `search_tool` → `use_tool` with qualified names `t3-code__preview_*`.
+- Prefer **`environment-port`** for local apps (not raw `localhost` in remote environments).
+
+**Call order**
+
+```
+1. search_tool            query: "t3-code preview"
+2. t3-code__preview_open  { show: true }
+3. t3-code__preview_navigate
+     { target: { kind: "environment-port", port: 3001, path: "/" } }
+   # Expo: port 8081; cold start may need readiness: "domContentLoaded"
+   # or a second attempt after Metro finishes bundling
+4. t3-code__preview_wait_for  { text: "Devices", timeoutMs: 15000 }
+5. t3-code__preview_snapshot  {}   # tree + console diagnostics
+6. interact: click / type / press / evaluate
+```
+
+Human shortcut: **Mod+Shift+J** toggles the preview panel.
+
+### 4. Web checklist (`:3001`)
+
+Verify no “Maximum update depth” in console (Vite HMR debug only is fine).
+
+| Step | What to do | Pass criteria |
+|------|------------|---------------|
+| Shell | Land on Devices | 3 demo peers, search, bottom nav (Devices / Clipboard / Transfers / Settings) |
+| Pair | **Pair device** → Generate pairing code | Code + fingerprint + QR (`role=img` “Pairing QR code”); Enter code tab has input + **Simulate incoming request** |
+| Transfers | Open Transfers | Active progress + history rows |
+| Conflict | **Demo conflict** | Banner + row actions: Skip / Rename / Overwrite; resolve one path |
+| Settings | Open Settings | Device name, fingerprint, defaults toggles, paired list, **Keyboard shortcuts** cheat sheet |
+| Clipboard | Open Clipboard | History items; Read system / Send to all (or equivalent) |
+| Shortcut | Ctrl/Cmd+K | Focuses “Search devices…” (often routes to `/`) |
+
+**Web automation tips**
+
+- Prefer snapshot locators: `role=button[name='…']`, `role=link[name='…']`.
+- Duplicate labels (e.g. two **Rename** buttons) need a more specific CSS selector.
+- Conflict demo also: download a conflicting PDF from remote FS, or Transfers → **Demo conflict**.
+
+### 5. Expo web checklist (`:8081`)
+
+| Step | What to do | Pass criteria |
+|------|------------|---------------|
+| Shell | Devices + floating tab bar | Demo peers, battery/status, **Send clipboard to all online**, pair control in header |
+| Pair | Open pair screen → **Tap to generate** | Pairing code + fingerprint; paste-QR path still present |
+| Incoming | **Simulate incoming request** → Accept | New device (e.g. Incoming Laptop) appears in list |
+| Transfers | Tab → **Conflict** → Rename/Skip/Overwrite | Banner + row; rename ends as completed (`report (1).pdf`-style name) |
+| Settings | Tab Settings | Fingerprint, Dark mode, defaults, paired / Unpair |
+| Clipboard | Tab Clipboard | History + Read system / Send to online + per-item actions |
+| Stability | Snapshot console | No max-update-depth; RN may WARN on deprecated `shadow*` / `pointerEvents` |
+
+**Expo automation tips**
+
+- RN `Pressable`s often render as plain **`div`s** — `role=button` may miss; use coordinates, exact-text `evaluate` click, or snapshot selectors.
+- Expo Router keeps inactive tabs mounted: `document.body.innerText` can include **all** tab screens. Trust **URL** + on-screen controls.
+- After store/hook changes with `CI=true`, restart Expo with **`--clear`**.
+
+### 6. What not to treat as product bugs
+
+- TanStack Router devtools footer on web.
+- Expo/Metro cold bundle duration and first navigate timeout.
+- Font “slow network” interventions in the preview browser.
+- No real P2P yet — demo mesh only (seeded peers, simulated transfers/pairing).
+
+### 7. After verification
+
+Update [`docs/AGENT-PROGRESS.md`](docs/AGENT-PROGRESS.md) with date, ports tested, and pass/fail notes so the next agent does not re-discover broken auth or port collisions.
 
 ## Project layout
 
@@ -48,6 +155,8 @@ packages/
   env/ config/   # Env validation + TS base config
 docs/
   Lyra-Product-Spec.md
+  T3-CODE-BROWSER.md   # T3 preview MCP auth + tools
+  AGENT-PROGRESS.md    # status, handoff, last browser results
 ```
 
 ## Features (MVP UI + demo mesh)

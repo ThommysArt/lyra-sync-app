@@ -1,7 +1,7 @@
 # Lyra — Agent Progress Report
 
-**Last updated:** 2026-07-17 (web + Expo browser re-test)  
-**Status:** MVP UI + demo mesh; P0 polish + P1 product completeness landed; web + Expo web verified in T3 preview
+**Last updated:** 2026-07-18 (live camera QR scan on native)  
+**Status:** MVP UI + demo mesh; P0 residual QR camera scan landed; web + Expo web previously verified
 
 ---
 
@@ -53,6 +53,7 @@ Ship a usable Lyra MVP per `docs/Lyra-Product-Spec.md` with:
 - [x] **Incoming pairing banner** + conflict banner (tabs layout)
 - [x] Real QR display (`react-native-qrcode-svg`)
 - [x] QR payload paste / apply scan path
+- [x] **Live camera QR scan** (`expo-camera` CameraView + barcodeTypes `qr`)
 - [x] `expo-clipboard` read/write
 - [x] `expo-document-picker` send files
 - [x] Same selector fix as web
@@ -100,9 +101,9 @@ pnpm run dev:web   # http://localhost:3001 (or next free port)
 
 ### P0 — residual
 - [x] Re-test UI in a **fresh** T3 agent thread (2026-07-17) — see “Browser verification” below
-- [ ] Live camera QR scan on device (native module / Expo Camera) — paste path works today
+- [x] Live camera QR scan on device (`expo-camera` CameraView) — paste path remains as fallback
 
-### P1 — residual polish
+### P1 — residual polish (next)
 - [ ] Optional: auto-monitor system clipboard (desktop) vs manual “Read system”
 - [ ] Richer multi-file conflict batch UI
 
@@ -178,7 +179,28 @@ Started with `cd apps/native && CI=true pnpm exec expo start --web --port 8081 -
 
 **Expo automation notes:** RN `Pressable`s are often plain `div`s (use coords / `evaluate` click on exact text). Expo Router keeps inactive tabs mounted — `document.body.innerText` concatenates all tab screens; use URL + on-screen controls.
 
-Remaining gaps: live camera QR on device; real P2P still P2.
+Remaining gaps: real P2P still P2; optional P1 clipboard auto-monitor + multi-file conflict batch UI.
+
+---
+
+## Live camera QR scan (2026-07-18)
+
+### What landed
+- `expo-camera@~57.0.1` + plugin in `apps/native/app.json` (camera permission, barcode scanner enabled, no mic).
+- `apps/native/components/qr-scanner.tsx` — permission request, `CameraView` with `barcodeTypes: ["qr"]`, scan lock/cooldown, haptics, success banner, Settings deep-link when permission permanently denied.
+- Pair screen: **Scan QR with camera** section above enter-code / paste fallback.
+- Web / Expo web: open-camera CTA explains native-only; paste path unchanged.
+
+### Install note
+Root `pnpm.overrides` maps `zxing-wasm` → `apps/native/vendor/zxing-wasm-stub` so installs skip the ~13 MB web WASM (native scanning does not need it). See `apps/native/vendor/README.md`.
+
+### Verify
+```bash
+# Device / simulator (camera required for live path)
+cd apps/native && pnpm exec expo start --clear
+# Pair → Open camera scanner → scan desktop QR JSON
+# Web: paste path still works; live camera is native-only
+```
 
 ---
 
@@ -190,3 +212,5 @@ Remaining gaps: live camera QR on device; real P2P still P2.
 4. Update this file when closing milestones.
 5. Keyboard shortcuts live in `apps/web/src/components/keyboard-shortcuts.tsx`.
 6. Conflict demo: Transfers → “Demo conflict”, or download a PDF from remote FS.
+7. Next planned work: **P1 residual** (desktop clipboard auto-monitor, multi-file conflict batch UI), then **P2 real networking**.
+8. Live QR scan needs a physical device or simulator with a camera; Expo web keeps paste-only.
