@@ -56,7 +56,7 @@ export default function TransfersScreen() {
           right={
             <View style={{ flexDirection: "row", gap: 8 }}>
               <Pressable
-                onPress={() => store.simulateIncomingConflict()}
+                onPress={() => store.simulateIncomingConflict({ multiFile: true })}
                 style={{
                   backgroundColor: isDark ? "rgba(255,196,0,0.18)" : "rgba(255,196,0,0.25)",
                   borderRadius: 999,
@@ -65,7 +65,20 @@ export default function TransfersScreen() {
                 }}
               >
                 <Text style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 13 }}>
-                  Conflict
+                  Multi
+                </Text>
+              </Pressable>
+              <Pressable
+                onPress={() => store.simulateIncomingConflict({ batch: true })}
+                style={{
+                  backgroundColor: isDark ? "rgba(255,196,0,0.18)" : "rgba(255,196,0,0.25)",
+                  borderRadius: 999,
+                  paddingHorizontal: 12,
+                  paddingVertical: 8,
+                }}
+              >
+                <Text style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 13 }}>
+                  Batch
                 </Text>
               </Pressable>
               <Pressable
@@ -110,22 +123,29 @@ export default function TransfersScreen() {
                 </Text>
 
                 {tx.status === "conflict" && (
-                  <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
-                    <Chip
-                      label="Skip"
-                      onPress={() => store.resolveTransferConflict(tx.id, "skip")}
-                      ink={ink}
-                    />
-                    <Chip
-                      label="Rename"
-                      onPress={() => store.resolveTransferConflict(tx.id, "rename")}
-                      ink={ink}
-                    />
-                    <Chip
-                      label="Overwrite"
-                      onPress={() => store.resolveTransferConflict(tx.id, "overwrite")}
-                      ink={ink}
-                    />
+                  <View style={{ gap: 8, marginTop: 10 }}>
+                    {(tx.conflictFileNames?.length ?? 0) > 1 && (
+                      <Text style={{ color: muted, fontFamily: fonts.medium, fontSize: 12 }}>
+                        {tx.conflictFileNames!.join(" · ")}
+                      </Text>
+                    )}
+                    <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+                      <Chip
+                        label="Skip"
+                        onPress={() => store.resolveTransferConflict(tx.id, "skip")}
+                        ink={ink}
+                      />
+                      <Chip
+                        label="Rename"
+                        onPress={() => store.resolveTransferConflict(tx.id, "rename")}
+                        ink={ink}
+                      />
+                      <Chip
+                        label="Overwrite"
+                        onPress={() => store.resolveTransferConflict(tx.id, "overwrite")}
+                        ink={ink}
+                      />
+                    </View>
                   </View>
                 )}
 

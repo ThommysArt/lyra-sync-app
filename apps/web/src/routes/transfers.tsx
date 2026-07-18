@@ -60,10 +60,18 @@ function TransfersPage() {
           <Button
             size="sm"
             variant="outline"
-            onClick={() => store.simulateIncomingConflict()}
+            onClick={() => store.simulateIncomingConflict({ multiFile: true })}
           >
             <AlertTriangle className="size-4" />
-            Demo conflict
+            Demo multi-file
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => store.simulateIncomingConflict({ batch: true })}
+          >
+            <AlertTriangle className="size-4" />
+            Demo batch
           </Button>
           <Button size="sm" variant="outline" onClick={() => store.clearTransferHistory()}>
             Clear history
@@ -97,8 +105,17 @@ function TransfersPage() {
                   {tx.status === "conflict" && (
                     <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-3">
                       <p className="text-sm font-medium">
-                        “{tx.conflictFileName ?? names}” already exists
+                        {(tx.conflictFileNames?.length ?? 0) > 1
+                          ? `${tx.conflictFileNames!.length} files already exist`
+                          : `“${tx.conflictFileName ?? names}” already exists`}
                       </p>
+                      {(tx.conflictFileNames?.length ?? 0) > 1 && (
+                        <ul className="mt-1 list-inside list-disc text-xs text-muted-foreground">
+                          {tx.conflictFileNames!.map((n) => (
+                            <li key={n}>{n}</li>
+                          ))}
+                        </ul>
+                      )}
                       <div className="mt-2 flex flex-wrap gap-2">
                         <Button
                           size="sm"
