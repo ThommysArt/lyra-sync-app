@@ -458,7 +458,10 @@ export async function handlePeerEnvelope(
           state.diskPath = fin.filePath;
         } else if (state.checksums?.some(Boolean) && state.chunks.length > 0) {
           const { checksumBytes, checksumsMatch } = await import("./integrity");
-          const totalLen = state.chunks.reduce((a, c) => a + c.byteLength, 0);
+          const totalLen = state.chunks.reduce(
+            (a: number, c: Uint8Array) => a + c.byteLength,
+            0,
+          );
           const merged = new Uint8Array(totalLen);
           let o = 0;
           for (const c of state.chunks) {

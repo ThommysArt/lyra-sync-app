@@ -20,9 +20,11 @@ import { createEnvelope, parseEnvelope } from "./envelope";
 import { isSealedString, openSealedJson, sealJson } from "./seal";
 
 /** Marker object for AES-GCM sealed payloads (post-pairing encryption default). */
-export const SEALED_PAYLOAD_KEY = "__lyra_sealed";
+export const SEALED_PAYLOAD_KEY = "__lyra_sealed" as const;
 
-export function isSealedPayload(payload: unknown): payload is { [SEALED_PAYLOAD_KEY]: string } {
+export type SealedEnvelopePayload = { [SEALED_PAYLOAD_KEY]: string };
+
+export function isSealedPayload(payload: unknown): payload is SealedEnvelopePayload {
   return (
     typeof payload === "object" &&
     payload !== null &&
@@ -34,7 +36,7 @@ export function isSealedPayload(payload: unknown): payload is { [SEALED_PAYLOAD_
 export async function sealEnvelopePayload(
   sharedSecret: string,
   payload: unknown,
-): Promise<{ [typeof SEALED_PAYLOAD_KEY]: string }> {
+): Promise<SealedEnvelopePayload> {
   const sealed = await sealJson(sharedSecret, payload);
   return { [SEALED_PAYLOAD_KEY]: sealed };
 }

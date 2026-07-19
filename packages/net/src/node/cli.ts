@@ -32,7 +32,15 @@ function createFallbackIdentity(): DeviceIdentity {
 
 async function resolveIdentity(): Promise<DeviceIdentity> {
   try {
-    const core = await import("@lyra-sync-app/core");
+    // Dynamic specifier avoids a hard dependency on core (net stays leaf for packaging).
+    const coreSpec = "@lyra-sync-app/core";
+    const core = (await import(coreSpec)) as {
+      createDeviceIdentity: (opts: {
+        name: string;
+        platform: "linux";
+        type: "desktop";
+      }) => Promise<{ ok: true; identity: DeviceIdentity } | { ok: false }>;
+    };
     const created = await core.createDeviceIdentity({
       name: process.env.LYRA_NAME ?? "Lyra Peer Server",
       platform: "linux",
