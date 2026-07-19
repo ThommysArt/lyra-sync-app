@@ -16,9 +16,10 @@ export function IncomingPairBanner() {
     <div className="border-b border-primary/20 bg-primary/10 px-4 py-3">
       <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-3">
         <div>
-          <p className="text-sm font-medium">Pairing request from {req.payload.name}</p>
+          <p className="text-sm font-medium">Accept pairing with {req.payload.name}?</p>
           <p className="text-xs text-muted-foreground">
-            {req.payload.platform} · fingerprint {req.payload.fingerprint.slice(0, 8)}…
+            {req.payload.platform} · fingerprint {req.payload.fingerprint.slice(0, 8)}… · Accept to
+            pair both devices
           </p>
         </div>
         <div className="flex gap-2">

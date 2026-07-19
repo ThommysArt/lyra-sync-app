@@ -14,7 +14,13 @@ git clone --depth 1 https://github.com/localsend/localsend.git ~/Works/examples/
 
 | Pattern | LocalSend | Lyra |
 |---------|-----------|------|
-| LAN discovery | UDP multicast announce | `packages/net/src/node/discovery.ts` — inspired group/port culture (`224.0.0.167` / `53318`) |
+| LAN discovery | UDP multicast + HTTP /24 scan | `packages/net/src/node/discovery.ts` + `scanLanForPeers` |
+| Multicast group | `224.0.0.167` (Android-friendly) | Same `224.0.0.167` |
+| Multicast / HTTP ports | Same port `53317` for both | HTTP `53317`, UDP discovery `53318` |
+| Per-interface join | `joinMulticast(group, interface)` each NIC | `addMembership(group, ifaceAddr)` each IPv4 |
+| Announce + reply | Announcer triggers UDP/TCP reply so both see each other | `announce: true` → peer replies with `discover_response` |
+| Announce burst | 100ms / 500ms / 2s | Same burst on start + Refresh |
+| HTTP subnet scan | Concurrent /24 probe (50) | `scanLanForPeers` on Refresh discovery |
 | Fixed peer HTTP port | Yes | `53317` default |
 | Trust after first pin/pair | Session / pin model | Dual-confirm + mutual `authSecret` |
 | Chunked file transfer | HTTP multipart / API | Custom Zod envelopes `transfer_offer` / `transfer_chunk` |

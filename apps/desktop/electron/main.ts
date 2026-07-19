@@ -16,6 +16,15 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+// Dev / CI Linux often lacks a setuid chrome-sandbox. Honor flag set by scripts/dev.ts.
+if (
+  process.env.ELECTRON_DISABLE_SANDBOX === "1" ||
+  process.argv.includes("--no-sandbox")
+) {
+  app.commandLine.appendSwitch("no-sandbox");
+  app.commandLine.appendSwitch("disable-setuid-sandbox");
+}
+
 import { createDeviceIdentity, hashPairingCode } from "@lyra-sync-app/core";
 import {
   deleteOsPath,
@@ -47,6 +56,8 @@ type RuntimeStatus = {
   running: boolean;
   port: number | null;
   url: string | null;
+  /** Non-loopback LAN IPv4 for pairing QR / candidates */
+  lanHost: string | null;
   discoveryActive: boolean;
   lastError: string | null;
   identity: DeviceIdentity | null;
@@ -80,6 +91,7 @@ const status: RuntimeStatus = {
   running: false,
   port: null,
   url: null,
+  lanHost: null,
   discoveryActive: false,
   lastError: null,
   identity: null,
@@ -90,6 +102,7 @@ function broadcastStatus() {
     running: status.running,
     port: status.port,
     url: status.url,
+    lanHost: status.lanHost,
     discoveryActive: status.discoveryActive,
     lastError: status.lastError,
     updatedAt: Date.now(),
@@ -122,6 +135,45 @@ async function ensureIdentity() {
     } catch {
       // keep in memory only
     }
+  }
+}
+
+/**
+ * Align peer-server identity with the renderer store so /lyra/info and
+ * pair_confirm match what the UI thinks this device is.
+ */
+function adoptRendererIdentity(next: DeviceIdentity, nextPrivateKey?: string | null) {
+  identity = next;
+  if (nextPrivateKey) privateKey = nextPrivateKey;
+  status.identity = identity;
+  peer?.setIdentity(next);
+  // Re-bind discovery announces with the same identity
+  if (discovery && peer) {
+    void discovery.stop().then(async () => {
+      if (!identity || !peer) return;
+      discovery = await startDiscovery({
+        identity,
+        peerPort: peer.port,
+        advertiseHost: status.lanHost ?? peer.getLanHost() ?? undefined,
+        getPairingOffer: () => {
+          if (!pairingOffer || pairingOffer.expiresAt < Date.now()) return null;
+          return pairingOffer;
+        },
+        onLog: (line) => console.log(line),
+        onPeer: (announce) => {
+          console.log(
+            "[lyra] discovered peer",
+            announce.identity?.name,
+            announce.host,
+            announce.port,
+            announce.pairing ? `(pairing offer)` : "",
+          );
+          mainWindow?.webContents.send("lyra:discovered-peer", announce);
+        },
+      });
+      status.discoveryActive = true;
+      broadcastStatus();
+    });
   }
 }
 
@@ -247,16 +299,39 @@ async function startNetworking() {
     status.running = true;
     status.port = peer.port;
     status.url = peer.url;
+    status.lanHost = peer.getLanHost() ?? null;
+    // Prefer a non-loopback URL in status for pairing candidates
+    if (status.lanHost) {
+      status.url = `${peer.protocol}://${status.lanHost}:${peer.port}`;
+    }
     status.lastError = null;
 
     discovery = await startDiscovery({
       identity,
       peerPort: peer.port,
+      advertiseHost: status.lanHost ?? undefined,
+      getPairingOffer: () => {
+        if (!pairingOffer || pairingOffer.expiresAt < Date.now()) return null;
+        return pairingOffer;
+      },
+      onLog: (line) => console.log(line),
       onPeer: (announce) => {
+        console.log(
+          "[lyra] discovered peer",
+          announce.identity?.name,
+          announce.host,
+          announce.port,
+          announce.pairing ? `(pairing offer)` : "",
+        );
         mainWindow?.webContents.send("lyra:discovered-peer", announce);
       },
     });
     status.discoveryActive = true;
+    console.log(
+      "[lyra] discovery active",
+      discovery.localAddresses(),
+      "multicast → peers on same LAN",
+    );
     broadcastStatus();
 
     // Best-effort Tailscale MagicDNS peer discovery
@@ -281,6 +356,7 @@ async function stopNetworking() {
   status.running = false;
   status.port = null;
   status.url = null;
+  status.lanHost = null;
   broadcastStatus();
 }
 
@@ -334,8 +410,10 @@ function installApplicationMenu() {
 
 function createWindow() {
   const isMac = process.platform === "darwin";
-  const isWin = process.platform === "win32";
 
+  // Fully custom chrome (T3-style):
+  // - macOS: keep the frame for traffic lights, hide the title bar (hiddenInset)
+  // - Win/Linux: frameless; renderer draws min/max/close and drag regions
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
@@ -344,23 +422,18 @@ function createWindow() {
     title: "Lyra",
     show: false,
     backgroundColor: "#0B0F17",
-    // Merge window chrome with the app shell (sidebar drag region in renderer).
     autoHideMenuBar: true,
-    titleBarStyle: isMac || isWin ? "hidden" : "default",
+    transparent: false,
+    hasShadow: true,
     ...(isMac
       ? {
-          trafficLightPosition: { x: 16, y: 18 },
+          frame: true,
+          titleBarStyle: "hiddenInset" as const,
+          trafficLightPosition: { x: 14, y: 16 },
         }
-      : {}),
-    ...(isWin
-      ? {
-          titleBarOverlay: {
-            color: "#0B0F17",
-            symbolColor: "#F5F7FF",
-            height: 44,
-          },
-        }
-      : {}),
+      : {
+          frame: false,
+        }),
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -369,9 +442,32 @@ function createWindow() {
     },
   });
 
+  // Keep a short title if any WM still surfaces it
+  mainWindow.setTitle("Lyra");
+  mainWindow.webContents.on("page-title-updated", (e) => {
+    e.preventDefault();
+    mainWindow?.setTitle("Lyra");
+  });
+
+  const broadcastWindowState = () => {
+    if (!mainWindow) return;
+    mainWindow.webContents.send("lyra:window-state", {
+      maximized: mainWindow.isMaximized(),
+      fullscreen: mainWindow.isFullScreen(),
+      focused: mainWindow.isFocused(),
+    });
+  };
+  mainWindow.on("maximize", broadcastWindowState);
+  mainWindow.on("unmaximize", broadcastWindowState);
+  mainWindow.on("enter-full-screen", broadcastWindowState);
+  mainWindow.on("leave-full-screen", broadcastWindowState);
+  mainWindow.on("focus", broadcastWindowState);
+  mainWindow.on("blur", broadcastWindowState);
+
   mainWindow.once("ready-to-show", () => {
     mainWindow?.show();
     mainWindow?.focus();
+    broadcastWindowState();
   });
 
   // Fallback if ready-to-show never fires (some Linux WMs)
@@ -439,6 +535,7 @@ app.whenReady().then(async () => {
     running: status.running,
     port: status.port,
     url: status.url,
+    lanHost: status.lanHost,
     discoveryActive: status.discoveryActive,
     lastError: status.lastError,
     updatedAt: Date.now(),
@@ -446,10 +543,83 @@ app.whenReady().then(async () => {
 
   ipcMain.handle("lyra:get-identity", () => status.identity);
 
+  /** Renderer is source of truth for device identity after hydrate */
+  ipcMain.handle(
+    "lyra:set-identity",
+    (
+      _e,
+      payload: { identity: DeviceIdentity; privateKey?: string | null },
+    ) => {
+      if (!payload?.identity?.id || !payload.identity.fingerprint) {
+        return { ok: false as const, error: "Invalid identity" };
+      }
+      adoptRendererIdentity(payload.identity, payload.privateKey);
+      return { ok: true as const, identity: status.identity };
+    },
+  );
+
+  /**
+   * Host user Accept/Decline for an in-flight pair_request (long-poll).
+   * Joiner's HTTP request unblocks with pair_confirm / pair_reject.
+   */
+  ipcMain.handle(
+    "lyra:resolve-pair-request",
+    (
+      _e,
+      payload: {
+        deviceId?: string;
+        token?: string;
+        accepted: boolean;
+        reason?: string;
+      },
+    ) => {
+      if (!peer) return { ok: false as const, error: "Peer server not running" };
+      const lan = peer.getLanHost?.() ?? undefined;
+      const decision = payload.accepted
+        ? {
+            accepted: true as const,
+            host: lan,
+            port: peer.port,
+          }
+        : {
+            accepted: false as const,
+            reason: payload.reason ?? "rejected",
+          };
+      const matched = peer.resolvePairRequest(
+        { deviceId: payload.deviceId, token: payload.token },
+        decision,
+      );
+      return { ok: matched, matched };
+    },
+  );
+
   ipcMain.handle("lyra:get-shell-info", () => ({
     platform: process.platform,
     isDesktop: true,
     downloadDirectory: resolveDownloadDir(),
+    customChrome: true,
+    usesSystemTrafficLights: process.platform === "darwin",
+  }));
+
+  ipcMain.handle("lyra:window-minimize", () => {
+    mainWindow?.minimize();
+  });
+
+  ipcMain.handle("lyra:window-maximize-toggle", () => {
+    if (!mainWindow) return { maximized: false };
+    if (mainWindow.isMaximized()) mainWindow.unmaximize();
+    else mainWindow.maximize();
+    return { maximized: mainWindow.isMaximized() };
+  });
+
+  ipcMain.handle("lyra:window-close", () => {
+    mainWindow?.close();
+  });
+
+  ipcMain.handle("lyra:window-get-state", () => ({
+    maximized: mainWindow?.isMaximized() ?? false,
+    fullscreen: mainWindow?.isFullScreen() ?? false,
+    focused: mainWindow?.isFocused() ?? false,
   }));
 
   ipcMain.handle("lyra:get-download-directory", () => resolveDownloadDir());
@@ -503,6 +673,7 @@ app.whenReady().then(async () => {
       running: status.running,
       port: status.port,
       url: status.url,
+      lanHost: status.lanHost,
       discoveryActive: status.discoveryActive,
       lastError: status.lastError,
       updatedAt: Date.now(),
@@ -544,6 +715,9 @@ app.whenReady().then(async () => {
     ) => {
       if (!offer) {
         pairingOffer = null;
+        console.log("[lyra] pairing offer cleared");
+        // Re-announce so peers drop stale offer
+        discovery?.announce();
         return { ok: true };
       }
       const codeHash = await hashPairingCode(offer.code);
@@ -552,6 +726,15 @@ app.whenReady().then(async () => {
         token: offer.token,
         expiresAt: offer.expiresAt,
       };
+      console.log(
+        "[lyra] pairing offer active",
+        `code=${offer.code}`,
+        `hash=${codeHash.slice(0, 12)}…`,
+        `until=${new Date(offer.expiresAt).toISOString()}`,
+        `info=http://${status.lanHost ?? "127.0.0.1"}:${status.port ?? PEER_PORT}/lyra/info`,
+      );
+      // Burst announce so joiners see the offer over multicast immediately
+      discovery?.announce();
       return { ok: true, codeHash };
     },
   );
@@ -572,6 +755,16 @@ app.whenReady().then(async () => {
     const peers = tailscalePeersToProbeTargets(ts.peers, peer?.port ?? PEER_PORT);
     mainWindow?.webContents.send("lyra:tailscale-peers", peers);
     return { ok: true as const, peers, backendState: ts.backendState };
+  });
+
+  /** LocalSend-style: fire UDP multicast announce burst (user Refresh discovery). */
+  ipcMain.handle("lyra:announce-discovery", () => {
+    if (!discovery) return { ok: false as const, error: "Discovery not running" };
+    discovery.announce();
+    return {
+      ok: true as const,
+      addresses: discovery.localAddresses(),
+    };
   });
 
   // Show the window first so a peer-port conflict can't leave users with no UI.

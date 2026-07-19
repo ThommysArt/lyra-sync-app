@@ -143,16 +143,19 @@ function SettingsPage() {
             <div>
               <p className="text-sm font-medium">Download location</p>
               <p className="text-xs text-muted-foreground">
-                Where received files are saved on this device
-                {desktop ? " (desktop shell)." : " (set on desktop shell)."}
+                {desktop
+                  ? "Where received files are saved. Opens the system folder dialog."
+                  : "In the browser, received files download via the browser download UI. Use the desktop or mobile app to pick a permanent folder."}
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
               <Input
-                readOnly={!desktop}
-                value={downloadPath || "System Downloads"}
+                readOnly
+                value={
+                  downloadPath ||
+                  (desktop ? "System Downloads (default)" : "Browser downloads (default)")
+                }
                 className="min-w-0 flex-1 rounded-full font-mono text-xs"
-                onChange={(e) => setDownloadPath(e.target.value)}
               />
               {desktop ? (
                 <>
@@ -262,7 +265,7 @@ function SettingsPage() {
         <CardHeader>
           <CardTitle>Network</CardTitle>
           <CardDescription>
-            Local peer server, discovery, and Tailscale probing.
+            Local peer server, UDP multicast + HTTP subnet scan (LocalSend-style), and Tailscale.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">

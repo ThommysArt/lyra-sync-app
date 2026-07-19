@@ -5,6 +5,7 @@ export {
 } from "./peer-server";
 export {
   startDiscovery,
+  listLocalIPv4Addresses,
   LYRA_MULTICAST_ADDRESS,
   LYRA_MULTICAST_PORT,
   type DiscoveryHandle,

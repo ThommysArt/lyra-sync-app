@@ -5,6 +5,7 @@
 | App | Command | Port |
 |-----|---------|------|
 | Web | `pnpm run dev:web` | **3001** |
+| Desktop | `pnpm run dev:web` (terminal 1) + `pnpm run dev:desktop` (terminal 2) | UI on **3001** via Electron |
 | Expo web | `cd apps/native && CI=true pnpm exec expo start --web --port 8081 --clear` | **8081** |
 
 If Vite prints another port, something is still bound to 3001 — free it:
@@ -13,6 +14,12 @@ If Vite prints another port, something is still bound to 3001 — free it:
 fuser -k 3001/tcp 2>/dev/null || true
 fuser -k 8081/tcp 2>/dev/null || true
 ```
+
+### Desktop / Electron notes
+
+- Dev launcher auto-adds `--no-sandbox` on Linux when `chrome-sandbox` is not root/setuid (common with pnpm-installed Electron).
+- It also clears `ELECTRON_RUN_AS_NODE` so the binary does not fall back to plain Node.
+- Demo mesh is **off by default**. Opt in with `VITE_LYRA_SEED_DEMO=1` (web/e2e) or `EXPO_PUBLIC_LYRA_SEED_DEMO=1` (native).
 
 ## T3 Code browser (required for UI verification in T3)
 

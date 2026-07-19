@@ -86,42 +86,67 @@ function TransfersPage() {
             <Upload className="size-4" />
             Send files
           </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => store.simulateIncomingConflict({ multiFile: true })}
-          >
-            <AlertTriangle className="size-4" />
-            Demo multi-file
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => store.simulateIncomingConflict({ batch: true })}
-          >
-            <AlertTriangle className="size-4" />
-            Demo batch
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => {
-              if (onlineIds.length === 0) return;
-              store.startFileTransfer(
-                [onlineIds[0]!],
-                [
-                  { name: "movie.mp4", size: 80_000_000, mimeType: "video/mp4" },
-                  { name: "sidecar.json", size: 4_000, mimeType: "application/json" },
-                ],
-                { initialOffset: 32_000_000, verifyIntegrity: true },
-              );
-            }}
-          >
-            Demo resume
-          </Button>
           <Button size="sm" variant="outline" onClick={() => store.clearTransferHistory()}>
             Clear history
           </Button>
+          {/* Opt-in dummy conflict helpers — only when VITE_LYRA_SEED_DEMO=1 */}
+          {import.meta.env.VITE_LYRA_SEED_DEMO === "1" ||
+          import.meta.env.VITE_LYRA_SEED_DEMO === "true" ? (
+            <>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => store.simulateIncomingConflict({ multiFile: true })}
+              >
+                <AlertTriangle className="size-4" />
+                Demo multi-file
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => store.simulateIncomingConflict({ batch: true })}
+              >
+                <AlertTriangle className="size-4" />
+                Demo batch
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  if (onlineIds.length === 0) {
+                    // No device — still allow local resume demo via forceSimulate
+                    store.startFileTransfer(
+                      ["local_demo"],
+                      [
+                        { name: "movie.mp4", size: 80_000_000, mimeType: "video/mp4" },
+                        { name: "sidecar.json", size: 4_000, mimeType: "application/json" },
+                      ],
+                      {
+                        initialOffset: 32_000_000,
+                        verifyIntegrity: true,
+                        forceSimulate: true,
+                      },
+                    );
+                    return;
+                  }
+                  store.startFileTransfer(
+                    [onlineIds[0]!],
+                    [
+                      { name: "movie.mp4", size: 80_000_000, mimeType: "video/mp4" },
+                      { name: "sidecar.json", size: 4_000, mimeType: "application/json" },
+                    ],
+                    {
+                      initialOffset: 32_000_000,
+                      verifyIntegrity: true,
+                      forceSimulate: true,
+                    },
+                  );
+                }}
+              >
+                Demo resume
+              </Button>
+            </>
+          ) : null}
         </div>
       </div>
 

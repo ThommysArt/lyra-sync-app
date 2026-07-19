@@ -77,70 +77,17 @@ export default function TransfersScreen() {
           subtitle="Pause, resume, and history"
           skipTopInset={hasTopBanners}
           right={
-            <View style={{ flexDirection: "row", gap: 8 }}>
-              <Pressable
-                onPress={() => store.simulateIncomingConflict({ multiFile: true })}
-                style={{
-                  backgroundColor: isDark ? "rgba(255,196,0,0.18)" : "rgba(255,196,0,0.25)",
-                  borderRadius: 999,
-                  paddingHorizontal: 12,
-                  paddingVertical: 8,
-                }}
-              >
-                <Text style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 13 }}>
-                  Multi
-                </Text>
-              </Pressable>
-              <Pressable
-                onPress={() => store.simulateIncomingConflict({ batch: true })}
-                style={{
-                  backgroundColor: isDark ? "rgba(255,196,0,0.18)" : "rgba(255,196,0,0.25)",
-                  borderRadius: 999,
-                  paddingHorizontal: 12,
-                  paddingVertical: 8,
-                }}
-              >
-                <Text style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 13 }}>
-                  Batch
-                </Text>
-              </Pressable>
-              <Pressable
-                onPress={() => {
-                  if (onlineIds.length === 0) return;
-                  store.startFileTransfer(
-                    [onlineIds[0]!],
-                    [
-                      { name: "movie.mp4", size: 80_000_000, mimeType: "video/mp4" },
-                      { name: "sidecar.json", size: 4_000, mimeType: "application/json" },
-                    ],
-                    { initialOffset: 32_000_000, verifyIntegrity: true, forceSimulate: true },
-                  );
-                }}
-                style={{
-                  backgroundColor: isDark ? "rgba(255,196,0,0.18)" : "rgba(255,196,0,0.25)",
-                  borderRadius: 999,
-                  paddingHorizontal: 12,
-                  paddingVertical: 8,
-                }}
-              >
-                <Text style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 13 }}>
-                  Resume
-                </Text>
-              </Pressable>
-              <Pressable
-                onPress={() => void pickAndSend()}
-                style={{
-                  backgroundColor: accent,
-                  borderRadius: 999,
-                  paddingHorizontal: 12,
-                  paddingVertical: 8,
-                }}
-              >
-                <Text style={{ color: "#fff", fontFamily: fonts.semiBold, fontSize: 13 }}>
-                  Send
-                </Text>
-              </Pressable>
-            </View>
+            <Pressable
+              onPress={() => void pickAndSend()}
+              style={{
+                backgroundColor: accent,
+                borderRadius: 999,
+                paddingHorizontal: 12,
+                paddingVertical: 8,
+              }}
+            >
+              <Text style={{ color: "#fff", fontFamily: fonts.semiBold, fontSize: 13 }}>Send</Text>
+            </Pressable>
           }
         />
 

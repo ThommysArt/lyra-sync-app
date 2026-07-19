@@ -2,10 +2,12 @@ import {
   applyChunkProgress,
   canResumeTransfer,
   deriveMutualAuthSecret,
-  fetchPeerInfo,
+  expandLanCandidates,
+  findPeerByPairingCode,
   isLikelyTailscaleHost,
   probePeer,
   probePeers,
+  scanLanForPeers,
   type ProbeResult,
 } from "@lyra-sync-app/net";
 import type {
@@ -62,15 +64,36 @@ export type ActivePairingSession = {
   payload: PairingPayload;
 };
 
+/** Joiner is waiting for the code-hosting device to Accept. */
+export type OutboundPairing = {
+  code: string;
+  token: string;
+  hostName: string;
+  host: string;
+  port: number;
+  startedAt: number;
+  status: "waiting" | "completed" | "failed";
+  error?: string;
+};
+
 /** Runtime status of the local HTTP peer server (Electron / Node). */
 export type PeerServerStatus = {
   running: boolean;
   port: number | null;
   url: string | null;
+  /** Non-loopback LAN IP when known (for pairing candidates / QR) */
+  lanHost?: string | null;
   discoveryActive: boolean;
   lastError: string | null;
   updatedAt: number;
 };
+
+export type PairDecisionResolver = (payload: {
+  deviceId?: string;
+  token?: string;
+  accepted: boolean;
+  reason?: string;
+}) => Promise<{ ok: boolean; matched?: boolean; error?: string } | void>;
 
 export type LyraState = {
   ready: boolean;
@@ -81,6 +104,26 @@ export type LyraState = {
   transfers: Transfer[];
   settings: AppSettings;
   activePairing: ActivePairingSession | null;
+  /** Joiner-side: waiting for host Accept after entering a code */
+  outboundPairing: OutboundPairing | null;
+  /**
+   * Pairing offers heard via multicast (code hash → host). Cleared when expired.
+   * Speeds up code entry without full /24 HTTP scan.
+   */
+  lanPairingOffers: Array<{
+    codeHash: string;
+    token: string;
+    expiresAt: number;
+    host: string;
+    port: number;
+    deviceId: string;
+    name: string;
+    fingerprint: string;
+    publicKey: string;
+    type?: PairedDevice["type"];
+    platform?: PairedDevice["platform"];
+    seenAt: number;
+  }>;
   incomingPairRequests: IncomingPairingRequest[];
   selectedDeviceId: string | null;
   /** Local system clipboard mirror (text) */
@@ -92,6 +135,11 @@ export type LyraState = {
   lastProbeSummary: string | null;
   /** Cached remote FS listings keyed by `${deviceId}::${path}` */
   remoteFsCache: Record<string, FileEntry[]>;
+  /**
+   * Optional local LAN IP hint (native Network API / desktop shell) used to
+   * expand /24 candidates when looking up a pairing code.
+   */
+  localLanHint: string | null;
 };
 
 export type LyraStore = {
@@ -104,23 +152,37 @@ export type LyraStore = {
   startPairingSession: () => ActivePairingSession;
   cancelPairingSession: () => void;
   /**
-   * Enter a pairing code from another device.
-   * Probes known hosts / localhost for matching codeHash; falls back to synthetic pending peer for offline demo.
-   * Dual-confirm: queues a pending request — call confirmIncomingPair to finish.
+   * Enter a pairing code from another device on the same network.
+   * Finds the host advertising that code, sends pair_request, and waits for
+   * the host user to Accept. Both devices are paired when accept succeeds.
+   *
+   * @param code Short code from the other device
+   * @param opts.host Optional host/IP when LAN scan fails (Expo Go / AP isolation)
    */
   submitPairingCode: (
     code: string,
+    opts?: { host?: string; port?: number },
   ) => Promise<
-    | { ok: true; pending: true; requestId: string; resolvedLive?: boolean }
+    | { ok: true; pending: true; waitingForHost: true; deviceName: string }
+    | { ok: true; device: PairedDevice }
     | { ok: false; error: string }
   >;
-  /** Accept a pending dual-confirm pair (scan / code / wire / simulate). */
+  /** Accept a pending pair request (host side — device that shared the code). */
   confirmIncomingPair: (requestId: string) => void | Promise<void>;
   rejectIncomingPair: (requestId: string) => void;
   /** Demo helper: simulate an incoming pair request */
   simulateIncomingPair: () => void;
   /** Enqueue a wire-originated pair_request (desktop peer server → store). */
   enqueuePairRequest: (payload: PairingPayload, source?: IncomingPairingRequest["source"]) => void;
+  /**
+   * Desktop bridge installs this so Accept/Decline unblocks the joiner's long-poll.
+   */
+  setPairDecisionResolver: (resolver: PairDecisionResolver | null) => void;
+  /**
+   * Desktop bridge installs this to fire a UDP multicast announce burst
+   * (LocalSend-style) when the user taps Refresh discovery.
+   */
+  setDiscoveryAnnouncer: (fn: (() => void) | null) => void;
   /** Remove local trust. Set silent to skip remote notify (already revoked by peer). */
   unpairDevice: (deviceId: string, opts?: { silent?: boolean }) => void;
   /**
@@ -156,6 +218,8 @@ export type LyraStore = {
     };
     host: string;
     port: number;
+    /** Active pairing offer from multicast (code hash only) */
+    pairing?: { codeHash: string; token: string; expiresAt: number };
   }) => void;
   /**
    * Record a completed inbound wire transfer (desktop peer server → UI).
@@ -189,6 +253,8 @@ export type LyraStore = {
   probeTailscalePeers: () => Promise<ProbeResult[]>;
   /** Desktop shell reports local HTTP peer server state */
   setPeerServerStatus: (patch: Partial<PeerServerStatus>) => void;
+  /** Seed LAN /24 scan when looking up pairing codes (native IP / desktop LAN). */
+  setLocalLanHint: (host: string | null) => void;
   /** Resume a paused/partial transfer from last acknowledged offset */
   resumeTransfer: (id: string) => void;
   renameDevice: (deviceId: string, nickname: string) => void;
@@ -256,14 +322,17 @@ export type LyraStore = {
   sendUrl: (url: string, deviceIds: string[]) => void;
   /**
    * Apply a pairing payload from a scanned QR.
-   * Dual-confirm: queues pending request — does not pair until confirmIncomingPair.
+   * When host/port are present, sends pair_request and waits for host Accept
+   * (same as code entry). Otherwise queues a local confirm for offline/demo.
    */
   applyPairingPayload: (
     payload: PairingPayload | string,
-  ) =>
+  ) => Promise<
+    | { ok: true; pending: true; waitingForHost: true; deviceName: string }
     | { ok: true; pending: true; requestId: string; deviceName: string }
     | { ok: true; device: PairedDevice }
-    | { ok: false; error: string };
+    | { ok: false; error: string }
+  >;
   dismissToast: () => void;
 };
 
@@ -287,10 +356,13 @@ function createInitialState(): LyraState {
     transfers: [],
     settings: defaultSettings,
     activePairing: null,
+    outboundPairing: null,
+    lanPairingOffers: [],
     incomingPairRequests: [],
     selectedDeviceId: null,
     localClipboardText: "",
     toast: null,
+    localLanHint: null,
     peerServer: {
       running: false,
       port: null,
@@ -407,6 +479,8 @@ async function finalizePairDevice(
     payload: PairingPayload;
     source: IncomingPairingRequest["source"];
     code?: string;
+    /** When true (default false for host long-poll path), also notify remote via pair_request */
+    notifyRemote?: boolean;
   },
 ): Promise<PairedDevice | null> {
   const s = getState();
@@ -431,7 +505,11 @@ async function finalizePairDevice(
     pairedAt: now,
     lastSeenAt: now,
     online: true,
-    connectionType: input.payload.host ? "manual" : "local",
+    connectionType: input.payload.host
+      ? input.payload.host.startsWith("100.")
+        ? "tailscale"
+        : "local"
+      : "local",
     autoAcceptTransfers: s.settings.autoAcceptTransfers,
     autoAcceptClipboard: s.settings.autoAcceptClipboard,
     showInMainList: true,
@@ -460,6 +538,7 @@ async function finalizePairDevice(
       }),
     ],
     activePairing: null,
+    outboundPairing: null,
     // Ensure no stuck banners for this peer
     incomingPairRequests: st.incomingPairRequests.filter(
       (r) => r.payload.deviceId !== device.id && r.payload.fingerprint !== device.fingerprint,
@@ -467,9 +546,8 @@ async function finalizePairDevice(
   }));
   persist();
 
-  // Notify the remote host when we have an address (wire dual-confirm path).
-  // Host may be filled by the peer server from the TCP remote address when loopback.
-  if (device.host && s.identity) {
+  // Optional legacy notify (prefer long-poll pair_confirm on the host path)
+  if (input.notifyRemote && device.host && s.identity) {
     const peerStatus = getState().peerServer;
     let localHost: string | undefined;
     if (peerStatus.url) {
@@ -479,7 +557,6 @@ async function finalizePairDevice(
         localHost = undefined;
       }
     }
-    // Loopback is useless to the remote peer — omit so server can inject TCP remote IP
     if (
       !localHost ||
       localHost === "127.0.0.1" ||
@@ -511,6 +588,41 @@ async function finalizePairDevice(
   }
 
   return device;
+}
+
+/** Local IPv4 advertised by our peer server, if any. */
+function localLanHostFromState(s: LyraState): string | undefined {
+  if (s.peerServer.lanHost) {
+    const h = s.peerServer.lanHost;
+    if (h && h !== "127.0.0.1" && h !== "localhost" && h !== "0.0.0.0") return h;
+  }
+  if (s.peerServer.url) {
+    try {
+      const h = new URL(s.peerServer.url).hostname;
+      if (h && h !== "127.0.0.1" && h !== "localhost" && h !== "0.0.0.0" && h !== "[::1]") {
+        return h;
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return undefined;
+}
+
+function collectPairingCandidates(s: LyraState): { host: string; port?: number }[] {
+  const port = s.settings.peerListenPort ?? LYRA_DEFAULT_PORT;
+  const seeds: { host: string; port?: number }[] = [];
+  for (const d of s.devices) {
+    if (d.host) seeds.push({ host: d.host, port: d.port ?? port });
+  }
+  seeds.push({ host: "127.0.0.1", port });
+  seeds.push({ host: "localhost", port });
+
+  // Prefer LAN IP from peer server / native hint for /24 expansion
+  const lan = localLanHostFromState(s) ?? s.localLanHint ?? undefined;
+  if (lan) seeds.push({ host: lan, port });
+
+  return seeds;
 }
 
 function trimClipboardHistory(
@@ -561,20 +673,39 @@ function applyProbeToDevice(d: PairedDevice, result: ProbeResult, now: number): 
 
 function defaultSeedDemo(explicit?: boolean): boolean {
   if (typeof explicit === "boolean") return explicit;
-  // Production / release builds should not seed fake peers
+  // Demo mesh is opt-in only — real pairing / transfers need empty state to test.
   try {
     const env =
       typeof process !== "undefined"
         ? (process.env as Record<string, string | undefined>)
         : undefined;
     if (env?.LYRA_SEED_DEMO === "1" || env?.LYRA_SEED_DEMO === "true") return true;
-    if (env?.LYRA_SEED_DEMO === "0" || env?.LYRA_SEED_DEMO === "false") return false;
-    if (env?.NODE_ENV === "production") return false;
+    if (env?.VITE_LYRA_SEED_DEMO === "1" || env?.VITE_LYRA_SEED_DEMO === "true") return true;
+    if (env?.EXPO_PUBLIC_LYRA_SEED_DEMO === "1" || env?.EXPO_PUBLIC_LYRA_SEED_DEMO === "true") {
+      return true;
+    }
   } catch {
     // ignore
   }
-  // Vite injects import.meta.env.DEV when available in app bundles — core stays Node-safe
-  return true;
+  return false;
+}
+
+/** Drop persisted demo_* mesh so real testing is not polluted after turning seed off. */
+function stripDemoMesh(input: {
+  devices: PairedDevice[];
+  clipboardHistory: ClipboardItem[];
+  transfers: Transfer[];
+}): {
+  devices: PairedDevice[];
+  clipboardHistory: ClipboardItem[];
+  transfers: Transfer[];
+} {
+  const isDemoId = (id: string | undefined) => Boolean(id?.startsWith("demo_"));
+  return {
+    devices: input.devices.filter((d) => !isDemoId(d.id)),
+    clipboardHistory: input.clipboardHistory.filter((c) => !isDemoId(c.sourceDeviceId)),
+    transfers: input.transfers.filter((t) => !isDemoId(t.deviceId) && !isDemoId(t.id)),
+  };
 }
 
 export function createLyraStore(options?: {
@@ -586,6 +717,10 @@ export function createLyraStore(options?: {
   const listeners = new Set<() => void>();
   const storage = options?.storage ?? null;
   const seedDemo = defaultSeedDemo(options?.seedDemo);
+  /** Installed by desktop bridge to unblock joiner long-poll on Accept/Decline */
+  let pairDecisionResolver: PairDecisionResolver | null = null;
+  /** Installed by desktop bridge to fire UDP announce burst */
+  let discoveryAnnouncer: (() => void) | null = null;
 
   const emit = () => {
     for (const l of listeners) l();
@@ -666,14 +801,18 @@ export function createLyraStore(options?: {
       privateKey = created.privateKey;
     }
 
-    if (seedDemo && devices.length === 0) {
-      devices = createDemoPairedDevices(identity);
-    }
-    if (seedDemo && clipboardHistory.length === 0) {
-      clipboardHistory = createDemoClipboardHistory(identity);
-    }
-    if (seedDemo && transfers.length === 0) {
-      transfers = createDemoTransfers();
+    if (seedDemo) {
+      if (devices.length === 0) devices = createDemoPairedDevices(identity);
+      if (clipboardHistory.length === 0) {
+        clipboardHistory = createDemoClipboardHistory(identity);
+      }
+      if (transfers.length === 0) transfers = createDemoTransfers();
+    } else {
+      // Remove any previously persisted dummy mesh
+      const cleaned = stripDemoMesh({ devices, clipboardHistory, transfers });
+      devices = cleaned.devices;
+      clipboardHistory = cleaned.clipboardHistory;
+      transfers = cleaned.transfers;
     }
 
     set((s) => ({
@@ -715,14 +854,7 @@ export function createLyraStore(options?: {
       const code = generatePairingCode(6);
       const token = generateId("pair");
       const expiresAt = Date.now() + 5 * 60 * 1000;
-      let host: string | undefined;
-      if (s.peerServer.url) {
-        try {
-          host = new URL(s.peerServer.url).hostname;
-        } catch {
-          host = undefined;
-        }
-      }
+      const host = localLanHostFromState(s);
       const payload: PairingPayload = {
         version: 1,
         deviceId: s.identity.id,
@@ -743,120 +875,248 @@ export function createLyraStore(options?: {
     cancelPairingSession: () => {
       set((s) => ({ ...s, activePairing: null }));
     },
-    submitPairingCode: async (code) => {
-      const s = getState();
-      if (!s.identity) return { ok: false as const, error: "Not ready" };
+    setPairDecisionResolver: (resolver) => {
+      pairDecisionResolver = resolver;
+    },
+    setDiscoveryAnnouncer: (fn) => {
+      discoveryAnnouncer = fn;
+    },
+    submitPairingCode: async (code, opts) => {
+      const s0 = getState();
+      if (!s0.identity) return { ok: false as const, error: "Not ready" };
       const normalized = code.trim().toUpperCase();
       if (normalized.length < 4) return { ok: false as const, error: "Code too short" };
 
       // Self-loop: entering our own displayed code
-      if (s.activePairing && s.activePairing.code === normalized) {
-        return { ok: false as const, error: "Enter this code on the other device" };
+      if (s0.activePairing && s0.activePairing.code === normalized) {
+        return {
+          ok: false as const,
+          error: "That's this device's code — enter it on the *other* device",
+        };
       }
 
       const codeHash = await hashPairingCode(normalized);
-      const port = s.settings.peerListenPort ?? LYRA_DEFAULT_PORT;
+      const port = opts?.port && opts.port > 0 ? opts.port : s0.settings.peerListenPort ?? LYRA_DEFAULT_PORT;
+      const manualHost = opts?.host?.trim();
 
-      // Probe known hosts + common localhost for active pairing offer
-      const hosts = new Set<string>();
-      for (const d of s.devices) {
-        if (d.host) hosts.add(`${d.host}:${d.port ?? port}`);
-      }
-      hosts.add(`127.0.0.1:${port}`);
-      hosts.add(`localhost:${port}`);
-
-      for (const hp of hosts) {
-        const [host, portStr] = hp.split(":");
-        if (!host) continue;
-        const p = Number(portStr) || port;
-        try {
-          const controller = new AbortController();
-          const timer = setTimeout(() => controller.abort(), 1500);
-          const info = await fetchPeerInfo(
-            { host, port: p },
-            { signal: controller.signal },
-          ).finally(() => clearTimeout(timer));
-          if (!info.ok || !info.pairing) continue;
-          if (info.pairing.codeHash !== codeHash) continue;
-          if (info.pairing.expiresAt < Date.now()) continue;
-          if (info.identity.id === s.identity.id) continue;
-
-          const requestId = generateId("inpair");
-          const request: IncomingPairingRequest = {
-            id: requestId,
-            receivedAt: Date.now(),
-            source: "code",
-            code: normalized,
-            payload: {
-              version: 1,
-              deviceId: info.identity.id,
-              name: info.identity.name,
-              type: info.identity.type,
-              platform: info.identity.platform,
-              fingerprint: info.identity.fingerprint,
-              publicKey: info.identity.publicKey,
-              token: info.pairing.token,
-              host: info.host ?? host,
-              port: info.port ?? p,
-              expiresAt: info.pairing.expiresAt,
-            },
-          };
-          set((st) => ({
-            ...st,
-            incomingPairRequests: [
-              request,
-              ...st.incomingPairRequests.filter((r) => r.payload.deviceId !== request.payload.deviceId),
-            ],
-          }));
-          notify(set, `Confirm pairing with ${request.payload.name}?`, "info");
-          return {
-            ok: true as const,
-            pending: true as const,
-            requestId,
-            resolvedLive: true,
-          };
-        } catch {
-          // try next host
-        }
-      }
-
-      // Offline / demo fallback: synthetic peer (still dual-confirm + authSecret)
-      const requestId = generateId("inpair");
-      const token = generateId("tok");
-      const request: IncomingPairingRequest = {
-        id: requestId,
-        receivedAt: Date.now(),
-        source: "code",
+      console.info("[lyra pair] looking up code", {
         code: normalized,
-        payload: {
-          version: 1,
-          deviceId: generateId("dev"),
-          name: `Device ${normalized.slice(0, 3)}`,
-          type: "mobile",
-          platform: "android",
-          fingerprint: generateId("fp").replace("fp_", "").slice(0, 32),
-          publicKey: generateId("pub"),
-          token,
-          expiresAt: Date.now() + 5 * 60 * 1000,
-        },
-      };
+        codeHash: codeHash.slice(0, 12),
+        manualHost: manualHost || null,
+        lanHint: s0.localLanHint,
+        knownDevices: s0.devices.filter((d) => d.host).map((d) => `${d.host}:${d.port ?? port}`),
+        multicastOffers: s0.lanPairingOffers.length,
+      });
+
+      // 0) Multicast-cached offers (instant when desktop is announcing with active code)
+      const now = Date.now();
+      const fromMcast = s0.lanPairingOffers.find(
+        (o) => o.codeHash === codeHash && o.expiresAt > now,
+      );
+      let match: Awaited<ReturnType<typeof findPeerByPairingCode>> = null;
+      if (fromMcast) {
+        console.info("[lyra pair] matched multicast offer", fromMcast.host, fromMcast.port);
+        match = {
+          host: fromMcast.host,
+          port: fromMcast.port,
+          reachHost: fromMcast.host,
+          identity: {
+            id: fromMcast.deviceId,
+            name: fromMcast.name,
+            type: fromMcast.type ?? "desktop",
+            platform: fromMcast.platform ?? "unknown",
+            fingerprint: fromMcast.fingerprint,
+            publicKey: fromMcast.publicKey,
+          },
+          pairing: {
+            codeHash: fromMcast.codeHash,
+            token: fromMcast.token,
+            expiresAt: fromMcast.expiresAt,
+          },
+        };
+      }
+
+      // 1) Optional manual host (Expo Go / scan failure fallback)
+      if (!match && manualHost) {
+        match = await findPeerByPairingCode({
+          codeHash,
+          candidates: [{ host: manualHost, port }],
+          localDeviceId: s0.identity.id,
+          timeoutMs: 2500,
+          concurrency: 1,
+        });
+        console.info("[lyra pair] manual host probe", manualHost, match ? "HIT" : "MISS");
+      }
+
+      // 2) Known peers + localhost
+      if (!match) {
+        const seeds = collectPairingCandidates(s0);
+        if (manualHost) seeds.unshift({ host: manualHost, port });
+        match = await findPeerByPairingCode({
+          codeHash,
+          candidates: seeds.map((c) => ({ host: c.host, port: c.port ?? port })),
+          localDeviceId: s0.identity.id,
+          timeoutMs: 900,
+          concurrency: 16,
+        });
+        console.info("[lyra pair] seed probe", seeds.length, "candidates", match ? "HIT" : "MISS");
+      }
+
+      // 3) Full /24 HTTP scan (LocalSend-style)
+      if (!match) {
+        const seeds = collectPairingCandidates(s0);
+        if (manualHost) seeds.unshift({ host: manualHost, port });
+        if (s0.localLanHint) seeds.unshift({ host: s0.localLanHint, port });
+        const expanded = expandLanCandidates(seeds, port);
+        console.info("[lyra pair] LAN /24 scan", expanded.length, "hosts");
+        match = await findPeerByPairingCode({
+          codeHash,
+          candidates: expanded,
+          localDeviceId: s0.identity.id,
+          timeoutMs: 700,
+          concurrency: 48,
+        });
+        console.info("[lyra pair] LAN scan", match ? "HIT" : "MISS");
+      }
+
+      if (!match) {
+        const hint = s0.localLanHint ? ` Your IP looks like ${s0.localLanHint}.` : "";
+        const msg =
+          "No device found with that code." +
+          " The other device must be showing its code in the desktop app (peer server running)" +
+          " — Expo Go cannot host a code." +
+          " Try Refresh discovery, or enter the desktop’s LAN IP below." +
+          hint;
+        notify(set, msg, "error");
+        return { ok: false as const, error: msg };
+      }
+
+      const hostName = match.identity.name || "device";
       set((st) => ({
         ...st,
-        incomingPairRequests: [request, ...st.incomingPairRequests],
+        outboundPairing: {
+          code: normalized,
+          token: match!.pairing.token,
+          hostName,
+          host: match!.reachHost,
+          port: match!.port,
+          startedAt: Date.now(),
+          status: "waiting",
+        },
       }));
-      notify(
-        set,
-        `Confirm pairing with ${request.payload.name}? (no live host found for code)`,
-        "info",
-      );
-      return { ok: true as const, pending: true as const, requestId, resolvedLive: false };
+      notify(set, `Waiting for ${hostName} to accept…`, "info");
+
+      // Build our callback address so host can reach us later if needed
+      const localHost = localLanHostFromState(getState());
+      const localPort = getState().peerServer.port ?? getState().settings.peerListenPort;
+
+      const wire = await wireSendPairRequest({
+        host: match.reachHost,
+        port: match.port,
+        identity: s0.identity,
+        payload: {
+          version: 1,
+          deviceId: s0.identity.id,
+          name: s0.identity.name,
+          type: s0.identity.type,
+          platform: s0.identity.platform,
+          fingerprint: s0.identity.fingerprint,
+          publicKey: s0.identity.publicKey,
+          token: match.pairing.token,
+          host: localHost,
+          port: localPort,
+          expiresAt: match.pairing.expiresAt,
+        },
+        code: normalized,
+        waitForConfirmMs: 120_000,
+      });
+
+      if (!wire.ok) {
+        set((st) => ({
+          ...st,
+          outboundPairing: st.outboundPairing
+            ? { ...st.outboundPairing, status: "failed", error: wire.error }
+            : null,
+        }));
+        notify(set, wire.error, "error");
+        return { ok: false as const, error: wire.error };
+      }
+
+      // Host accepted → pair_confirm envelope
+      const env = wire.envelope;
+      if (!env || env.type === "pair_reject") {
+        const reason =
+          env && env.type === "pair_reject"
+            ? String((env.payload as { reason?: string })?.reason ?? "rejected")
+            : "Pairing declined or timed out";
+        set((st) => ({
+          ...st,
+          outboundPairing: st.outboundPairing
+            ? { ...st.outboundPairing, status: "failed", error: reason }
+            : null,
+        }));
+        notify(set, `Pairing declined: ${reason}`, "error");
+        return { ok: false as const, error: reason };
+      }
+
+      if (env.type !== "pair_confirm") {
+        set((st) => ({ ...st, outboundPairing: null }));
+        return { ok: false as const, error: "Unexpected response from host" };
+      }
+
+      const confirm = env.payload as {
+        identity?: DeviceIdentity;
+        token?: string;
+        publicKey?: string;
+        host?: string;
+        port?: number;
+      };
+      const remoteId = confirm.identity ?? {
+        id: match.identity.id,
+        name: match.identity.name,
+        type: match.identity.type as DeviceIdentity["type"],
+        platform: match.identity.platform as DeviceIdentity["platform"],
+        fingerprint: match.identity.fingerprint,
+        publicKey: match.identity.publicKey,
+        createdAt: Date.now(),
+      };
+
+      try {
+        const device = await finalizePairDevice(set, getState, persist, {
+          payload: {
+            version: 1,
+            deviceId: remoteId.id,
+            name: remoteId.name,
+            type: remoteId.type,
+            platform: remoteId.platform,
+            fingerprint: remoteId.fingerprint,
+            publicKey: confirm.publicKey || remoteId.publicKey,
+            token: confirm.token || match.pairing.token,
+            host: confirm.host || match.reachHost,
+            port: confirm.port || match.port,
+            expiresAt: match.pairing.expiresAt,
+          },
+          source: "code",
+          code: normalized,
+          notifyRemote: false,
+        });
+        if (!device) {
+          return { ok: false as const, error: "Could not complete pairing" };
+        }
+        notify(set, `Paired with ${device.name}`, "success");
+        return { ok: true as const, device };
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        notify(set, `Pairing failed: ${msg}`, "error");
+        return { ok: false as const, error: msg };
+      }
     },
     confirmIncomingPair: async (requestId) => {
       const s = getState();
       const req = s.incomingPairRequests.find((r) => r.id === requestId);
       if (!req) return;
 
-      // Always dismiss the banner first so it never sticks on mobile if finalize fails.
+      // Always dismiss the banner first so it never sticks if finalize fails.
       set((st) => ({
         ...st,
         incomingPairRequests: st.incomingPairRequests.filter(
@@ -865,17 +1125,46 @@ export function createLyraStore(options?: {
       }));
 
       try {
+        // Prefer session token when wire request used host offer token
+        const token =
+          (s.activePairing &&
+            (req.payload.token === s.activePairing.token ||
+              (req.code && req.code === s.activePairing.code))
+            ? s.activePairing.token
+            : req.payload.token) || req.payload.token;
+
         const device = await finalizePairDevice(set, getState, persist, {
-          payload: req.payload,
+          payload: { ...req.payload, token },
           source: req.source,
           code: req.code,
+          // Joiner is blocked on long-poll; resolve it instead of sending another request
+          notifyRemote: false,
         });
+
+        // Unblock joiner's pair_request HTTP call with pair_confirm
+        if (pairDecisionResolver) {
+          await pairDecisionResolver({
+            deviceId: req.payload.deviceId,
+            token,
+            accepted: true,
+          });
+        }
+
         if (device) {
           notify(set, `Paired with ${device.name}`, "success");
         } else {
           notify(set, "Could not complete pairing — try again", "error");
         }
       } catch (e) {
+        // Still try to reject the long-poll so joiner does not hang
+        if (pairDecisionResolver) {
+          void pairDecisionResolver({
+            deviceId: req.payload.deviceId,
+            token: req.payload.token,
+            accepted: false,
+            reason: "error",
+          });
+        }
         notify(
           set,
           `Pairing failed: ${e instanceof Error ? e.message : String(e)}`,
@@ -884,10 +1173,20 @@ export function createLyraStore(options?: {
       }
     },
     rejectIncomingPair: (requestId) => {
-      set((s) => ({
-        ...s,
-        incomingPairRequests: s.incomingPairRequests.filter((r) => r.id !== requestId),
+      const s = getState();
+      const req = s.incomingPairRequests.find((r) => r.id === requestId);
+      set((st) => ({
+        ...st,
+        incomingPairRequests: st.incomingPairRequests.filter((r) => r.id !== requestId),
       }));
+      if (req && pairDecisionResolver) {
+        void pairDecisionResolver({
+          deviceId: req.payload.deviceId,
+          token: req.payload.token,
+          accepted: false,
+          reason: "rejected",
+        });
+      }
       notify(set, "Pairing rejected", "info");
     },
     simulateIncomingPair: () => {
@@ -1062,25 +1361,34 @@ export function createLyraStore(options?: {
       return { ok: true as const, device };
     },
     refreshDiscovery: async () => {
-      const s = getState();
-      if (!s.settings.discoveryEnabled) {
+      const s0 = getState();
+      if (!s0.settings.discoveryEnabled) {
         notify(set, "Network discovery is disabled in Settings", "info");
         return;
       }
       const now = Date.now();
+      const port = s0.settings.peerListenPort ?? LYRA_DEFAULT_PORT;
 
-      // Real HTTP probes for devices that have a host (manual / Tailscale / discovered)
-      const probeTargets = s.devices.filter((d) => Boolean(d.host));
+      // 1) LocalSend-style: fire UDP announce burst so peers reply
+      try {
+        discoveryAnnouncer?.();
+      } catch {
+        // ignore
+      }
+
+      // 2) Re-probe already known hosts
+      const probeTargets = s0.devices.filter((d) => Boolean(d.host));
       let probeResults: ProbeResult[] = [];
       if (probeTargets.length > 0) {
         probeResults = await probePeers(
           probeTargets.map((d) => ({
             host: d.host!,
-            port: d.port ?? s.settings.peerListenPort ?? LYRA_DEFAULT_PORT,
+            port: d.port ?? port,
           })),
           {
-            timeoutMs: 2000,
-            preferTailscale: s.settings.tailscaleEnabled,
+            timeoutMs: 1500,
+            concurrency: 16,
+            preferTailscale: s0.settings.tailscaleEnabled,
           },
         );
       }
@@ -1088,7 +1396,7 @@ export function createLyraStore(options?: {
       const byHostPort = new Map<string, ProbeResult>();
       for (let i = 0; i < probeTargets.length; i++) {
         const d = probeTargets[i]!;
-        const key = `${d.host}:${d.port ?? LYRA_DEFAULT_PORT}`;
+        const key = `${d.host}:${d.port ?? port}`;
         byHostPort.set(key, probeResults[i]!);
       }
 
@@ -1096,40 +1404,94 @@ export function createLyraStore(options?: {
         ...st,
         devices: st.devices.map((d) => {
           if (d.host) {
-            const key = `${d.host}:${d.port ?? LYRA_DEFAULT_PORT}`;
+            const key = `${d.host}:${d.port ?? port}`;
             const result = byHostPort.get(key);
             if (result) return applyProbeToDevice(d, result, now);
           }
-          // Demo mesh fallback for seeded peers without live hosts
-          if (d.connectionType === "manual") {
-            return { ...d, online: true, lastSeenAt: now };
-          }
-          if (d.id.startsWith("demo_") || d.online) {
-            return {
-              ...d,
-              online: true,
-              lastSeenAt: now,
-              status: d.status ? { ...d.status, updatedAt: now } : d.status,
-            };
-          }
-          if (d.id === "demo_windows") {
-            return {
-              ...d,
-              online: true,
-              lastSeenAt: now,
-              connectionType: d.connectionType === "tailscale" ? "both" : d.connectionType,
-            };
-          }
           return d;
         }),
-        lastProbeSummary:
-          probeTargets.length > 0
-            ? `Probed ${probeTargets.length} endpoint(s) · ${probeResults.filter((r) => r.ok).length} up`
-            : "Demo mesh refreshed (no live hosts)",
       }));
+
+      // 3) LocalSend HttpScanDiscovery: walk local /24 for /lyra/info
+      const seeds = new Set<string>();
+      const lan = localLanHostFromState(getState()) ?? getState().localLanHint;
+      if (lan) seeds.add(lan);
+      for (const d of getState().devices) {
+        if (d.host) seeds.add(d.host);
+      }
+      // Common home/lab prefixes when we have no local IP yet (browser)
+      if (seeds.size === 0) {
+        for (const guess of ["192.168.0.1", "192.168.1.1", "10.0.0.1"]) seeds.add(guess);
+      }
+
+      let scannedNew = 0;
+      try {
+        const found = await scanLanForPeers({
+          seedHosts: [...seeds],
+          port,
+          timeoutMs: 450,
+          concurrency: 50,
+          localDeviceId: s0.identity?.id,
+        });
+        for (const peer of found) {
+          const before = getState().devices.length;
+          // ingestDiscoveredPeer is defined on the same store object (called at runtime)
+          // eslint-disable-next-line @typescript-eslint/no-use-before-define
+          (store as LyraStore).ingestDiscoveredPeer({
+            identity: {
+              id: peer.identity.id,
+              name: peer.identity.name,
+              type: peer.identity.type as PairedDevice["type"],
+              platform: peer.identity.platform as PairedDevice["platform"],
+              fingerprint: peer.identity.fingerprint,
+              publicKey: peer.identity.publicKey,
+            },
+            host: peer.host,
+            port: peer.port,
+          });
+          if (getState().devices.length > before) scannedNew++;
+          else {
+            // Refresh existing
+            set((st) => ({
+              ...st,
+              devices: st.devices.map((d) =>
+                d.id === peer.identity.id ||
+                d.fingerprint === peer.identity.fingerprint ||
+                (d.host === peer.host && (d.port ?? port) === peer.port)
+                  ? {
+                      ...d,
+                      online: true,
+                      lastSeenAt: Date.now(),
+                      host: peer.host,
+                      port: peer.port,
+                      name: d.nickname ? d.name : peer.identity.name || d.name,
+                      fingerprint: peer.identity.fingerprint || d.fingerprint,
+                      publicKey: peer.identity.publicKey || d.publicKey,
+                      platform: (peer.identity.platform as PairedDevice["platform"]) || d.platform,
+                    }
+                  : d,
+              ),
+            }));
+          }
+        }
+      } catch {
+        // scan best-effort
+      }
+
       persist();
       const online = getState().devices.filter((d) => d.online).length;
-      notify(set, `Discovery refreshed · ${online} device(s) online`, "success");
+      const nearby = getState().devices.filter((d) => !d.authSecret).length;
+      set((st) => ({
+        ...st,
+        lastProbeSummary: `LAN scan · ${online} online · ${nearby} nearby · +${scannedNew} new`,
+      }));
+      notify(
+        set,
+        scannedNew > 0
+          ? `Found ${scannedNew} nearby device(s) — Pair to trust`
+          : `Discovery refreshed · ${online} online · ${nearby} nearby`,
+        scannedNew > 0 ? "success" : "info",
+      );
     },
     probePeerAddress: async (input) => {
       const host = input.host.trim();
@@ -1275,6 +1637,47 @@ export function createLyraStore(options?: {
       if (!host) return;
       const port = announce.port || s.settings.peerListenPort || LYRA_DEFAULT_PORT;
       const now = Date.now();
+
+      // Cache multicast pairing offers for fast code lookup
+      if (
+        announce.pairing &&
+        announce.pairing.expiresAt > now &&
+        announce.pairing.codeHash &&
+        announce.pairing.token
+      ) {
+        const offer = {
+          codeHash: announce.pairing.codeHash,
+          token: announce.pairing.token,
+          expiresAt: announce.pairing.expiresAt,
+          host,
+          port,
+          deviceId: announce.identity.id,
+          name: announce.identity.name || host,
+          fingerprint: announce.identity.fingerprint,
+          publicKey: announce.identity.publicKey || announce.identity.fingerprint,
+          type: announce.identity.type,
+          platform: announce.identity.platform,
+          seenAt: now,
+        };
+        set((st) => ({
+          ...st,
+          lanPairingOffers: [
+            offer,
+            ...st.lanPairingOffers.filter(
+              (o) =>
+                o.deviceId !== offer.deviceId &&
+                o.codeHash !== offer.codeHash &&
+                o.expiresAt > now,
+            ),
+          ].slice(0, 20),
+        }));
+        console.info(
+          "[lyra pair] cached multicast pairing offer from",
+          offer.name,
+          offer.host,
+          offer.codeHash.slice(0, 12),
+        );
+      }
 
       // Update existing trusted peer reachability
       const trusted = s.devices.find(
@@ -1479,6 +1882,10 @@ export function createLyraStore(options?: {
           updatedAt: Date.now(),
         },
       }));
+    },
+    setLocalLanHint: (host) => {
+      const cleaned = host?.trim() || null;
+      set((s) => ({ ...s, localLanHint: cleaned }));
     },
     resumeTransfer: (id) => {
       const tx = getState().transfers.find((t) => t.id === id);
@@ -2224,7 +2631,7 @@ export function createLyraStore(options?: {
         "success",
       );
     },
-    applyPairingPayload: (raw) => {
+    applyPairingPayload: async (raw) => {
       const s = getState();
       if (!s.identity) return { ok: false as const, error: "Not ready" };
 
@@ -2245,7 +2652,103 @@ export function createLyraStore(options?: {
         return { ok: false as const, error: "Pairing code expired" };
       }
 
-      // Dual-confirm: queue pending — user must accept
+      // Live host: same path as code entry — request + wait for host Accept
+      if (payload.host && payload.token) {
+        const hostName = payload.name || "device";
+        set((st) => ({
+          ...st,
+          outboundPairing: {
+            code: "",
+            token: payload.token,
+            hostName,
+            host: payload.host!,
+            port: payload.port ?? LYRA_DEFAULT_PORT,
+            startedAt: Date.now(),
+            status: "waiting",
+          },
+        }));
+        notify(set, `Waiting for ${hostName} to accept…`, "info");
+
+        const localHost = localLanHostFromState(getState());
+        const localPort = getState().peerServer.port ?? getState().settings.peerListenPort;
+        const wire = await wireSendPairRequest({
+          host: payload.host,
+          port: payload.port,
+          identity: s.identity,
+          payload: {
+            version: 1,
+            deviceId: s.identity.id,
+            name: s.identity.name,
+            type: s.identity.type,
+            platform: s.identity.platform,
+            fingerprint: s.identity.fingerprint,
+            publicKey: s.identity.publicKey,
+            token: payload.token,
+            host: localHost,
+            port: localPort,
+            expiresAt: payload.expiresAt,
+          },
+          waitForConfirmMs: 120_000,
+        });
+
+        if (!wire.ok) {
+          set((st) => ({ ...st, outboundPairing: null }));
+          notify(set, wire.error, "error");
+          return { ok: false as const, error: wire.error };
+        }
+
+        const env = wire.envelope;
+        if (!env || env.type === "pair_reject") {
+          const reason =
+            env && env.type === "pair_reject"
+              ? String((env.payload as { reason?: string })?.reason ?? "rejected")
+              : "Pairing declined";
+          set((st) => ({ ...st, outboundPairing: null }));
+          notify(set, `Pairing declined: ${reason}`, "error");
+          return { ok: false as const, error: reason };
+        }
+
+        if (env.type === "pair_confirm") {
+          const confirm = env.payload as {
+            identity?: DeviceIdentity;
+            token?: string;
+            publicKey?: string;
+            host?: string;
+            port?: number;
+          };
+          const remote = confirm.identity ?? {
+            id: payload.deviceId,
+            name: payload.name,
+            type: payload.type,
+            platform: payload.platform,
+            fingerprint: payload.fingerprint,
+            publicKey: payload.publicKey,
+            createdAt: Date.now(),
+          };
+          const device = await finalizePairDevice(set, getState, persist, {
+            payload: {
+              version: 1,
+              deviceId: remote.id,
+              name: remote.name,
+              type: remote.type,
+              platform: remote.platform,
+              fingerprint: remote.fingerprint,
+              publicKey: confirm.publicKey || remote.publicKey,
+              token: confirm.token || payload.token,
+              host: confirm.host || payload.host,
+              port: confirm.port || payload.port,
+              expiresAt: payload.expiresAt,
+            },
+            source: "scan",
+            notifyRemote: false,
+          });
+          if (!device) return { ok: false as const, error: "Could not complete pairing" };
+          notify(set, `Paired with ${device.name}`, "success");
+          return { ok: true as const, device };
+        }
+      }
+
+      // Offline / no host in QR: queue for local confirm (demo / air-gapped)
       const requestId = generateId("inpair");
       const request: IncomingPairingRequest = {
         id: requestId,
@@ -2255,7 +2758,10 @@ export function createLyraStore(options?: {
       };
       set((st) => ({
         ...st,
-        incomingPairRequests: [request, ...st.incomingPairRequests.filter((r) => r.payload.deviceId !== payload.deviceId)],
+        incomingPairRequests: [
+          request,
+          ...st.incomingPairRequests.filter((r) => r.payload.deviceId !== payload.deviceId),
+        ],
       }));
       notify(set, `Confirm pairing with ${payload.name || "device"}?`, "info");
       return {

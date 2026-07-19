@@ -13,7 +13,7 @@ const appRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outDir = path.join(appRoot, "dist-electron");
 const require = createRequire(import.meta.url);
 
-async function main() {
+export async function buildElectronMain() {
   await mkdir(outDir, { recursive: true });
 
   const result = await build({
@@ -44,9 +44,10 @@ async function main() {
       "dist-electron/main.js looks like a dev loader stub, not a production bundle",
     );
   }
-  if (mainJs.byteLength < 10_000) {
+  // mainJs is a string (utf8 read) — size via length, not byteLength
+  if (mainJs.length < 10_000) {
     throw new Error(
-      `dist-electron/main.js is suspiciously small (${mainJs.byteLength} bytes) — bundle failed`,
+      `dist-electron/main.js is suspiciously small (${mainJs.length} chars) — bundle failed`,
     );
   }
 
@@ -58,7 +59,7 @@ async function main() {
   // Optional size report for CI logs
   const outputs = result.metafile?.outputs ?? {};
   const mainOut = Object.entries(outputs).find(([k]) => k.endsWith("main.js"));
-  const bytes = mainOut?.[1]?.bytes ?? mainJs.byteLength;
+  const bytes = mainOut?.[1]?.bytes ?? mainJs.length;
   console.log(
     `Electron main bundled → dist-electron/main.js (${Math.round(bytes / 1024)} KiB)`,
   );
@@ -67,7 +68,15 @@ async function main() {
   void require.resolve("esbuild");
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+// CLI: `tsx scripts/build-electron.ts`
+const isDirect =
+  process.argv[1] &&
+  (process.argv[1].endsWith("build-electron.ts") ||
+    process.argv[1].endsWith("build-electron.js"));
+
+if (isDirect) {
+  buildElectronMain().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}

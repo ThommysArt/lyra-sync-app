@@ -122,3 +122,229 @@ export async function probeTailscalePeers(
     .map((h) => ({ host: h.host, port: h.port ?? LYRA_DEFAULT_PORT }));
   return probePeers(endpoints, { ...opts, preferTailscale: true });
 }
+
+export type PairingOfferMatch = {
+  host: string;
+  port: number;
+  /** Prefer LAN IP advertised by the peer when present */
+  reachHost: string;
+  identity: {
+    id: string;
+    name: string;
+    type: string;
+    platform: string;
+    fingerprint: string;
+    publicKey: string;
+  };
+  pairing: {
+    codeHash: string;
+    token: string;
+    expiresAt: number;
+  };
+};
+
+/** Expand private IPv4 hosts into the same /24 (for code-based LAN pairing). */
+export function expandLanCandidates(
+  seeds: { host: string; port?: number }[],
+  defaultPort: number = LYRA_DEFAULT_PORT,
+): PeerUrl[] {
+  const out = new Map<string, PeerUrl>();
+  const add = (host: string, port: number) => {
+    const key = `${host}:${port}`;
+    if (!out.has(key)) out.set(key, { host, port });
+  };
+
+  for (const seed of seeds) {
+    const host = seed.host.trim();
+    const port = seed.port ?? defaultPort;
+    if (!host) continue;
+    add(host, port);
+
+    const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+    if (!m) continue;
+    const a = Number(m[1]);
+    const b = Number(m[2]);
+    const c = Number(m[3]);
+    // Only expand common private ranges
+    const privateRange =
+      a === 10 ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168) ||
+      (a === 100 && b >= 64 && b <= 127) ||
+      // Loopback /8 — expand only when testing same-host peers (127.x)
+      a === 127;
+    if (!privateRange) continue;
+    // Don't explode 127.0.0.0/8 into 16M hosts — only scan 127.0.0.1 and the seed
+    if (a === 127) {
+      add("127.0.0.1", port);
+      continue;
+    }
+    for (let d = 1; d <= 254; d++) {
+      add(`${a}.${b}.${c}.${d}`, port);
+    }
+  }
+  return [...out.values()];
+}
+
+/**
+ * HTTP subnet scan (LocalSend HttpScanDiscovery).
+ * Probes /lyra/info on every host in the same /24 as each seed address.
+ * Used as a reliable fallback when UDP multicast is blocked or flaky.
+ */
+export async function scanLanForPeers(input: {
+  /** Seed IPs (local addresses or known peers) — each expands to /24 */
+  seedHosts: string[];
+  port?: number;
+  timeoutMs?: number;
+  concurrency?: number;
+  localDeviceId?: string;
+}): Promise<
+  Array<{
+    host: string;
+    port: number;
+    identity: {
+      id: string;
+      name: string;
+      type: string;
+      platform: string;
+      fingerprint: string;
+      publicKey: string;
+    };
+  }>
+> {
+  const port = input.port ?? LYRA_DEFAULT_PORT;
+  const seeds = input.seedHosts
+    .map((h) => h.trim())
+    .filter(Boolean)
+    .map((host) => ({ host, port }));
+  if (seeds.length === 0) return [];
+
+  const candidates = expandLanCandidates(seeds, port);
+  const concurrency = Math.max(1, input.concurrency ?? 50);
+  const timeoutMs = input.timeoutMs ?? 500;
+  const found: Array<{
+    host: string;
+    port: number;
+    identity: {
+      id: string;
+      name: string;
+      type: string;
+      platform: string;
+      fingerprint: string;
+      publicKey: string;
+    };
+  }> = [];
+  const seen = new Set<string>();
+  let next = 0;
+
+  async function worker() {
+    while (next < candidates.length) {
+      const i = next++;
+      const ep = candidates[i]!;
+      const host = ep.host.trim();
+      const p = ep.port ?? port;
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        const info = await fetchPeerInfo(
+          { host, port: p, protocol: "http" },
+          { signal: controller.signal },
+        ).finally(() => clearTimeout(timer));
+        if (!info.ok) continue;
+        if (input.localDeviceId && info.identity.id === input.localDeviceId) continue;
+        if (seen.has(info.identity.id)) continue;
+        seen.add(info.identity.id);
+        found.push({
+          host: info.host && info.host !== "0.0.0.0" ? info.host : host,
+          port: info.port && info.port > 0 ? info.port : p,
+          identity: {
+            id: info.identity.id,
+            name: info.identity.name,
+            type: info.identity.type,
+            platform: info.identity.platform,
+            fingerprint: info.identity.fingerprint,
+            publicKey: info.identity.publicKey,
+          },
+        });
+      } catch {
+        // miss
+      }
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, Math.max(1, candidates.length)) }, () => worker()),
+  );
+  return found;
+}
+
+/**
+ * Find a peer advertising a matching pairing code hash on /lyra/info.
+ * Used when joining with a short code on the same network.
+ */
+export async function findPeerByPairingCode(input: {
+  codeHash: string;
+  candidates: PeerUrl[];
+  timeoutMs?: number;
+  concurrency?: number;
+  /** Skip our own device id when known */
+  localDeviceId?: string;
+}): Promise<PairingOfferMatch | null> {
+  const timeoutMs = input.timeoutMs ?? 900;
+  const concurrency = Math.max(1, input.concurrency ?? 32);
+  const targets = input.candidates;
+  let next = 0;
+  let found: PairingOfferMatch | null = null;
+
+  async function worker() {
+    while (next < targets.length && !found) {
+      const i = next++;
+      const ep = targets[i]!;
+      const host = ep.host.trim();
+      const port = ep.port ?? LYRA_DEFAULT_PORT;
+      if (!host) continue;
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        const info = await fetchPeerInfo(
+          { host, port, protocol: ep.protocol ?? "http" },
+          { signal: controller.signal },
+        ).finally(() => clearTimeout(timer));
+        if (!info.ok || !info.pairing) continue;
+        if (info.pairing.codeHash !== input.codeHash) continue;
+        if (info.pairing.expiresAt < Date.now()) continue;
+        if (input.localDeviceId && info.identity.id === input.localDeviceId) continue;
+        // Prefer the host:port we successfully probed. Advertised LAN host can be
+        // wrong when the server is loopback-bound; advertised port 0 is invalid.
+        const advertisedPort = info.port && info.port > 0 ? info.port : port;
+        const reachHost = host;
+        found = {
+          host,
+          port: advertisedPort,
+          reachHost,
+          identity: {
+            id: info.identity.id,
+            name: info.identity.name,
+            type: info.identity.type,
+            platform: info.identity.platform,
+            fingerprint: info.identity.fingerprint,
+            publicKey: info.identity.publicKey,
+          },
+          pairing: {
+            codeHash: info.pairing.codeHash,
+            token: info.pairing.token,
+            expiresAt: info.pairing.expiresAt,
+          },
+        };
+        return;
+      } catch {
+        // try next
+      }
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, Math.max(1, targets.length)) }, () => worker()),
+  );
+  return found;
+}

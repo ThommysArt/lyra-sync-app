@@ -1,6 +1,6 @@
 @import "@lyra-sync-app/ui/globals.css";
 
-/* Electron: custom chrome merged with sidebar (no classic menu bar feel) */
+/* Electron: fully custom frameless chrome merged with the sidebar (T3-style) */
 .lyra-desktop-shell .lyra-titlebar-drag {
   -webkit-app-region: drag;
   app-region: drag;
@@ -10,9 +10,26 @@
 .lyra-desktop-shell a,
 .lyra-desktop-shell input,
 .lyra-desktop-shell textarea,
+.lyra-desktop-shell select,
 .lyra-desktop-shell [role="button"],
-.lyra-desktop-shell [data-slot="switch"] {
+.lyra-desktop-shell [role="switch"],
+.lyra-desktop-shell [data-slot="switch"],
+.lyra-desktop-shell .lyra-window-controls {
   -webkit-app-region: no-drag;
   app-region: no-drag;
 }
+
+/* Frameless: body fills the window edge-to-edge */
+html.lyra-electron,
+html.lyra-electron body,
+.lyra-custom-chrome {
+  overflow: hidden;
+  border-radius: 0;
+}
+
+/* Subtle top edge so content doesn’t feel glued under controls */
+.lyra-custom-chrome > aside {
+  border-top: none;
+}
+
 

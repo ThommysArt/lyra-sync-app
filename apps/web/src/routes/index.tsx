@@ -269,12 +269,15 @@ function DevicesPage() {
           </div>
           <h2 className="font-medium">No paired devices yet</h2>
           <p className="mt-1 max-w-sm text-sm text-muted-foreground">
-            Pair a phone or computer to sync clipboard and transfer files privately on your network.
-            Nearby discovery alone does not create trust.
+            On the same Wi‑Fi, tap <strong>Refresh discovery</strong> so devices appear under Nearby,
+            then Pair — or share a pairing code. Discovery alone does not create trust.
           </p>
-          <Button className="mt-4" onClick={() => setPairOpen(true)}>
-            Pair your first device
-          </Button>
+          <div className="mt-4 flex flex-wrap justify-center gap-2">
+            <Button variant="secondary" onClick={() => void store.refreshDiscovery()}>
+              Refresh discovery
+            </Button>
+            <Button onClick={() => setPairOpen(true)}>Pair with code</Button>
+          </div>
         </div>
       ) : (
         <div className="grid gap-4 sm:grid-cols-2">

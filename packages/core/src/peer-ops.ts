@@ -310,7 +310,12 @@ export async function wireSendPairRequest(input: {
   identity: DeviceIdentity;
   payload: PairingPayload;
   code?: string;
-}): Promise<{ ok: true } | { ok: false; error: string }> {
+  /** Wait for host Accept (long-poll). Default 120s when omitted from sendPairRequest. */
+  waitForConfirmMs?: number;
+}): Promise<
+  | { ok: true; envelope?: import("@lyra-sync-app/protocol").Envelope }
+  | { ok: false; error: string }
+> {
   const res = await sendPairRequest({
     endpoint: { host: input.host, port: input.port ?? LYRA_DEFAULT_PORT },
     fromIdentity: input.identity,
@@ -318,9 +323,10 @@ export async function wireSendPairRequest(input: {
     code: input.code,
     host: input.payload.host,
     port: input.payload.port,
+    waitForConfirmMs: input.waitForConfirmMs,
   });
   if (!res.ok) return { ok: false, error: res.error };
-  return { ok: true };
+  return { ok: true, envelope: res.envelope };
 }
 
 export async function probeAuth(input: {

@@ -1,11 +1,17 @@
 import { formatFingerprint } from "@lyra-sync-app/core";
-import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
-import { useState } from "react";
+import { Platform, Pressable, ScrollView, Text, TextInput, View } from "react-native";
+import { useEffect, useState } from "react";
 
 import { ScreenHeader, useTabBottomPadding } from "@/components/ui/screen-header";
 import { IosSwitch } from "@/components/ui/ios-switch";
 import { useAppTheme } from "@/contexts/app-theme-context";
 import { ACCENT, ACCENT_DARK, fonts, PAGE_BG } from "@/lib/constants";
+import {
+  defaultDownloadLabel,
+  defaultDownloadPath,
+  formatDownloadLabel,
+  pickDownloadDirectory,
+} from "@/lib/download-location";
 import { useLyraSelector, useLyraStore } from "@/lib/lyra";
 
 export default function SettingsScreen() {
@@ -25,11 +31,27 @@ export default function SettingsScreen() {
   );
   const [name, setName] = useState(identity?.name ?? "");
   const [probeBusy, setProbeBusy] = useState(false);
+  const [downloadBusy, setDownloadBusy] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [downloadLabel, setDownloadLabel] = useState(
+    settings.downloadDirectory
+      ? formatDownloadLabel(settings.downloadDirectory)
+      : defaultDownloadLabel(),
+  );
   const bg = isDark ? PAGE_BG.dark : PAGE_BG.light;
   const ink = isDark ? "#F5F7FF" : "#0B1220";
   const muted = isDark ? "rgba(255,255,255,0.55)" : "rgba(0,0,0,0.45)";
   const card = isDark ? "#141A26" : "#FFFFFF";
   const accent = isDark ? ACCENT_DARK : ACCENT;
+
+  useEffect(() => {
+    if (settings.downloadDirectory) {
+      setDownloadLabel(formatDownloadLabel(settings.downloadDirectory));
+      return;
+    }
+    const def = defaultDownloadPath();
+    setDownloadLabel(def ? formatDownloadLabel(def) : defaultDownloadLabel());
+  }, [settings.downloadDirectory]);
 
   return (
     <View style={{ backgroundColor: bg, flex: 1 }}>
@@ -224,6 +246,90 @@ export default function SettingsScreen() {
               accent={accent}
               last
             />
+          </View>
+
+          <View style={{ backgroundColor: card, borderRadius: 24, padding: 16 }}>
+            <Text style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 16 }}>
+              Download location
+            </Text>
+            <Text style={{ color: muted, fontFamily: fonts.regular, fontSize: 12, marginTop: 4 }}>
+              Where received files are saved on this device.
+              {Platform.OS === "android"
+                ? " Browse opens the system folder picker."
+                : Platform.OS === "ios"
+                  ? " iOS apps save into the app Documents sandbox (share out from Transfers)."
+                  : ""}
+            </Text>
+            <Text
+              style={{
+                color: ink,
+                fontFamily: fonts.medium,
+                fontSize: 13,
+                marginTop: 10,
+              }}
+              numberOfLines={3}
+            >
+              {downloadLabel}
+            </Text>
+            {downloadError ? (
+              <Text style={{ color: "#FF453A", fontFamily: fonts.medium, fontSize: 12, marginTop: 6 }}>
+                {downloadError}
+              </Text>
+            ) : null}
+            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 12 }}>
+              <Pressable
+                disabled={downloadBusy}
+                onPress={() => {
+                  setDownloadBusy(true);
+                  setDownloadError(null);
+                  void pickDownloadDirectory()
+                    .then((res) => {
+                      if (res.ok) {
+                        store.updateSettings({ downloadDirectory: res.path });
+                        setDownloadLabel(res.label);
+                      } else if (!res.cancelled) {
+                        setDownloadError(res.error ?? "Could not pick folder");
+                      }
+                    })
+                    .finally(() => setDownloadBusy(false));
+                }}
+                style={{
+                  backgroundColor: accent,
+                  borderRadius: 999,
+                  opacity: downloadBusy ? 0.7 : 1,
+                  paddingHorizontal: 14,
+                  paddingVertical: 8,
+                }}
+              >
+                <Text style={{ color: "#fff", fontFamily: fonts.semiBold, fontSize: 13 }}>
+                  {downloadBusy
+                    ? "…"
+                    : Platform.OS === "android"
+                      ? "Browse folder"
+                      : Platform.OS === "ios"
+                        ? "Use App Documents"
+                        : "Choose folder"}
+                </Text>
+              </Pressable>
+              <Pressable
+                disabled={downloadBusy || !settings.downloadDirectory}
+                onPress={() => {
+                  store.updateSettings({ downloadDirectory: undefined });
+                  const def = defaultDownloadPath();
+                  setDownloadLabel(def ? formatDownloadLabel(def) : defaultDownloadLabel());
+                  setDownloadError(null);
+                }}
+                style={{
+                  backgroundColor: isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)",
+                  borderRadius: 999,
+                  opacity: settings.downloadDirectory ? 1 : 0.45,
+                  paddingHorizontal: 14,
+                  paddingVertical: 8,
+                }}
+              >
+                <Text style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 13 }}>Reset</Text>
+              </Pressable>
+            </View>
           </View>
 
           <View style={{ backgroundColor: card, borderRadius: 24, padding: 16 }}>

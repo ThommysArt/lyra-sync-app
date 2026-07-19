@@ -64,7 +64,7 @@ export const HelloPayloadSchema = z.object({
   port: z.number().int().positive().optional(),
 });
 
-/** Multicast / LAN announce (P2 discovery). */
+/** Multicast / LAN announce (P2 discovery) — LocalSend-style announce flag. */
 export const DiscoverAnnouncePayloadSchema = z.object({
   identity: DeviceIdentitySchema.pick({
     id: true,
@@ -77,6 +77,22 @@ export const DiscoverAnnouncePayloadSchema = z.object({
   host: z.string().min(1),
   port: z.number().int().positive(),
   protocolVersion: z.number().int().positive(),
+  /**
+   * When true, receivers should reply so the announcer also learns about them
+   * (LocalSend dual-visibility handshake).
+   */
+  announce: z.boolean().optional(),
+  /**
+   * Optional active pairing offer (code hash only — never raw code).
+   * Lets joiners match a short code from discovery without a full subnet scan.
+   */
+  pairing: z
+    .object({
+      codeHash: z.string().min(8),
+      token: z.string().min(1),
+      expiresAt: z.number().int().nonnegative(),
+    })
+    .optional(),
 });
 export type DiscoverAnnouncePayload = z.infer<typeof DiscoverAnnouncePayloadSchema>;
 

@@ -421,7 +421,11 @@ export async function listRemoteFs(input: {
   return { ok: false, error: "No fs_list_response" };
 }
 
-/** Send pair_request to a reachable host (after local dual-confirm). */
+/**
+ * Send pair_request to a host that is advertising a pairing code.
+ * The host long-polls until the user Accepts/Declines, then returns
+ * pair_confirm or pair_reject. Default wait is 120s.
+ */
 export async function sendPairRequest(input: {
   endpoint: PeerUrl;
   fromIdentity: DeviceIdentity;
@@ -431,6 +435,8 @@ export async function sendPairRequest(input: {
   port?: number;
   sessionToken?: string;
   signal?: AbortSignal;
+  /** How long to wait for the host user to accept (ms). Default 120_000. */
+  waitForConfirmMs?: number;
 }): Promise<{ ok: true; envelope?: Envelope } | { ok: false; error: string }> {
   const envelope = createEnvelope({
     type: "pair_request",
@@ -450,10 +456,40 @@ export async function sendPairRequest(input: {
       code: input.code,
     },
   });
-  return sendEnvelope(input.endpoint, envelope, {
-    sessionToken: input.sessionToken,
-    signal: input.signal,
-  });
+
+  const waitMs = input.waitForConfirmMs ?? 120_000;
+  let signal = input.signal;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  if (!signal && waitMs > 0) {
+    const controller = new AbortController();
+    timer = setTimeout(() => controller.abort(), waitMs);
+    signal = controller.signal;
+  }
+
+  try {
+    const res = await sendEnvelope(input.endpoint, envelope, {
+      sessionToken: input.sessionToken,
+      signal,
+    });
+    if (
+      !res.ok &&
+      /abort|timed out|timeout/i.test(res.error)
+    ) {
+      return {
+        ok: false,
+        error: "Timed out waiting for the other device to accept",
+      };
+    }
+    return res;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/abort|timed out|timeout/i.test(msg)) {
+      return { ok: false, error: "Timed out waiting for the other device to accept" };
+    }
+    return { ok: false, error: msg };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 /** Cache of session tokens per peer endpoint key. */

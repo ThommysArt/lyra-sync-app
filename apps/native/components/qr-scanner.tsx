@@ -5,13 +5,15 @@ import { Linking, Platform, Pressable, Text, View } from "react-native";
 
 import { ACCENT, ACCENT_DARK, fonts } from "@/lib/constants";
 
+type QrScanResult = { ok: boolean; error?: string; deviceName?: string };
+
 type QrScannerProps = {
   isDark: boolean;
   accent: string;
   ink: string;
   muted: string;
   card: string;
-  onScanned: (data: string) => { ok: boolean; error?: string; deviceName?: string };
+  onScanned: (data: string) => QrScanResult | Promise<QrScanResult>;
 };
 
 /**
@@ -37,33 +39,36 @@ export function QrScanner({ isDark, accent, ink, muted, card, onScanned }: QrSca
       setLastError(null);
       setSuccessName(null);
 
-      const outcome = onScanned(result.data);
-      if (outcome.ok) {
-        void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => undefined);
-        let name = outcome.deviceName;
-        if (!name) {
-          try {
-            name = (JSON.parse(result.data) as { name?: string }).name;
-          } catch {
-            name = undefined;
+      void Promise.resolve(onScanned(result.data)).then((outcome) => {
+        if (outcome.ok) {
+          void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(
+            () => undefined,
+          );
+          let name = outcome.deviceName;
+          if (!name) {
+            try {
+              name = (JSON.parse(result.data) as { name?: string }).name;
+            } catch {
+              name = undefined;
+            }
           }
+          setSuccessName(name ?? "device");
+          setActive(false);
+          setTimeout(() => {
+            lockRef.current = false;
+            setLocked(false);
+          }, 1500);
+        } else {
+          void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error).catch(
+            () => undefined,
+          );
+          setLastError(outcome.error ?? "Could not pair from this QR");
+          setTimeout(() => {
+            lockRef.current = false;
+            setLocked(false);
+          }, 1200);
         }
-        setSuccessName(name ?? "device");
-        setActive(false);
-        // Allow rescan after a short cooldown
-        setTimeout(() => {
-          lockRef.current = false;
-          setLocked(false);
-        }, 1500);
-      } else {
-        void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error).catch(() => undefined);
-        setLastError(outcome.error ?? "Could not pair from this QR");
-        // Brief cooldown so the same frame doesn't spam
-        setTimeout(() => {
-          lockRef.current = false;
-          setLocked(false);
-        }, 1200);
-      }
+      });
     },
     [onScanned],
   );
