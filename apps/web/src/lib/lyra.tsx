@@ -8,12 +8,12 @@ export { useLyraSelector, useLyraState, useLyraStore };
 
 function shouldSeedDemo(): boolean {
   try {
-    // Vite: seed only in dev unless explicitly forced
-    const meta = import.meta as ImportMeta & { env?: { DEV?: boolean; PROD?: boolean; VITE_LYRA_SEED_DEMO?: string } };
-    const flag = meta.env?.VITE_LYRA_SEED_DEMO;
+    // Vite only statically replaces *direct* import.meta.env.* access.
+    // Assigning import.meta to a variable leaves env.DEV undefined at runtime.
+    const flag = import.meta.env.VITE_LYRA_SEED_DEMO as string | undefined;
     if (flag === "1" || flag === "true") return true;
     if (flag === "0" || flag === "false") return false;
-    return Boolean(meta.env?.DEV);
+    return Boolean(import.meta.env.DEV);
   } catch {
     return true;
   }

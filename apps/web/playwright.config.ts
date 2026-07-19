@@ -30,5 +30,10 @@ export default defineConfig({
         timeout: 180_000,
         stdout: "pipe",
         stderr: "pipe",
+        env: {
+          ...process.env,
+          // Ensure demo mesh peers/transfers for smoke assertions in CI
+          VITE_LYRA_SEED_DEMO: process.env.VITE_LYRA_SEED_DEMO ?? "1",
+        },
       },
 });
