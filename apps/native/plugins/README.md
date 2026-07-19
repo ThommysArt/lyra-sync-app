@@ -2,7 +2,14 @@
 
 ## with-clipboard-accessibility
 
-Scaffolds Android Accessibility Service **manifest entries** for product-spec §5.3 clipboard auto-monitor.
+Scaffolds Android Accessibility Service support for product-spec §5.3 clipboard auto-monitor.
+
+### What it generates (during `expo prebuild` / EAS)
+
+1. AndroidManifest service + `BIND_ACCESSIBILITY_SERVICE`
+2. `res/xml/lyra_clipboard_accessibility.xml`
+3. String description for the system Accessibility UI
+4. Kotlin stub `app.lyra.sync.clipboard.ClipboardAccessibilityService` (no-op events)
 
 ### Enable
 
@@ -12,17 +19,10 @@ In `app.json` plugins array:
 ["./plugins/with-clipboard-accessibility"]
 ```
 
-Then:
+### Still required (product)
 
-```bash
-npx expo prebuild --platform android
-```
-
-### Still required (native)
-
-1. Kotlin/Java class `app.lyra.sync.clipboard.ClipboardAccessibilityService`
-2. Resource `res/xml/lyra_clipboard_accessibility.xml` (event types, feedback, description)
-3. In-app deep-link to system Accessibility settings so the user can enable the service
-4. Play Store policy review — Accessibility for clipboard is sensitive
+1. Real clipboard extraction in the service (with password field guards)
+2. In-app deep-link to system Accessibility settings so the user can enable the service
+3. Play Store policy review — Accessibility for clipboard is sensitive
 
 Foreground polling via `expo-clipboard` remains the default path used by `ClipboardMonitor`.
