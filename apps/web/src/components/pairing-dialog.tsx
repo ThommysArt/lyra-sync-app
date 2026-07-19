@@ -100,7 +100,7 @@ export function PairingDialog({
         </DialogHeader>
 
         {outbound?.status === "waiting" ? (
-          <p className="rounded-2xl bg-primary/10 px-3 py-2 text-sm text-primary">
+          <p className="rounded-lg bg-primary/10 px-3 py-2 text-sm text-primary">
             Waiting for <strong>{outbound.hostName}</strong> to accept pairing…
           </p>
         ) : null}
@@ -114,11 +114,11 @@ export function PairingDialog({
             }
           }}
         >
-          <TabsList className="grid w-full grid-cols-2 rounded-full">
-            <TabsTrigger value="show" className="rounded-full">
+          <TabsList className="grid w-full grid-cols-2 rounded-md">
+            <TabsTrigger value="show" className="rounded-md">
               Show code
             </TabsTrigger>
-            <TabsTrigger value="enter" className="rounded-full">
+            <TabsTrigger value="enter" className="rounded-md">
               Enter code
             </TabsTrigger>
           </TabsList>
@@ -137,7 +137,7 @@ export function PairingDialog({
             )}
             {active ? (
               <>
-                <div className="mx-auto w-fit rounded-3xl bg-white p-4 shadow-sm ring-1 ring-border/60">
+                <div className="mx-auto w-fit rounded-xl bg-white p-4 shadow-sm ring-1 ring-border/60">
                   <QRCodeSVG
                     value={qrValue}
                     size={200}
@@ -194,7 +194,7 @@ export function PairingDialog({
                 value={code}
                 onChange={(e) => setCode(e.target.value.toUpperCase())}
                 placeholder="ABC123"
-                className="rounded-full text-center font-mono text-lg tracking-widest"
+                className="rounded-md text-center font-mono text-lg tracking-widest"
                 maxLength={8}
                 disabled={busy}
               />
@@ -206,7 +206,7 @@ export function PairingDialog({
                 value={hostHint}
                 onChange={(e) => setHostHint(e.target.value)}
                 placeholder="192.168.1.152"
-                className="rounded-full font-mono text-sm"
+                className="rounded-md font-mono text-sm"
                 disabled={busy}
               />
               <p className="text-xs text-muted-foreground">

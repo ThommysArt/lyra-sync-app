@@ -41,9 +41,9 @@ export default function DevicesScreen() {
     s.devices.filter((d) => d.online && (d.authSecret || d.id.startsWith("demo_"))).map((d) => d.id),
   );
   const bg = isDark ? PAGE_BG.dark : PAGE_BG.light;
-  const ink = isDark ? "#F5F7FF" : "#0B1220";
+  const ink = isDark ? "#e5e5e5" : "#333333";
   const muted = isDark ? "rgba(255,255,255,0.55)" : "rgba(0,0,0,0.45)";
-  const card = isDark ? "#141A26" : "#FFFFFF";
+  const card = isDark ? "#202020" : "#FFFFFF";
   const accent = isDark ? ACCENT_DARK : ACCENT;
 
   const sendClipboard = async (targetIds: string[]) => {
@@ -106,7 +106,7 @@ export default function DevicesScreen() {
                 style={{
                   alignItems: "center",
                   backgroundColor: isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)",
-                  borderRadius: 999,
+                  borderRadius: 8,
                   height: 40,
                   justifyContent: "center",
                   opacity: discoveryEnabled ? 1 : 0.45,
@@ -120,7 +120,7 @@ export default function DevicesScreen() {
                 style={{
                   alignItems: "center",
                   backgroundColor: accent,
-                  borderRadius: 999,
+                  borderRadius: 8,
                   height: 40,
                   justifyContent: "center",
                   width: 40,
@@ -133,7 +133,7 @@ export default function DevicesScreen() {
         />
 
         <View style={{ gap: 12, paddingHorizontal: 16 }}>
-          <View style={{ backgroundColor: card, borderRadius: 22, gap: 10, padding: 14 }}>
+          <View style={{ backgroundColor: card, borderRadius: 12, gap: 10, padding: 14 }}>
             <Text style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 14 }}>
               Find by address (nearby)
             </Text>
@@ -170,7 +170,7 @@ export default function DevicesScreen() {
                 alignItems: "center",
                 alignSelf: "flex-start",
                 backgroundColor: accent,
-                borderRadius: 999,
+                borderRadius: 8,
                 opacity: manualHost.trim() ? 1 : 0.5,
                 paddingHorizontal: 14,
                 paddingVertical: 8,
@@ -193,7 +193,7 @@ export default function DevicesScreen() {
                   style={{
                     backgroundColor: card,
                     borderColor: isDark ? "rgba(122,162,255,0.25)" : "rgba(47,107,255,0.2)",
-                    borderRadius: 20,
+                    borderRadius: 12,
                     borderStyle: "dashed",
                     borderWidth: 1,
                     padding: 14,
@@ -215,7 +215,7 @@ export default function DevicesScreen() {
                       }}
                       style={{
                         backgroundColor: accent,
-                        borderRadius: 999,
+                        borderRadius: 8,
                         opacity: trustBusy === device.id ? 0.7 : 1,
                         paddingHorizontal: 14,
                         paddingVertical: 8,
@@ -229,7 +229,7 @@ export default function DevicesScreen() {
                       onPress={() => store.unpairDevice(device.id)}
                       style={{
                         backgroundColor: isDark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.04)",
-                        borderRadius: 999,
+                        borderRadius: 8,
                         paddingHorizontal: 14,
                         paddingVertical: 8,
                       }}
@@ -251,7 +251,7 @@ export default function DevicesScreen() {
             style={{
               alignItems: "center",
               backgroundColor: isDark ? "rgba(122,162,255,0.15)" : "rgba(47,107,255,0.1)",
-              borderRadius: 20,
+              borderRadius: 12,
               flexDirection: "row",
               gap: 10,
               paddingHorizontal: 16,
@@ -265,7 +265,7 @@ export default function DevicesScreen() {
             <Ionicons color={accent} name="chevron-forward" size={18} />
           </Pressable>
 
-          <View style={{ backgroundColor: card, borderRadius: 22, gap: 10, padding: 14 }}>
+          <View style={{ backgroundColor: card, borderRadius: 12, gap: 10, padding: 14 }}>
             <Text style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 14 }}>
               Open URL on devices
             </Text>
@@ -296,7 +296,7 @@ export default function DevicesScreen() {
                 alignItems: "center",
                 alignSelf: "flex-start",
                 backgroundColor: accent,
-                borderRadius: 999,
+                borderRadius: 8,
                 opacity: openUrl.trim() && onlineIds.length > 0 ? 1 : 0.5,
                 paddingHorizontal: 14,
                 paddingVertical: 8,
@@ -315,7 +315,7 @@ export default function DevicesScreen() {
                 style={{
                   backgroundColor: card,
                   borderColor: isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.05)",
-                  borderRadius: 24,
+                  borderRadius: 14,
                   borderWidth: 1,
                   padding: 16,
                 }}
@@ -331,7 +331,7 @@ export default function DevicesScreen() {
                         : isDark
                           ? "rgba(255,255,255,0.06)"
                           : "rgba(0,0,0,0.05)",
-                      borderRadius: 16,
+                      borderRadius: 10,
                       height: 48,
                       justifyContent: "center",
                       width: 48,
@@ -388,7 +388,7 @@ export default function DevicesScreen() {
                     onPress={() => void sendClipboard([device.id])}
                     style={{
                       backgroundColor: isDark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.04)",
-                      borderRadius: 999,
+                      borderRadius: 8,
                       opacity: device.online ? 1 : 0.45,
                       paddingHorizontal: 12,
                       paddingVertical: 8,
@@ -403,7 +403,7 @@ export default function DevicesScreen() {
                     onPress={() => void pickAndSend(device.id)}
                     style={{
                       backgroundColor: isDark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.04)",
-                      borderRadius: 999,
+                      borderRadius: 8,
                       opacity: device.online ? 1 : 0.45,
                       paddingHorizontal: 12,
                       paddingVertical: 8,

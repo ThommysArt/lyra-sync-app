@@ -21,7 +21,7 @@ function DeviceGlyph({ device }: { device: PairedDevice }) {
   return (
     <div
       className={cn(
-        "flex size-11 items-center justify-center rounded-2xl",
+        "flex size-11 items-center justify-center rounded-lg",
         device.online ? "bg-primary/15 text-primary" : "bg-muted text-muted-foreground",
       )}
     >
@@ -46,8 +46,8 @@ export function DeviceCard({
   const charging = device.status?.isCharging;
 
   const card = (
-    <Card className="overflow-hidden rounded-3xl border-border/70 shadow-sm transition-shadow hover:shadow-md">
-      <CardContent className="flex flex-col gap-4 p-4">
+    <Card className="overflow-hidden rounded-xl border-border/70 shadow-sm transition-shadow hover:shadow-md">
+      <CardContent className="flex flex-col gap-3 p-3">
         <div className="flex items-start gap-3">
           <DeviceGlyph device={device} />
           <div className="min-w-0 flex-1">
@@ -67,7 +67,7 @@ export function DeviceCard({
               {device.host ? ` · ${device.host}${device.port ? `:${device.port}` : ""}` : ""}
             </p>
           </div>
-          <Badge variant="secondary" className="rounded-full shrink-0">
+          <Badge variant="secondary" className="rounded-md shrink-0">
             {connectionLabel(device.connectionType)}
           </Badge>
         </div>
@@ -105,7 +105,7 @@ export function DeviceCard({
           <Link
             to="/devices/$deviceId"
             params={{ deviceId: device.id }}
-            className="ml-auto inline-flex h-8 items-center justify-center rounded-full bg-primary px-3 text-sm font-medium text-primary-foreground hover:bg-primary/80"
+            className="ml-auto inline-flex h-8 items-center justify-center rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground hover:bg-primary/80"
           >
             Open
           </Link>
@@ -118,7 +118,7 @@ export function DeviceCard({
 
   return (
     <DropZone
-      className="rounded-3xl"
+      className="rounded-xl"
       disabled={!device.online}
       label={`Send to ${displayName}`}
       onDropFiles={onDropFiles}

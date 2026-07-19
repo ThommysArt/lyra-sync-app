@@ -26,19 +26,19 @@ export function ScreenHeader({
   return (
     <View
       style={{
-        paddingBottom: 12,
-        paddingHorizontal: 20,
-        paddingTop: skipTopInset ? 12 : Math.max(insets.top + 8, 20),
+        paddingBottom: 10,
+        paddingHorizontal: 16,
+        paddingTop: skipTopInset ? 10 : Math.max(insets.top + 6, 16),
       }}
     >
       <View style={{ alignItems: "flex-start", flexDirection: "row", gap: 12 }}>
         <View style={{ flex: 1, minWidth: 0 }}>
           <Text
             style={{
-              color: isDark ? "#F5F7FF" : "#0B1220",
+              color: isDark ? "#e5e5e5" : "#333333",
               fontFamily: fonts.bold,
-              fontSize: 28,
-              letterSpacing: -0.4,
+              fontSize: 24,
+              letterSpacing: -0.3,
             }}
           >
             {title}

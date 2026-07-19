@@ -9,7 +9,7 @@ import {
   Sun,
 } from "lucide-react";
 import { useTheme } from "next-themes";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { Button } from "@lyra-sync-app/ui/components/button";
 import { cn } from "@/lib/utils";
@@ -23,11 +23,19 @@ import { ToastListener } from "@/components/toast-listener";
 import { WindowControls } from "@/components/window-controls";
 
 const nav = [
-  { to: "/", label: "Devices", icon: LayoutGrid },
-  { to: "/clipboard", label: "Clipboard", icon: ClipboardList },
-  { to: "/transfers", label: "Transfers", icon: History },
-  { to: "/settings", label: "Settings", icon: Settings },
+  { to: "/", label: "Devices", icon: LayoutGrid, title: "Devices" },
+  { to: "/clipboard", label: "Clipboard", icon: ClipboardList, title: "Clipboard" },
+  { to: "/transfers", label: "Transfers", icon: History, title: "Transfers" },
+  { to: "/settings", label: "Settings", icon: Settings, title: "Settings" },
 ] as const;
+
+function pageTitleFromPath(pathname: string): string {
+  if (pathname.startsWith("/devices/")) return "Device";
+  if (pathname.startsWith("/clipboard")) return "Clipboard";
+  if (pathname.startsWith("/transfers")) return "Transfers";
+  if (pathname.startsWith("/settings")) return "Settings";
+  return "Devices";
+}
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
@@ -56,11 +64,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }, []);
 
   const isMacDesktop = desktop && (shellPlatform === "darwin" || usesTrafficLights);
-  // Custom chrome whenever we're in the Electron shell
   const desktopChrome = desktop;
-  // In-app window buttons on Win/Linux (mac uses system traffic lights).
-  // Default to showing controls until shell info proves we're on macOS.
   const showCustomWindowControls = desktopChrome && !isMacDesktop;
+  const pageTitle = useMemo(() => pageTitleFromPath(pathname), [pathname]);
 
   return (
     <div
@@ -74,11 +80,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     >
       <aside
         className={cn(
-          "hidden w-60 shrink-0 flex-col border-r border-border/80 bg-sidebar px-3 md:flex",
-          desktopChrome ? "pt-0" : "py-4",
+          "hidden w-56 shrink-0 flex-col border-r border-border bg-sidebar px-2 md:flex",
+          desktopChrome ? "pt-0" : "py-3",
         )}
       >
-        {/* Titlebar / brand — drag region; tall enough for icon + 2-line label */}
+        {/* Titlebar / brand — drag region */}
         {desktopChrome ? (
           <div
             className="lyra-titlebar-drag shrink-0 select-none"
@@ -89,35 +95,34 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           >
             <div
               className={cn(
-                // min height fits size-9 icon + title/subtitle without clipping
-                "flex items-center gap-2.5 px-2 py-3",
-                isMacDesktop ? "min-h-[64px] pl-[72px] pt-4" : "min-h-[60px]",
+                "flex h-10 items-center gap-2 px-2",
+                isMacDesktop ? "pl-[72px]" : "",
               )}
             >
               <div
-                className="flex min-w-0 flex-1 items-center gap-2.5"
+                className="flex min-w-0 flex-1 items-center gap-2"
                 style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
               >
-                <div className="flex size-9 shrink-0 items-center justify-center rounded-2xl bg-primary text-primary-foreground shadow-sm">
-                  <HardDrive className="size-4" />
+                <div className="flex size-7 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground shadow-sm">
+                  <HardDrive className="size-3.5" />
                 </div>
                 <div className="min-w-0 leading-tight">
                   <p className="truncate text-sm font-semibold tracking-tight">Lyra</p>
-                  <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
-                    {onlineCount} online · private network
+                  <p className="truncate text-[11px] text-muted-foreground">
+                    {onlineCount} online
                   </p>
                 </div>
               </div>
             </div>
           </div>
         ) : (
-          <div className="mb-6 flex items-center gap-2.5 px-2">
-            <div className="flex size-9 items-center justify-center rounded-2xl bg-primary text-primary-foreground shadow-sm">
-              <HardDrive className="size-4" />
+          <div className="mb-3 flex items-center gap-2 px-2 py-1">
+            <div className="flex size-7 items-center justify-center rounded-md bg-primary text-primary-foreground shadow-sm">
+              <HardDrive className="size-3.5" />
             </div>
             <div className="min-w-0 leading-tight">
               <p className="truncate text-sm font-semibold tracking-tight">Lyra</p>
-              <p className="mt-0.5 truncate text-xs text-muted-foreground">
+              <p className="truncate text-[11px] text-muted-foreground">
                 {onlineCount} online · private network
               </p>
             </div>
@@ -125,7 +130,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         )}
 
         <nav
-          className="flex flex-1 flex-col gap-1"
+          className="flex flex-1 flex-col gap-0.5 px-0.5"
           style={desktop ? ({ WebkitAppRegion: "no-drag" } as React.CSSProperties) : undefined}
         >
           {nav.map(({ to, label, icon: Icon }) => {
@@ -135,7 +140,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 key={to}
                 to={to}
                 className={cn(
-                  "flex items-center gap-2.5 rounded-full px-3 py-2 text-sm font-medium transition-colors",
+                  "flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-sm font-medium transition-colors",
                   active
                     ? "bg-primary text-primary-foreground shadow-sm"
                     : "text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
@@ -149,17 +154,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </nav>
 
         <div
-          className="mt-auto space-y-2 px-1 pb-4"
+          className="mt-auto space-y-1.5 px-0.5 pb-3"
           style={desktop ? ({ WebkitAppRegion: "no-drag" } as React.CSSProperties) : undefined}
         >
-          <div className="rounded-3xl border border-border/70 bg-card/60 px-3 py-3">
-            <p className="text-xs text-muted-foreground">This device</p>
+          <div className="rounded-lg border border-border/70 bg-card/60 px-2.5 py-2">
+            <p className="text-[11px] text-muted-foreground">This device</p>
             <p className="truncate text-sm font-medium">{identity?.name ?? "—"}</p>
           </div>
           <Button
             variant="ghost"
             size="sm"
-            className="w-full justify-start rounded-full"
+            className="w-full justify-start rounded-md"
             onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
           >
             {theme === "dark" ? <Sun className="size-4" /> : <Moon className="size-4" />}
@@ -169,34 +174,46 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col">
-        {/* Content-area title strip: match sidebar brand height; drag + window controls */}
+        {/* Desktop content title bar: page title + drag + window controls */}
         {desktopChrome ? (
           <div
             className={cn(
-              "lyra-titlebar-drag relative hidden shrink-0 md:block",
-              isMacDesktop ? "min-h-[64px]" : "min-h-[60px]",
+              "lyra-titlebar-drag relative hidden h-10 shrink-0 items-center border-b border-border md:flex",
             )}
             style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
             onDoubleClick={() => {
               if (!isMacDesktop) void getDesktopApi()?.windowMaximizeToggle?.();
             }}
           >
+            <div
+              className="flex min-w-0 flex-1 items-center px-4"
+              style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
+            >
+              <h1 className="truncate text-sm font-semibold tracking-tight">{pageTitle}</h1>
+            </div>
             {showCustomWindowControls ? (
-              <div className="absolute inset-y-0 right-0 flex items-center">
+              <div className="flex h-full items-stretch">
                 <WindowControls />
               </div>
             ) : null}
           </div>
         ) : null}
 
-        <header className="flex items-center justify-between gap-3 border-b border-border/70 px-4 py-3 md:hidden">
+        {/* Web (non-desktop) top page title on md+ — optional strip for parity */}
+        {!desktopChrome ? (
+          <div className="hidden h-10 shrink-0 items-center border-b border-border px-4 md:flex">
+            <h1 className="truncate text-sm font-semibold tracking-tight">{pageTitle}</h1>
+          </div>
+        ) : null}
+
+        <header className="flex items-center justify-between gap-3 border-b border-border px-3 py-2 md:hidden">
           <div className="flex items-center gap-2">
-            <div className="flex size-8 items-center justify-center rounded-xl bg-primary text-primary-foreground">
+            <div className="flex size-7 items-center justify-center rounded-md bg-primary text-primary-foreground">
               <HardDrive className="size-3.5" />
             </div>
-            <span className="font-semibold">Lyra</span>
+            <span className="text-sm font-semibold">{pageTitle}</span>
           </div>
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-0.5">
             <Button
               variant="ghost"
               size="icon-sm"
@@ -212,7 +229,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <ConflictBanner />
         <main className="min-h-0 flex-1 overflow-auto">{children}</main>
 
-        <nav className="flex border-t border-border/70 bg-background/95 px-2 py-2 backdrop-blur md:hidden">
+        <nav className="flex border-t border-border bg-background/95 px-1.5 py-1.5 backdrop-blur md:hidden">
           {nav.map(({ to, label, icon: Icon }) => {
             const active = to === "/" ? pathname === "/" : pathname.startsWith(to);
             return (
@@ -220,7 +237,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 key={to}
                 to={to}
                 className={cn(
-                  "flex flex-1 flex-col items-center gap-0.5 rounded-2xl px-1 py-1.5 text-[10px] font-medium",
+                  "flex flex-1 flex-col items-center gap-0.5 rounded-md px-1 py-1.5 text-[10px] font-medium",
                   active ? "text-primary" : "text-muted-foreground",
                 )}
               >

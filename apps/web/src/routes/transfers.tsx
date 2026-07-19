@@ -14,6 +14,7 @@ import { Button } from "@lyra-sync-app/ui/components/button";
 import { Card, CardContent } from "@lyra-sync-app/ui/components/card";
 import { Input } from "@lyra-sync-app/ui/components/input";
 import { Progress } from "@lyra-sync-app/ui/components/progress";
+import { FilePreview } from "@/components/file-preview";
 import { materializeFileBytes, pickFiles } from "@/lib/file-picker";
 import { useLyraSelector, useLyraStore } from "@/lib/lyra";
 
@@ -73,7 +74,7 @@ function TransfersPage() {
   };
 
   return (
-    <div className="mx-auto max-w-3xl space-y-6 p-4 md:p-8">
+    <div className="mx-auto max-w-3xl space-y-4 p-4 md:px-5 md:py-4">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Transfers</h1>
@@ -154,13 +155,13 @@ function TransfersPage() {
         value={filter}
         onChange={(e) => setFilter(e.target.value)}
         placeholder="Search transfers by name, device, or status…"
-        className="rounded-full"
+        className="rounded-md"
         aria-label="Search transfer history"
       />
 
       <div className="space-y-3">
         {filtered.length === 0 ? (
-          <p className="py-12 text-center text-sm text-muted-foreground">
+          <p className="py-8 text-center text-sm text-muted-foreground">
             {transfers.length === 0 ? "No transfers yet." : "No transfers match your search."}
           </p>
         ) : (
@@ -168,23 +169,33 @@ function TransfersPage() {
             const pct = formatPercent(tx.transferredBytes, tx.totalBytes);
             const names = tx.files.map((f) => f.name).join(", ");
             return (
-              <Card key={tx.id} className="rounded-3xl">
-                <CardContent className="space-y-3 p-4">
-                  <div className="flex flex-wrap items-start justify-between gap-2">
-                    <div className="min-w-0">
-                      <p className="truncate font-medium">{names}</p>
-                      <p className="text-xs text-muted-foreground">
-                        {tx.direction === "sent" ? "To" : "From"} {tx.deviceName} ·{" "}
-                        {formatBytes(tx.totalBytes)} · {formatRelativeTime(tx.createdAt)}
-                      </p>
+              <Card key={tx.id} className="rounded-xl">
+                <CardContent className="space-y-3 p-3">
+                  <div className="flex items-start gap-3">
+                    <FilePreview
+                      files={tx.files.map((f) => ({
+                        name: f.name,
+                        mimeType: f.mimeType,
+                      }))}
+                    />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="truncate font-medium">{names}</p>
+                          <p className="text-xs text-muted-foreground">
+                            {tx.direction === "sent" ? "To" : "From"} {tx.deviceName} ·{" "}
+                            {formatBytes(tx.totalBytes)} · {formatRelativeTime(tx.createdAt)}
+                          </p>
+                        </div>
+                        <Badge variant={statusVariant(tx.status)} className="capitalize">
+                          {tx.status}
+                        </Badge>
+                      </div>
                     </div>
-                    <Badge variant={statusVariant(tx.status)} className="capitalize">
-                      {tx.status}
-                    </Badge>
                   </div>
 
                   {tx.status === "conflict" && (
-                    <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-3">
+                    <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
                       <p className="text-sm font-medium">
                         {(tx.conflictFileNames?.length ?? 0) > 1
                           ? `${tx.conflictFileNames!.length} files already exist`

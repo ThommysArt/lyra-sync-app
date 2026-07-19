@@ -43,7 +43,7 @@ function ClipboardPage() {
   };
 
   return (
-    <div className="mx-auto max-w-3xl space-y-6 p-4 md:p-8">
+    <div className="mx-auto max-w-3xl space-y-4 p-4 md:px-5 md:py-4">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Clipboard</h1>
@@ -62,10 +62,10 @@ function ClipboardPage() {
         </div>
       </div>
 
-      <Card className="rounded-4xl border-primary/20 bg-primary/5">
+      <Card className="rounded-xl border-primary/20 bg-primary/5">
         <CardContent className="flex flex-wrap items-center justify-between gap-3 p-4">
           <div className="flex min-w-0 items-start gap-3">
-            <div className="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-2xl bg-primary/15 text-primary">
+            <div className="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/15 text-primary">
               <Radio className="size-4" />
             </div>
             <div className="min-w-0">
@@ -87,13 +87,13 @@ function ClipboardPage() {
         </CardContent>
       </Card>
 
-      <Card className="rounded-4xl">
+      <Card className="rounded-xl">
         <CardContent className="space-y-3 p-4">
           <Textarea
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             placeholder="Type or paste text to send…"
-            className="min-h-24 rounded-3xl"
+            className="min-h-24 rounded-xl"
           />
           <div className="flex flex-wrap gap-2">
             <Button
@@ -121,7 +121,7 @@ function ClipboardPage() {
             >
               Save to history
             </Button>
-            <label className="inline-flex h-9 cursor-pointer items-center justify-center gap-2 rounded-full border border-border bg-background px-3 text-sm font-medium hover:bg-muted">
+            <label className="inline-flex h-9 cursor-pointer items-center justify-center gap-2 rounded-md border border-border bg-background px-3 text-sm font-medium hover:bg-muted">
               Add image
               <input
                 type="file"
@@ -152,14 +152,14 @@ function ClipboardPage() {
           <p className="py-12 text-center text-sm text-muted-foreground">No clipboard items yet.</p>
         ) : (
           history.map((item) => (
-            <Card key={item.id} className="rounded-3xl">
+            <Card key={item.id} className="rounded-xl">
               <CardContent className="flex flex-col gap-3 p-4 sm:flex-row sm:items-start">
                 <div className="min-w-0 flex-1">
                   {item.type === "image" && item.imageData ? (
                     <img
                       src={item.imageData}
                       alt="Clipboard image"
-                      className="mb-2 max-h-40 rounded-2xl border border-border/60 object-contain"
+                      className="mb-2 max-h-40 rounded-lg border border-border/60 object-contain"
                     />
                   ) : null}
                   <p className="whitespace-pre-wrap break-words text-sm">

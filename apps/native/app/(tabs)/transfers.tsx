@@ -8,9 +8,10 @@ import {
 import * as DocumentPicker from "expo-document-picker";
 import { Pressable, ScrollView, Text, View } from "react-native";
 
+import { FilePreview } from "@/components/file-preview";
 import { ScreenHeader, useTabBottomPadding } from "@/components/ui/screen-header";
 import { useAppTheme } from "@/contexts/app-theme-context";
-import { ACCENT, ACCENT_DARK, fonts, PAGE_BG } from "@/lib/constants";
+import { ACCENT, ACCENT_DARK, CARD_BG, fonts, INK, MUTED, PAGE_BG, RADIUS } from "@/lib/constants";
 import { useLyraSelector, useLyraStore } from "@/lib/lyra";
 
 export default function TransfersScreen() {
@@ -26,9 +27,9 @@ export default function TransfersScreen() {
       s.incomingPairRequests.length > 0 || s.transfers.some((t) => t.status === "conflict"),
   );
   const bg = isDark ? PAGE_BG.dark : PAGE_BG.light;
-  const ink = isDark ? "#F5F7FF" : "#0B1220";
-  const muted = isDark ? "rgba(255,255,255,0.55)" : "rgba(0,0,0,0.45)";
-  const card = isDark ? "#141A26" : "#FFFFFF";
+  const ink = isDark ? INK.dark : INK.light;
+  const muted = isDark ? MUTED.dark : MUTED.light;
+  const card = isDark ? CARD_BG.dark : CARD_BG.light;
   const accent = isDark ? ACCENT_DARK : ACCENT;
 
   const pickAndSend = async () => {
@@ -81,7 +82,7 @@ export default function TransfersScreen() {
               onPress={() => void pickAndSend()}
               style={{
                 backgroundColor: accent,
-                borderRadius: 999,
+                borderRadius: RADIUS.md,
                 paddingHorizontal: 12,
                 paddingVertical: 8,
               }}
@@ -91,29 +92,51 @@ export default function TransfersScreen() {
           }
         />
 
-        <View style={{ gap: 12, paddingHorizontal: 16 }}>
+        <View style={{ gap: 10, paddingHorizontal: 16 }}>
           {transfers.map((tx) => {
             const pct = formatPercent(tx.transferredBytes, tx.totalBytes);
             return (
-              <View key={tx.id} style={{ backgroundColor: card, borderRadius: 22, padding: 14 }}>
-                <Text style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 15 }}>
-                  {tx.files.map((f) => f.name).join(", ")}
-                </Text>
-                <Text style={{ color: muted, fontFamily: fonts.medium, fontSize: 12, marginTop: 4 }}>
-                  {tx.direction === "sent" ? "To" : "From"} {tx.deviceName} ·{" "}
-                  {formatBytes(tx.totalBytes)} · {formatRelativeTime(tx.createdAt)}
-                </Text>
-                <Text
-                  style={{
-                    color: accent,
-                    fontFamily: fonts.medium,
-                    fontSize: 12,
-                    marginTop: 6,
-                    textTransform: "capitalize",
-                  }}
-                >
-                  {tx.status}
-                </Text>
+              <View
+                key={tx.id}
+                style={{
+                  backgroundColor: card,
+                  borderRadius: RADIUS.xl,
+                  padding: 12,
+                }}
+              >
+                <View style={{ flexDirection: "row", gap: 12 }}>
+                  <FilePreview files={tx.files} />
+                  <View style={{ flex: 1, minWidth: 0 }}>
+                    <Text
+                      numberOfLines={2}
+                      style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 15 }}
+                    >
+                      {tx.files.map((f) => f.name).join(", ")}
+                    </Text>
+                    <Text
+                      style={{
+                        color: muted,
+                        fontFamily: fonts.medium,
+                        fontSize: 12,
+                        marginTop: 4,
+                      }}
+                    >
+                      {tx.direction === "sent" ? "To" : "From"} {tx.deviceName} ·{" "}
+                      {formatBytes(tx.totalBytes)} · {formatRelativeTime(tx.createdAt)}
+                    </Text>
+                    <Text
+                      style={{
+                        color: accent,
+                        fontFamily: fonts.medium,
+                        fontSize: 12,
+                        marginTop: 6,
+                        textTransform: "capitalize",
+                      }}
+                    >
+                      {tx.status}
+                    </Text>
+                  </View>
+                </View>
 
                 {tx.status === "conflict" && (
                   <View style={{ gap: 8, marginTop: 10 }}>
@@ -147,8 +170,8 @@ export default function TransfersScreen() {
                     <View
                       style={{
                         backgroundColor: isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)",
-                        borderRadius: 99,
-                        height: 8,
+                        borderRadius: 4,
+                        height: 6,
                         overflow: "hidden",
                       }}
                     >
@@ -180,11 +203,7 @@ export default function TransfersScreen() {
                     />
                   )}
                   {tx.status === "paused" && (
-                    <Chip
-                      label="Resume"
-                      onPress={() => store.resumeTransfer(tx.id)}
-                      ink={ink}
-                    />
+                    <Chip label="Resume" onPress={() => store.resumeTransfer(tx.id)} ink={ink} />
                   )}
                   {(tx.status === "transferring" || tx.status === "paused") && (
                     <Chip
@@ -194,11 +213,7 @@ export default function TransfersScreen() {
                     />
                   )}
                   {(tx.status === "completed" || tx.status === "cancelled") && (
-                    <Chip
-                      label="Re-send"
-                      onPress={() => store.resendTransfer(tx.id)}
-                      ink={ink}
-                    />
+                    <Chip label="Re-send" onPress={() => store.resendTransfer(tx.id)} ink={ink} />
                   )}
                 </View>
               </View>
@@ -216,7 +231,7 @@ function Chip({ label, onPress, ink }: { label: string; onPress: () => void; ink
       onPress={onPress}
       style={{
         backgroundColor: "rgba(127,127,127,0.12)",
-        borderRadius: 999,
+        borderRadius: RADIUS.md,
         paddingHorizontal: 12,
         paddingVertical: 7,
       }}

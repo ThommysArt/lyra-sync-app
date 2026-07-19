@@ -26,7 +26,7 @@ export function ConflictBanner() {
   const totalFiles = conflicts.reduce((acc, tx) => acc + namesFor(tx).length, 0);
   const multiSession = conflicts.length > 1;
   const multiFile = totalFiles > 1;
-  const ink = isDark ? "#F5F7FF" : "#0B1220";
+  const ink = isDark ? "#e5e5e5" : "#333333";
   const muted = isDark ? "rgba(255,255,255,0.55)" : "rgba(0,0,0,0.45)";
 
   const resolveOne = (id: string, action: ConflictAction) => {
@@ -70,7 +70,7 @@ export function ConflictBanner() {
               onPress={() => resolveAll("overwrite")}
               style={{
                 backgroundColor: accent,
-                borderRadius: 999,
+                borderRadius: 8,
                 paddingHorizontal: 14,
                 paddingVertical: 8,
               }}
@@ -102,7 +102,7 @@ export function ConflictBanner() {
               onPress={() => resolveOne(conflicts[0]!.id, "overwrite")}
               style={{
                 backgroundColor: accent,
-                borderRadius: 999,
+                borderRadius: 8,
                 paddingHorizontal: 14,
                 paddingVertical: 8,
               }}
@@ -124,7 +124,7 @@ export function ConflictBanner() {
                 key={tx.id}
                 style={{
                   backgroundColor: isDark ? "rgba(0,0,0,0.25)" : "rgba(255,255,255,0.55)",
-                  borderRadius: 16,
+                  borderRadius: 10,
                   gap: 8,
                   padding: 12,
                 }}
@@ -148,7 +148,7 @@ export function ConflictBanner() {
                     onPress={() => resolveOne(tx.id, "overwrite")}
                     style={{
                       backgroundColor: accent,
-                      borderRadius: 999,
+                      borderRadius: 8,
                       paddingHorizontal: 12,
                       paddingVertical: 6,
                     }}
@@ -181,14 +181,14 @@ function Chip({
       onPress={onPress}
       style={{
         backgroundColor: isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)",
-        borderRadius: 999,
+        borderRadius: 8,
         paddingHorizontal: 14,
         paddingVertical: 8,
       }}
     >
       <Text
         style={{
-          color: isDark ? "#F5F7FF" : "#0B1220",
+          color: isDark ? "#e5e5e5" : "#333333",
           fontFamily: fonts.medium,
           fontSize: 13,
         }}

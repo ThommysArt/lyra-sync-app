@@ -25,37 +25,36 @@ export function WindowControls({ className }: { className?: string }) {
 
   return (
     <div
-      className={cn("lyra-window-controls flex h-full min-h-[44px] items-stretch", className)}
+      className={cn("lyra-window-controls flex h-full items-stretch", className)}
       style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
     >
       <button
         type="button"
         aria-label="Minimize"
-        className="flex w-12 items-center justify-center text-muted-foreground transition-colors hover:bg-white/10 hover:text-foreground"
+        className="flex w-10 items-center justify-center text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
         onClick={() => void api.windowMinimize?.()}
       >
-        <Minus className="size-3.5" strokeWidth={2} />
+        <Minus className="size-3" strokeWidth={2} />
       </button>
       <button
         type="button"
         aria-label={maximized ? "Restore" : "Maximize"}
-        className="flex w-12 items-center justify-center text-muted-foreground transition-colors hover:bg-white/10 hover:text-foreground"
+        className="flex w-10 items-center justify-center text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
         onClick={() => void api.windowMaximizeToggle?.()}
       >
         {maximized ? (
-          // Overlapping squares = restore
-          <span className="relative inline-block size-3">
-            <span className="absolute bottom-0 left-0 size-2 border border-current" />
-            <span className="absolute right-0 top-0 size-2 border border-current bg-background" />
+          <span className="relative inline-block size-2.5">
+            <span className="absolute bottom-0 left-0 size-1.5 border border-current" />
+            <span className="absolute right-0 top-0 size-1.5 border border-current bg-background" />
           </span>
         ) : (
-          <Square className="size-3" strokeWidth={2} />
+          <Square className="size-2.5" strokeWidth={2} />
         )}
       </button>
       <button
         type="button"
         aria-label="Close"
-        className="flex w-12 items-center justify-center text-muted-foreground transition-colors hover:bg-red-500 hover:text-white"
+        className="flex w-10 items-center justify-center text-muted-foreground transition-colors hover:bg-destructive hover:text-white"
         onClick={() => void api.windowClose?.()}
       >
         <X className="size-3.5" strokeWidth={2} />

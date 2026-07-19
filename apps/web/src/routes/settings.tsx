@@ -40,7 +40,7 @@ function SettingsPage() {
   }, [desktop, settings.downloadDirectory]);
 
   return (
-    <div className="mx-auto max-w-2xl space-y-6 p-4 md:p-8">
+    <div className="mx-auto max-w-2xl space-y-4 p-4 md:px-5 md:py-4">
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
         <p className="text-sm text-muted-foreground">
@@ -48,7 +48,7 @@ function SettingsPage() {
         </p>
       </div>
 
-      <Card className="rounded-4xl">
+      <Card className="rounded-xl">
         <CardHeader>
           <CardTitle>This device</CardTitle>
           <CardDescription>Name and cryptographic fingerprint stay on this machine.</CardDescription>
@@ -61,7 +61,7 @@ function SettingsPage() {
                 id="device-name"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                className="rounded-full"
+                className="rounded-md"
               />
               <Button
                 onClick={() => {
@@ -72,7 +72,7 @@ function SettingsPage() {
               </Button>
             </div>
           </div>
-          <div className="rounded-3xl bg-muted/60 px-4 py-3 text-sm">
+          <div className="rounded-xl bg-muted/60 px-4 py-3 text-sm">
             <p className="text-xs text-muted-foreground">Fingerprint</p>
             <p className="font-mono text-sm">
               {identity ? formatFingerprint(identity.fingerprint) : "—"}
@@ -84,7 +84,7 @@ function SettingsPage() {
         </CardContent>
       </Card>
 
-      <Card className="rounded-4xl">
+      <Card className="rounded-xl">
         <CardHeader>
           <CardTitle>Defaults</CardTitle>
           <CardDescription>Applied to newly paired devices and global behavior.</CardDescription>
@@ -155,7 +155,7 @@ function SettingsPage() {
                   downloadPath ||
                   (desktop ? "System Downloads (default)" : "Browser downloads (default)")
                 }
-                className="min-w-0 flex-1 rounded-full font-mono text-xs"
+                className="min-w-0 flex-1 rounded-md font-mono text-xs"
               />
               {desktop ? (
                 <>
@@ -204,7 +204,7 @@ function SettingsPage() {
               type="number"
               min={5}
               max={200}
-              className="w-24 rounded-full"
+              className="w-24 rounded-md"
               value={settings.clipboardHistoryLimit}
               onChange={(e) =>
                 store.updateSettings({
@@ -225,7 +225,7 @@ function SettingsPage() {
               type="number"
               min={1024}
               max={65535}
-              className="w-28 rounded-full"
+              className="w-28 rounded-md"
               value={settings.peerListenPort}
               onChange={(e) =>
                 store.updateSettings({
@@ -246,7 +246,7 @@ function SettingsPage() {
               type="number"
               min={0}
               max={365}
-              className="w-24 rounded-full"
+              className="w-24 rounded-md"
               value={settings.clipboardRetentionDays}
               onChange={(e) =>
                 store.updateSettings({
@@ -261,7 +261,7 @@ function SettingsPage() {
         </CardContent>
       </Card>
 
-      <Card className="rounded-4xl">
+      <Card className="rounded-xl">
         <CardHeader>
           <CardTitle>Network</CardTitle>
           <CardDescription>
@@ -282,7 +282,7 @@ function SettingsPage() {
               <Badge variant="outline">Browser</Badge>
             )}
           </div>
-          <div className="rounded-3xl bg-muted/60 px-4 py-3 text-sm">
+          <div className="rounded-xl bg-muted/60 px-4 py-3 text-sm">
             <p className="text-xs text-muted-foreground">Listen endpoint</p>
             <p className="font-mono text-sm">
               {peerServer.url ??
@@ -345,7 +345,7 @@ function SettingsPage() {
         </CardContent>
       </Card>
 
-      <Card className="rounded-4xl">
+      <Card className="rounded-xl">
         <CardHeader>
           <CardTitle>Keyboard shortcuts</CardTitle>
           <CardDescription>In-app power-user bindings (Ctrl on Windows/Linux, ⌘ on macOS).</CardDescription>
@@ -363,13 +363,13 @@ function SettingsPage() {
           ].map(([keys, desc]) => (
             <div key={keys} className="flex items-center justify-between gap-3">
               <span className="text-muted-foreground">{desc}</span>
-              <kbd className="rounded-full bg-muted px-2.5 py-1 font-mono text-xs">{keys}</kbd>
+              <kbd className="rounded-md bg-muted px-2.5 py-1 font-mono text-xs">{keys}</kbd>
             </div>
           ))}
         </CardContent>
       </Card>
 
-      <Card className="rounded-4xl">
+      <Card className="rounded-xl">
         <CardHeader>
           <CardTitle>Paired devices</CardTitle>
           <CardDescription>
@@ -380,7 +380,7 @@ function SettingsPage() {
           {devices.map((d) => (
             <div
               key={d.id}
-              className="flex items-center justify-between gap-3 rounded-3xl border border-border/70 px-3 py-2.5"
+              className="flex items-center justify-between gap-3 rounded-xl border border-border/70 px-3 py-2.5"
             >
               <div className="min-w-0">
                 <p className="truncate text-sm font-medium">{d.nickname || d.name}</p>
@@ -392,7 +392,7 @@ function SettingsPage() {
                 <Link
                   to="/devices/$deviceId"
                   params={{ deviceId: d.id }}
-                  className="inline-flex h-8 items-center justify-center rounded-full border border-border px-3 text-sm font-medium hover:bg-muted"
+                  className="inline-flex h-8 items-center justify-center rounded-md border border-border px-3 text-sm font-medium hover:bg-muted"
                 >
                   Manage
                 </Link>

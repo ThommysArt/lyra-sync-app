@@ -113,7 +113,7 @@ export function QrScanner({ isDark, accent, ink, muted, card, onScanned }: QrSca
         <View
           style={{
             backgroundColor: "#000",
-            borderRadius: 24,
+            borderRadius: 14,
             marginTop: 12,
             overflow: "hidden",
           }}
@@ -141,7 +141,7 @@ export function QrScanner({ isDark, accent, ink, muted, card, onScanned }: QrSca
               style={{
                 width: 200,
                 height: 200,
-                borderRadius: 20,
+                borderRadius: 12,
                 borderWidth: 2,
                 borderColor: locked ? "rgba(122,162,255,0.9)" : "rgba(255,255,255,0.85)",
               }}
@@ -176,7 +176,7 @@ export function QrScanner({ isDark, accent, ink, muted, card, onScanned }: QrSca
           style={{
             alignItems: "center",
             backgroundColor: accent,
-            borderRadius: 999,
+            borderRadius: 8,
             marginTop: 12,
             paddingVertical: 14,
           }}
@@ -204,7 +204,7 @@ export function QrScanner({ isDark, accent, ink, muted, card, onScanned }: QrSca
         <View
           style={{
             backgroundColor: isDark ? "rgba(122,162,255,0.18)" : "rgba(47,107,255,0.12)",
-            borderRadius: 16,
+            borderRadius: 10,
             marginTop: 12,
             paddingHorizontal: 14,
             paddingVertical: 12,
@@ -245,7 +245,7 @@ export function QrScanner({ isDark, accent, ink, muted, card, onScanned }: QrSca
           style={{
             alignItems: "center",
             backgroundColor: card,
-            borderRadius: 20,
+            borderRadius: 12,
             marginTop: 12,
             padding: 16,
           }}

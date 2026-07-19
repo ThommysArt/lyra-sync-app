@@ -99,7 +99,7 @@ function DevicesPage() {
   };
 
   return (
-    <div className="mx-auto max-w-5xl space-y-6 p-4 md:p-8">
+    <div className="mx-auto max-w-5xl space-y-4 p-4 md:px-5 md:py-4">
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Devices</h1>
@@ -132,7 +132,7 @@ function DevicesPage() {
         </div>
       </div>
 
-      <Card className="rounded-4xl">
+      <Card className="rounded-xl">
         <CardContent className="space-y-3 p-4">
           <div>
             <p className="text-sm font-medium">Find device by address</p>
@@ -151,7 +151,7 @@ function DevicesPage() {
                 value={manualHost}
                 onChange={(e) => setManualHost(e.target.value)}
                 placeholder="192.168.1.42 or laptop.tailnet"
-                className="rounded-full"
+                className="rounded-md"
               />
             </div>
             <div className="space-y-1.5">
@@ -162,7 +162,7 @@ function DevicesPage() {
                 id="manual-port"
                 value={manualPort}
                 onChange={(e) => setManualPort(e.target.value)}
-                className="rounded-full"
+                className="rounded-md"
                 inputMode="numeric"
               />
             </div>
@@ -175,7 +175,7 @@ function DevicesPage() {
                 value={manualName}
                 onChange={(e) => setManualName(e.target.value)}
                 placeholder="Office laptop"
-                className="rounded-full"
+                className="rounded-md"
               />
             </div>
             <div className="flex items-end">
@@ -194,14 +194,14 @@ function DevicesPage() {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Search devices…"
-          className="rounded-full sm:max-w-xs"
+          className="rounded-md sm:max-w-xs"
         />
         <div className="flex min-w-0 flex-1 gap-2">
           <Input
             value={url}
             onChange={(e) => setUrl(e.target.value)}
             placeholder="Open URL on other devices…"
-            className="rounded-full"
+            className="rounded-md"
           />
           <Button
             variant="secondary"
@@ -220,7 +220,7 @@ function DevicesPage() {
         <section className="space-y-3">
           <div className="flex items-center gap-2">
             <h2 className="text-sm font-semibold tracking-tight">Nearby (not paired)</h2>
-            <Badge variant="outline" className="rounded-full">
+            <Badge variant="outline" className="rounded-md">
               {nearby.length}
             </Badge>
           </div>
@@ -230,7 +230,7 @@ function DevicesPage() {
           </p>
           <div className="grid gap-3 sm:grid-cols-2">
             {nearby.map((device) => (
-              <Card key={device.id} className="rounded-3xl border-dashed border-border/80">
+              <Card key={device.id} className="rounded-xl border-dashed border-border/80">
                 <CardContent className="flex items-center justify-between gap-3 p-4">
                   <div className="min-w-0">
                     <p className="truncate text-sm font-medium">{device.nickname || device.name}</p>
@@ -263,7 +263,7 @@ function DevicesPage() {
       ) : null}
 
       {filtered.length === 0 ? (
-        <div className="flex flex-col items-center justify-center rounded-4xl border border-dashed border-border px-6 py-16 text-center">
+        <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-border px-6 py-16 text-center">
           <div className="mb-3 flex size-12 items-center justify-center rounded-full bg-primary/10 text-primary">
             <Plus className="size-5" />
           </div>

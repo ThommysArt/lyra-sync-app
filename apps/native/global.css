@@ -5,57 +5,57 @@
 @source './node_modules/heroui-native/lib';
 
 @theme {
-  --font-sans: "Manrope_400Regular";
-  --font-medium: "Manrope_500Medium";
-  --font-semibold: "Manrope_600SemiBold";
-  --font-bold: "Manrope_700Bold";
+  --font-sans: "DMSans_400Regular";
+  --font-medium: "DMSans_500Medium";
+  --font-semibold: "DMSans_600SemiBold";
+  --font-bold: "DMSans_700Bold";
 
-  --color-accent: #2f6bff;
+  --color-accent: #df6035;
   --color-accent-foreground: #ffffff;
-  --color-accent-soft: #dbe6ff;
-  --color-surface-page: #f2f4f8;
-  --color-ink: #0b1220;
+  --color-accent-soft: #f8e4db;
+  --color-surface-page: #e8ebed;
+  --color-ink: #333333;
 }
 
 @utility font-normal {
-  font-family: "Manrope_400Regular";
+  font-family: "DMSans_400Regular";
 }
 @utility font-medium {
-  font-family: "Manrope_500Medium";
+  font-family: "DMSans_500Medium";
 }
 @utility font-semibold {
-  font-family: "Manrope_600SemiBold";
+  font-family: "DMSans_600SemiBold";
 }
 @utility font-bold {
-  font-family: "Manrope_700Bold";
+  font-family: "DMSans_700Bold";
 }
 @utility font-extrabold {
-  font-family: "Manrope_800ExtraBold";
+  font-family: "DMSans_700Bold";
 }
 @utility font-black {
-  font-family: "Manrope_800ExtraBold";
+  font-family: "DMSans_700Bold";
 }
 
 @layer theme {
   :root {
     @variant light {
-      --color-accent: #2f6bff;
+      --color-accent: #df6035;
       --color-accent-foreground: #ffffff;
-      --color-accent-soft: #dbe6ff;
-      --color-surface-page: #f2f4f8;
-      --color-ink: #0b1220;
-      --color-background: #f2f4f8;
-      --color-foreground: #0b1220;
+      --color-accent-soft: #f8e4db;
+      --color-surface-page: #e8ebed;
+      --color-ink: #333333;
+      --color-background: #e8ebed;
+      --color-foreground: #333333;
     }
 
     @variant dark {
-      --color-accent: #7aa2ff;
-      --color-accent-foreground: #0b1220;
-      --color-accent-soft: #1a2744;
-      --color-surface-page: #0b0f17;
-      --color-ink: #f5f7ff;
-      --color-background: #0b0f17;
-      --color-foreground: #f5f7ff;
+      --color-accent: #e8784a;
+      --color-accent-foreground: #ffffff;
+      --color-accent-soft: #3a2a22;
+      --color-surface-page: #1a1a1a;
+      --color-ink: #e5e5e5;
+      --color-background: #1a1a1a;
+      --color-foreground: #e5e5e5;
     }
   }
 }

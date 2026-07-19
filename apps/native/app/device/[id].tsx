@@ -31,9 +31,9 @@ export default function DeviceDetailScreen() {
     void store.fetchRemoteFiles(id, path);
   }, [id, path, store]);
   const bg = isDark ? PAGE_BG.dark : PAGE_BG.light;
-  const ink = isDark ? "#F5F7FF" : "#0B1220";
+  const ink = isDark ? "#e5e5e5" : "#333333";
   const muted = isDark ? "rgba(255,255,255,0.55)" : "rgba(0,0,0,0.45)";
-  const card = isDark ? "#141A26" : "#FFFFFF";
+  const card = isDark ? "#202020" : "#FFFFFF";
   const accent = isDark ? ACCENT_DARK : ACCENT;
 
   if (!device) {
@@ -57,7 +57,7 @@ export default function DeviceDetailScreen() {
         }}
       />
       <ScrollView contentContainerStyle={{ gap: 16, padding: 16, paddingBottom: 40 }}>
-        <View style={{ backgroundColor: card, borderRadius: 24, padding: 16 }}>
+        <View style={{ backgroundColor: card, borderRadius: 14, padding: 16 }}>
           <Text style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 18 }}>
             {device.nickname || device.name}
           </Text>
@@ -78,7 +78,7 @@ export default function DeviceDetailScreen() {
             placeholderTextColor={muted}
             style={{
               borderColor: isDark ? "rgba(255,255,255,0.1)" : "rgba(0,0,0,0.08)",
-              borderRadius: 999,
+              borderRadius: 8,
               borderWidth: 1,
               color: ink,
               fontFamily: fonts.medium,
@@ -93,7 +93,7 @@ export default function DeviceDetailScreen() {
             style={{
               alignSelf: "flex-start",
               backgroundColor: accent,
-              borderRadius: 999,
+              borderRadius: 8,
               marginTop: 10,
               paddingHorizontal: 14,
               paddingVertical: 8,
@@ -136,7 +136,7 @@ export default function DeviceDetailScreen() {
             }}
             style={{
               backgroundColor: isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)",
-              borderRadius: 999,
+              borderRadius: 8,
               opacity: device.online ? 1 : 0.45,
               paddingHorizontal: 14,
               paddingVertical: 10,
@@ -181,7 +181,7 @@ export default function DeviceDetailScreen() {
             }}
             style={{
               backgroundColor: accent,
-              borderRadius: 999,
+              borderRadius: 8,
               opacity: device.online ? 1 : 0.45,
               paddingHorizontal: 14,
               paddingVertical: 10,
@@ -193,7 +193,7 @@ export default function DeviceDetailScreen() {
           </Pressable>
         </View>
 
-        <View style={{ backgroundColor: card, borderRadius: 24, padding: 16 }}>
+        <View style={{ backgroundColor: card, borderRadius: 14, padding: 16 }}>
           <Text style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 16 }}>Remote files</Text>
           <View style={{ flexDirection: "row", gap: 8, marginTop: 8 }}>
             {parentPath !== null && (
@@ -243,7 +243,7 @@ export default function DeviceDetailScreen() {
           style={{
             alignItems: "center",
             backgroundColor: "rgba(255,69,58,0.12)",
-            borderRadius: 999,
+            borderRadius: 8,
             paddingVertical: 14,
           }}
         >

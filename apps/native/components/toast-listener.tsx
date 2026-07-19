@@ -73,7 +73,7 @@ export function ToastListener() {
       <View
         style={{
           backgroundColor: bg,
-          borderRadius: 16,
+          borderRadius: 10,
           paddingHorizontal: 16,
           paddingVertical: 12,
           shadowColor: "#000",

@@ -106,8 +106,8 @@ importers:
 
   apps/native:
     dependencies:
-      '@expo-google-fonts/manrope':
-        specifier: ^0.4.1
+      '@expo-google-fonts/dm-sans':
+        specifier: ^0.4.2
         version: 0.4.2
       '@expo/metro-runtime':
         specifier: ~57.0.2
@@ -257,6 +257,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@expo-google-fonts/dm-sans':
+        specifier: ^0.4.2
+        version: 0.4.2
       '@hookform/resolvers':
         specifier: ^5.4.0
         version: 5.4.0(react-hook-form@7.81.0(react@19.2.7))
@@ -1781,8 +1784,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@expo-google-fonts/manrope@0.4.2':
-    resolution: {integrity: sha512-BZsKe8d9BJrVnIQIZcTS7/Kac0TbXnqs/+8EBSiQxrmK6GoCO6eTkmr50D1weIk/EoF20pTmAkpWICnovATr/g==}
+  '@expo-google-fonts/dm-sans@0.4.2':
+    resolution: {integrity: sha512-e/fLH5aCJzkEenz7axvEn8N7IJAKhUwNjIxS75h9j+Ip1M9S7d22M19gJN3A7QW4egVkBJRyQh1hQFhngQn9yA==}
 
   '@expo-google-fonts/material-symbols@0.4.41':
     resolution: {integrity: sha512-BKNSJ6oFGWi+aXu6PF+1EdI43J8Ag+Sm7Ste1SXYmC2eYOJasyjXHkKjgkIieBB1eDZQJSPWuPv421Vg6N5tCQ==}
@@ -9915,7 +9918,7 @@ snapshots:
   '@esbuild/win32-x64@0.28.1':
     optional: true
 
-  '@expo-google-fonts/manrope@0.4.2': {}
+  '@expo-google-fonts/dm-sans@0.4.2': {}
 
   '@expo-google-fonts/material-symbols@0.4.41': {}
 

@@ -114,11 +114,11 @@ function DeviceDetailPage() {
   };
 
   return (
-    <div className="mx-auto max-w-4xl space-y-6 p-4 md:p-8">
+    <div className="mx-auto max-w-4xl space-y-4 p-4 md:px-5 md:py-4">
       <div className="flex items-center gap-3">
         <Link
           to="/"
-          className="inline-flex size-8 items-center justify-center rounded-full hover:bg-muted"
+          className="inline-flex size-8 items-center justify-center rounded-md hover:bg-muted"
         >
           <ArrowLeft className="size-4" />
         </Link>
@@ -140,7 +140,7 @@ function DeviceDetailPage() {
       </div>
 
       <div className="grid gap-4 lg:grid-cols-5">
-        <Card className="rounded-4xl lg:col-span-2">
+        <Card className="rounded-xl lg:col-span-2">
           <CardHeader>
             <CardTitle className="text-base">Device settings</CardTitle>
           </CardHeader>
@@ -152,14 +152,14 @@ function DeviceDetailPage() {
                   value={nickname}
                   onChange={(e) => setNickname(e.target.value)}
                   placeholder={device.name}
-                  className="rounded-full"
+                  className="rounded-md"
                 />
                 <Button size="sm" onClick={() => store.renameDevice(device.id, nickname)}>
                   Save
                 </Button>
               </div>
             </div>
-            <div className="rounded-3xl bg-muted/50 px-3 py-2 text-xs">
+            <div className="rounded-xl bg-muted/50 px-3 py-2 text-xs">
               <p className="text-muted-foreground">Fingerprint</p>
               <p className="font-mono">{formatFingerprint(device.fingerprint)}</p>
               {device.host ? (
@@ -219,7 +219,7 @@ function DeviceDetailPage() {
         </Card>
 
         <DropZone
-          className="rounded-4xl lg:col-span-3"
+          className="rounded-xl lg:col-span-3"
           disabled={!device.online}
           label={`Upload to ${path}`}
           onDropFiles={(files) => {
@@ -229,7 +229,7 @@ function DeviceDetailPage() {
             );
           }}
         >
-          <Card className="h-full rounded-4xl">
+          <Card className="h-full rounded-xl">
             <CardHeader className="flex-row items-center justify-between space-y-0">
               <CardTitle className="text-base">Remote files</CardTitle>
               <div className="flex gap-2">
@@ -275,7 +275,7 @@ function DeviceDetailPage() {
                   Device offline — browse when it comes back.
                 </p>
               ) : (
-                <div className="divide-y divide-border/60 overflow-hidden rounded-3xl border border-border/70">
+                <div className="divide-y divide-border/60 overflow-hidden rounded-xl border border-border/70">
                   {entries.map((entry) => {
                     const isSelected = selected.includes(entry.path);
                     return (

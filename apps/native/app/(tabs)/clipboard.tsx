@@ -26,9 +26,9 @@ export default function ClipboardScreen() {
   );
   const [draft, setDraft] = useState("");
   const bg = isDark ? PAGE_BG.dark : PAGE_BG.light;
-  const ink = isDark ? "#F5F7FF" : "#0B1220";
+  const ink = isDark ? "#e5e5e5" : "#333333";
   const muted = isDark ? "rgba(255,255,255,0.55)" : "rgba(0,0,0,0.45)";
-  const card = isDark ? "#141A26" : "#FFFFFF";
+  const card = isDark ? "#202020" : "#FFFFFF";
   const accent = isDark ? ACCENT_DARK : ACCENT;
 
   const importSystem = async () => {
@@ -66,7 +66,7 @@ export default function ClipboardScreen() {
               onPress={() => void importSystem()}
               style={{
                 backgroundColor: isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)",
-                borderRadius: 999,
+                borderRadius: 8,
                 paddingHorizontal: 12,
                 paddingVertical: 8,
               }}
@@ -77,7 +77,7 @@ export default function ClipboardScreen() {
         />
 
         <View style={{ gap: 12, paddingHorizontal: 16 }}>
-          <View style={{ backgroundColor: card, borderRadius: 24, padding: 14 }}>
+          <View style={{ backgroundColor: card, borderRadius: 14, padding: 14 }}>
             <TextInput
               multiline
               onChangeText={setDraft}
@@ -99,7 +99,7 @@ export default function ClipboardScreen() {
                 alignItems: "center",
                 alignSelf: "flex-start",
                 backgroundColor: accent,
-                borderRadius: 999,
+                borderRadius: 8,
                 flexDirection: "row",
                 gap: 6,
                 marginTop: 10,
@@ -116,7 +116,7 @@ export default function ClipboardScreen() {
           </View>
 
           {history.map((item) => (
-            <View key={item.id} style={{ backgroundColor: card, borderRadius: 22, padding: 14 }}>
+            <View key={item.id} style={{ backgroundColor: card, borderRadius: 12, padding: 14 }}>
               <Text style={{ color: ink, fontFamily: fonts.regular, fontSize: 15 }}>
                 {item.text || "[Image]"}
               </Text>
@@ -158,7 +158,7 @@ function Action({ label, onPress, ink }: { label: string; onPress: () => void; i
       onPress={onPress}
       style={{
         backgroundColor: "rgba(127,127,127,0.12)",
-        borderRadius: 999,
+        borderRadius: 8,
         paddingHorizontal: 12,
         paddingVertical: 7,
       }}

@@ -28,7 +28,7 @@ export function IosSwitch({
       onPress={() => onValueChange(!value)}
       style={{
         backgroundColor: value ? trackOn : trackOff,
-        borderRadius: 999,
+        borderRadius: 8,
         height: 31,
         justifyContent: "center",
         opacity: disabled ? 0.45 : 1,
@@ -40,7 +40,7 @@ export function IosSwitch({
         style={{
           alignSelf: value ? "flex-end" : "flex-start",
           backgroundColor: thumb,
-          borderRadius: 999,
+          borderRadius: 8,
           elevation: 2,
           height: 27,
           shadowColor: "#000",

@@ -28,7 +28,7 @@ export function IncomingPairBanner() {
       }}
     >
       <View>
-        <Text style={{ color: isDark ? "#F5F7FF" : "#0B1220", fontFamily: fonts.semiBold, fontSize: 14 }}>
+        <Text style={{ color: isDark ? "#e5e5e5" : "#333333", fontFamily: fonts.semiBold, fontSize: 14 }}>
           Pairing request from {req.payload.name}
         </Text>
         <Text
@@ -52,7 +52,7 @@ export function IncomingPairBanner() {
           }}
           style={{
             backgroundColor: isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)",
-            borderRadius: 999,
+            borderRadius: 8,
             opacity: busy ? 0.6 : 1,
             paddingHorizontal: 14,
             paddingVertical: 8,
@@ -60,7 +60,7 @@ export function IncomingPairBanner() {
         >
           <Text
             style={{
-              color: isDark ? "#F5F7FF" : "#0B1220",
+              color: isDark ? "#e5e5e5" : "#333333",
               fontFamily: fonts.medium,
               fontSize: 13,
             }}
@@ -79,7 +79,7 @@ export function IncomingPairBanner() {
           style={{
             alignItems: "center",
             backgroundColor: accent,
-            borderRadius: 999,
+            borderRadius: 8,
             flexDirection: "row",
             gap: 6,
             opacity: busy ? 0.85 : 1,

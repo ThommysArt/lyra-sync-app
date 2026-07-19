@@ -1,17 +1,39 @@
-/** Brand primary — Lyra blue */
-export const ACCENT = "#2F6BFF";
-export const ACCENT_SOFT = "rgba(47, 107, 255, 0.14)";
-export const ACCENT_DARK = "#7AA2FF";
+/** Brand primary — orange from docs/new-style.txt */
+export const ACCENT = "#df6035";
+export const ACCENT_SOFT = "rgba(223, 96, 53, 0.14)";
+export const ACCENT_DARK = "#e8784a";
 
 export const PAGE_BG = {
-  light: "#F2F4F8",
-  dark: "#0B0F17",
+  light: "#e8ebed",
+  dark: "#1a1a1a",
+} as const;
+
+export const CARD_BG = {
+  light: "#ffffff",
+  dark: "#202020",
+} as const;
+
+export const INK = {
+  light: "#333333",
+  dark: "#e5e5e5",
+} as const;
+
+export const MUTED = {
+  light: "#6b7280",
+  dark: "#808080",
+} as const;
+
+export const RADIUS = {
+  sm: 6,
+  md: 8,
+  lg: 10,
+  xl: 14,
 } as const;
 
 export const fonts = {
-  bold: "Manrope_700Bold",
-  extraBold: "Manrope_800ExtraBold",
-  medium: "Manrope_500Medium",
-  regular: "Manrope_400Regular",
-  semiBold: "Manrope_600SemiBold",
+  bold: "DMSans_700Bold",
+  extraBold: "DMSans_700Bold",
+  medium: "DMSans_500Medium",
+  regular: "DMSans_400Regular",
+  semiBold: "DMSans_600SemiBold",
 } as const;

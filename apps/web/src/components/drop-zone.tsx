@@ -58,7 +58,7 @@ export function DropZone({
       {children}
       {active && !disabled ? (
         <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-[inherit] border-2 border-dashed border-primary bg-primary/15 backdrop-blur-[1px]">
-          <p className="rounded-full bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground shadow-sm">
+          <p className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground shadow-sm">
             {label}
           </p>
         </div>

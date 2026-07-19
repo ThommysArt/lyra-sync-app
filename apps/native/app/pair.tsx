@@ -32,10 +32,10 @@ export default function PairScreen() {
   const [busy, setBusy] = useState(false);
   const [pasteBusy, setPasteBusy] = useState(false);
   const bg = isDark ? PAGE_BG.dark : PAGE_BG.light;
-  const ink = isDark ? "#F5F7FF" : "#0B1220";
+  const ink = isDark ? "#e5e5e5" : "#333333";
   const muted = isDark ? "rgba(255,255,255,0.55)" : "rgba(0,0,0,0.45)";
   const accent = isDark ? ACCENT_DARK : ACCENT;
-  const card = isDark ? "#141A26" : "#fff";
+  const card = isDark ? "#202020" : "#fff";
 
   // Expo Go / native: refresh LAN IP for /24 scan before pairing
   useEffect(() => {
@@ -110,7 +110,7 @@ export default function PairScreen() {
           <View
             style={{
               backgroundColor: isDark ? "rgba(251,191,36,0.12)" : "rgba(245,158,11,0.12)",
-              borderRadius: 16,
+              borderRadius: 10,
               marginBottom: 16,
               padding: 12,
             }}
@@ -130,7 +130,7 @@ export default function PairScreen() {
           <View
             style={{
               backgroundColor: isDark ? "rgba(122,162,255,0.15)" : "rgba(47,107,255,0.1)",
-              borderRadius: 16,
+              borderRadius: 10,
               marginBottom: 16,
               padding: 12,
             }}
@@ -157,7 +157,7 @@ export default function PairScreen() {
           placeholderTextColor={muted}
           style={{
             backgroundColor: card,
-            borderRadius: 999,
+            borderRadius: 8,
             color: ink,
             fontFamily: fonts.semiBold,
             fontSize: 20,
@@ -182,7 +182,7 @@ export default function PairScreen() {
           placeholderTextColor={muted}
           style={{
             backgroundColor: card,
-            borderRadius: 999,
+            borderRadius: 8,
             color: ink,
             fontFamily: fonts.medium,
             fontSize: 15,
@@ -198,7 +198,7 @@ export default function PairScreen() {
           style={{
             alignItems: "center",
             backgroundColor: accent,
-            borderRadius: 999,
+            borderRadius: 8,
             flexDirection: "row",
             gap: 8,
             justifyContent: "center",
@@ -237,7 +237,7 @@ export default function PairScreen() {
           style={{
             alignItems: "center",
             backgroundColor: card,
-            borderRadius: 24,
+            borderRadius: 14,
             marginTop: 10,
             opacity: canHostCode ? 1 : 0.55,
             padding: 24,
@@ -247,12 +247,12 @@ export default function PairScreen() {
             <View
               style={{
                 backgroundColor: "#fff",
-                borderRadius: 16,
+                borderRadius: 10,
                 marginBottom: 16,
                 padding: 12,
               }}
             >
-              <QRCode value={qrValue} size={180} backgroundColor="#ffffff" color="#0B1220" />
+              <QRCode value={qrValue} size={180} backgroundColor="#ffffff" color="#333333" />
             </View>
           ) : null}
           <Text
@@ -289,7 +289,7 @@ export default function PairScreen() {
           placeholderTextColor={muted}
           style={{
             backgroundColor: card,
-            borderRadius: 20,
+            borderRadius: 12,
             color: ink,
             fontFamily: fonts.regular,
             fontSize: 13,
@@ -313,7 +313,7 @@ export default function PairScreen() {
           style={{
             alignItems: "center",
             backgroundColor: isDark ? "rgba(122,162,255,0.2)" : "rgba(47,107,255,0.12)",
-            borderRadius: 999,
+            borderRadius: 8,
             flexDirection: "row",
             gap: 8,
             justifyContent: "center",

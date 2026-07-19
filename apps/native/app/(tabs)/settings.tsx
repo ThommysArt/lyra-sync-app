@@ -39,9 +39,9 @@ export default function SettingsScreen() {
       : defaultDownloadLabel(),
   );
   const bg = isDark ? PAGE_BG.dark : PAGE_BG.light;
-  const ink = isDark ? "#F5F7FF" : "#0B1220";
+  const ink = isDark ? "#e5e5e5" : "#333333";
   const muted = isDark ? "rgba(255,255,255,0.55)" : "rgba(0,0,0,0.45)";
-  const card = isDark ? "#141A26" : "#FFFFFF";
+  const card = isDark ? "#202020" : "#FFFFFF";
   const accent = isDark ? ACCENT_DARK : ACCENT;
 
   useEffect(() => {
@@ -63,7 +63,7 @@ export default function SettingsScreen() {
         />
 
         <View style={{ gap: 16, paddingHorizontal: 16 }}>
-          <View style={{ backgroundColor: card, borderRadius: 24, padding: 16 }}>
+          <View style={{ backgroundColor: card, borderRadius: 14, padding: 16 }}>
             <Text style={{ color: muted, fontFamily: fonts.medium, fontSize: 12 }}>This device</Text>
             <TextInput
               onChangeText={setName}
@@ -83,7 +83,7 @@ export default function SettingsScreen() {
               style={{
                 alignSelf: "flex-start",
                 backgroundColor: accent,
-                borderRadius: 999,
+                borderRadius: 8,
                 marginTop: 12,
                 paddingHorizontal: 14,
                 paddingVertical: 8,
@@ -102,7 +102,7 @@ export default function SettingsScreen() {
             </Text>
           </View>
 
-          <View style={{ backgroundColor: card, borderRadius: 24, padding: 16 }}>
+          <View style={{ backgroundColor: card, borderRadius: 14, padding: 16 }}>
             <Text style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 16 }}>Network</Text>
             <Text style={{ color: muted, fontFamily: fonts.regular, fontSize: 13, marginTop: 6 }}>
               {peerServer.running
@@ -115,7 +115,7 @@ export default function SettingsScreen() {
               style={{
                 alignSelf: "flex-start",
                 backgroundColor: isDark ? "rgba(122,162,255,0.18)" : "rgba(47,107,255,0.12)",
-                borderRadius: 999,
+                borderRadius: 8,
                 marginTop: 10,
                 paddingHorizontal: 10,
                 paddingVertical: 4,
@@ -145,7 +145,7 @@ export default function SettingsScreen() {
                 }}
                 style={{
                   backgroundColor: isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)",
-                  borderRadius: 999,
+                  borderRadius: 8,
                   opacity: probeBusy ? 0.6 : 1,
                   paddingHorizontal: 12,
                   paddingVertical: 8,
@@ -163,7 +163,7 @@ export default function SettingsScreen() {
                 }}
                 style={{
                   backgroundColor: isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)",
-                  borderRadius: 999,
+                  borderRadius: 8,
                   opacity: probeBusy || !settings.tailscaleEnabled ? 0.45 : 1,
                   paddingHorizontal: 12,
                   paddingVertical: 8,
@@ -176,7 +176,7 @@ export default function SettingsScreen() {
             </View>
           </View>
 
-          <View style={{ backgroundColor: card, borderRadius: 24, overflow: "hidden" }}>
+          <View style={{ backgroundColor: card, borderRadius: 14, overflow: "hidden" }}>
             <Row
               label="Dark mode"
               value={isDark}
@@ -248,7 +248,7 @@ export default function SettingsScreen() {
             />
           </View>
 
-          <View style={{ backgroundColor: card, borderRadius: 24, padding: 16 }}>
+          <View style={{ backgroundColor: card, borderRadius: 14, padding: 16 }}>
             <Text style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 16 }}>
               Download location
             </Text>
@@ -295,7 +295,7 @@ export default function SettingsScreen() {
                 }}
                 style={{
                   backgroundColor: accent,
-                  borderRadius: 999,
+                  borderRadius: 8,
                   opacity: downloadBusy ? 0.7 : 1,
                   paddingHorizontal: 14,
                   paddingVertical: 8,
@@ -321,7 +321,7 @@ export default function SettingsScreen() {
                 }}
                 style={{
                   backgroundColor: isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)",
-                  borderRadius: 999,
+                  borderRadius: 8,
                   opacity: settings.downloadDirectory ? 1 : 0.45,
                   paddingHorizontal: 14,
                   paddingVertical: 8,
@@ -332,7 +332,7 @@ export default function SettingsScreen() {
             </View>
           </View>
 
-          <View style={{ backgroundColor: card, borderRadius: 24, padding: 16 }}>
+          <View style={{ backgroundColor: card, borderRadius: 14, padding: 16 }}>
             <Text style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 16 }}>
               Peer listen port
             </Text>
@@ -360,7 +360,7 @@ export default function SettingsScreen() {
             />
           </View>
 
-          <View style={{ backgroundColor: card, borderRadius: 24, padding: 16 }}>
+          <View style={{ backgroundColor: card, borderRadius: 14, padding: 16 }}>
             <Text style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 16 }}>
               Paired devices ({devices.length})
             </Text>
