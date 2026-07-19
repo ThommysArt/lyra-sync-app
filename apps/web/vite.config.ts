@@ -5,6 +5,9 @@ import { defineConfig } from "vite";
 import { VitePWA } from "vite-plugin-pwa";
 
 export default defineConfig({
+  // Relative asset URLs so packaged Electron loadFile() works (file:// protocol).
+  // Absolute "/assets/..." breaks under AppImage/asar resources.
+  base: "./",
   server: {
     port: 3001,
   },

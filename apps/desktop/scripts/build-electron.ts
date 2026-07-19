@@ -1,57 +1,52 @@
 /**
- * Prepare dist-electron for Electron main process.
- * Bundling is optional (esbuild); default writes a tsx-loader entry.
+ * Bundle Electron main process into dist-electron/ for packaging and production.
+ * Always uses esbuild — the previous tsx-loader stub broke AppImage launches
+ * because electron/main.ts is not included in the asar.
  */
-import { mkdir, writeFile, copyFile, access } from "node:fs/promises";
+import { mkdir, copyFile, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+import { build } from "esbuild";
 
 const appRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outDir = path.join(appRoot, "dist-electron");
-
-async function hasEsbuild(): Promise<boolean> {
-  try {
-    await access(path.join(appRoot, "node_modules/esbuild/package.json"));
-    return true;
-  } catch {
-    try {
-      await access(
-        path.join(appRoot, "../../node_modules/esbuild/package.json"),
-      );
-      return true;
-    } catch {
-      return false;
-    }
-  }
-}
+const require = createRequire(import.meta.url);
 
 async function main() {
   await mkdir(outDir, { recursive: true });
 
-  if (await hasEsbuild()) {
-    const { build } = await import("esbuild");
-    await build({
-      entryPoints: [path.join(appRoot, "electron/main.ts")],
-      bundle: true,
-      platform: "node",
-      target: "node20",
-      format: "esm",
-      outfile: path.join(outDir, "main.js"),
-      external: ["electron"],
-      packages: "bundle",
-      banner: {
-        js: "import { createRequire } from 'module'; const require = createRequire(import.meta.url);",
-      },
-    });
-  } else {
-    // Dev-friendly: load TypeScript main via tsx register
-    await writeFile(
-      path.join(outDir, "main.js"),
-      `import { register } from "tsx/esm/api";
-register();
-await import(new URL("../electron/main.ts", import.meta.url).href);
-`,
-      "utf8",
+  const result = await build({
+    entryPoints: [path.join(appRoot, "electron/main.ts")],
+    bundle: true,
+    platform: "node",
+    target: "node20",
+    format: "esm",
+    outfile: path.join(outDir, "main.js"),
+    external: ["electron"],
+    packages: "bundle",
+    // Keep Node built-ins external; bundle workspace packages into the asar entry
+    banner: {
+      js: "import { createRequire } from 'module'; const require = createRequire(import.meta.url);",
+    },
+    logLevel: "info",
+    metafile: true,
+  });
+
+  const mainJs = await readFile(path.join(outDir, "main.js"), "utf8");
+  // Reject the old tsx-loader stub (not esbuild source comments mentioning main.ts)
+  if (
+    mainJs.includes('from "tsx/esm/api"') ||
+    mainJs.includes("from 'tsx/esm/api'") ||
+    mainJs.includes('register();\nawait import(new URL("../electron/main.ts"')
+  ) {
+    throw new Error(
+      "dist-electron/main.js looks like a dev loader stub, not a production bundle",
+    );
+  }
+  if (mainJs.byteLength < 10_000) {
+    throw new Error(
+      `dist-electron/main.js is suspiciously small (${mainJs.byteLength} bytes) — bundle failed`,
     );
   }
 
@@ -59,7 +54,17 @@ await import(new URL("../electron/main.ts", import.meta.url).href);
     path.join(appRoot, "electron/preload.cjs"),
     path.join(outDir, "preload.cjs"),
   );
-  console.log("Electron main prepared → dist-electron/");
+
+  // Optional size report for CI logs
+  const outputs = result.metafile?.outputs ?? {};
+  const mainOut = Object.entries(outputs).find(([k]) => k.endsWith("main.js"));
+  const bytes = mainOut?.[1]?.bytes ?? mainJs.byteLength;
+  console.log(
+    `Electron main bundled → dist-electron/main.js (${Math.round(bytes / 1024)} KiB)`,
+  );
+
+  // Sanity: esbuild must resolve from package (not optional)
+  void require.resolve("esbuild");
 }
 
 main().catch((err) => {

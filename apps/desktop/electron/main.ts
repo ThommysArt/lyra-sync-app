@@ -224,6 +224,14 @@ async function stopNetworking() {
   broadcastStatus();
 }
 
+function resolvePackagedWebIndex(): string | null {
+  const packagedWeb = path.join(process.resourcesPath, "web-dist", "index.html");
+  if (existsSync(packagedWeb)) return packagedWeb;
+  const devRelativeWeb = path.join(__dirname, "../../web/dist/index.html");
+  if (existsSync(devRelativeWeb)) return devRelativeWeb;
+  return null;
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1200,
@@ -231,6 +239,8 @@ function createWindow() {
     minWidth: 900,
     minHeight: 600,
     title: "Lyra",
+    show: false,
+    backgroundColor: "#0B0F17",
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -239,18 +249,66 @@ function createWindow() {
     },
   });
 
+  mainWindow.once("ready-to-show", () => {
+    mainWindow?.show();
+    mainWindow?.focus();
+  });
+
+  // Fallback if ready-to-show never fires (some Linux WMs)
+  setTimeout(() => {
+    if (mainWindow && !mainWindow.isVisible()) {
+      mainWindow.show();
+    }
+  }, 2500);
+
+  mainWindow.webContents.on("did-fail-load", (_e, code, desc, url) => {
+    console.error("[lyra] did-fail-load", { code, desc, url });
+    void mainWindow?.webContents.executeJavaScript(
+      `document.body.innerHTML = ${JSON.stringify(
+        `<pre style="padding:24px;font:14px/1.4 ui-monospace,monospace;color:#f8fafc;background:#0B0F17">Lyra failed to load UI\n${desc} (${code})\n${url}</pre>`,
+      )}`,
+    );
+    mainWindow?.show();
+  });
+
   const isDev = !app.isPackaged;
   if (isDev) {
     void mainWindow.loadURL(WEB_DEV_URL);
   } else {
-    // Packaged: web UI is copied to resources/web-dist via electron-builder extraResources
-    const packagedWeb = path.join(process.resourcesPath, "web-dist", "index.html");
-    const devRelativeWeb = path.join(__dirname, "../../web/dist/index.html");
-    void mainWindow.loadFile(existsSync(packagedWeb) ? packagedWeb : devRelativeWeb);
+    // Packaged: web UI is copied to resources/web-dist via electron-builder extraResources.
+    // index.html must use relative asset paths (vite base: "./").
+    const indexHtml = resolvePackagedWebIndex();
+    if (!indexHtml) {
+      console.error("[lyra] packaged web UI not found under resources/web-dist");
+      void mainWindow.loadURL(
+        `data:text/html,${encodeURIComponent(
+          "<h1>Lyra</h1><p>Packaged web UI missing (resources/web-dist/index.html).</p>",
+        )}`,
+      );
+    } else {
+      console.log("[lyra] loading packaged UI", indexHtml);
+      void mainWindow.loadFile(indexHtml);
+    }
   }
 
   mainWindow.on("closed", () => {
     mainWindow = null;
+  });
+}
+
+// Avoid stacking zombie instances when launched repeatedly from Gear Lever
+const gotLock = app.requestSingleInstanceLock();
+if (!gotLock) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+    } else {
+      createWindow();
+    }
   });
 }
 
@@ -344,8 +402,13 @@ app.whenReady().then(async () => {
     return { ok: true as const, peers, backendState: ts.backendState };
   });
 
-  await startNetworking();
+  // Show the window first so a peer-port conflict can't leave users with no UI.
   createWindow();
+  void startNetworking().catch((e) => {
+    console.error("[lyra] networking failed", e);
+    status.lastError = e instanceof Error ? e.message : String(e);
+    broadcastStatus();
+  });
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
