@@ -46,7 +46,8 @@
           "recordAudioAndroid": false,
           "barcodeScannerEnabled": true
         }
-      ]
+      ],
+      "./plugins/with-clipboard-accessibility"
     ],
     "experiments": {
       "typedRoutes": true,
@@ -54,9 +55,9 @@
     },
     "extra": {
       "eas": {
-        "projectId": "00000000-0000-4000-8000-000000000001"
+        "projectId": "5440becf-0777-4d91-be3b-88ad7f271d5f"
       }
     },
-    "owner": "lyra"
+    "owner": "thommysart24"
   }
 }

@@ -8,6 +8,11 @@ contextBridge.exposeInMainWorld("lyraDesktop", {
   getPeerStatus: () => ipcRenderer.invoke("lyra:get-peer-status"),
   getIdentity: () => ipcRenderer.invoke("lyra:get-identity"),
   restartNetworking: () => ipcRenderer.invoke("lyra:restart-networking"),
+  syncTrustedPeers: (peers) => ipcRenderer.invoke("lyra:sync-trusted-peers", peers),
+  setPairingOffer: (offer) => ipcRenderer.invoke("lyra:set-pairing-offer", offer),
+  revokeDevice: (deviceId) => ipcRenderer.invoke("lyra:revoke-device", deviceId),
+  quit: () => ipcRenderer.invoke("lyra:quit"),
+  scanTailscale: () => ipcRenderer.invoke("lyra:scan-tailscale"),
   onPeerStatus: (handler) => {
     const listener = (_event, status) => handler(status);
     ipcRenderer.on("lyra:peer-status", listener);
@@ -22,5 +27,25 @@ contextBridge.exposeInMainWorld("lyraDesktop", {
     const listener = (_event, envelope) => handler(envelope);
     ipcRenderer.on("lyra:envelope", listener);
     return () => ipcRenderer.removeListener("lyra:envelope", listener);
+  },
+  onPairRequest: (handler) => {
+    const listener = (_event, payload) => handler(payload);
+    ipcRenderer.on("lyra:pair-request", listener);
+    return () => ipcRenderer.removeListener("lyra:pair-request", listener);
+  },
+  onUnpaired: (handler) => {
+    const listener = (_event, data) => handler(data);
+    ipcRenderer.on("lyra:unpaired", listener);
+    return () => ipcRenderer.removeListener("lyra:unpaired", listener);
+  },
+  onClipboardPush: (handler) => {
+    const listener = (_event, item) => handler(item);
+    ipcRenderer.on("lyra:clipboard-push", listener);
+    return () => ipcRenderer.removeListener("lyra:clipboard-push", listener);
+  },
+  onTailscalePeers: (handler) => {
+    const listener = (_event, peers) => handler(peers);
+    ipcRenderer.on("lyra:tailscale-peers", listener);
+    return () => ipcRenderer.removeListener("lyra:tailscale-peers", listener);
   },
 });

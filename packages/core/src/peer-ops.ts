@@ -75,6 +75,7 @@ export async function wirePushClipboard(input: {
       sourceDeviceName: input.item.sourceDeviceName,
       createdAt: input.item.createdAt,
     },
+    sealSecret: input.device.authSecret,
   });
 }
 
@@ -92,6 +93,7 @@ export async function wireOpenUrl(input: {
     fromDeviceId: input.identity.id,
     toDeviceId: input.device.id,
     url: input.url,
+    sealSecret: input.device.authSecret,
   });
 }
 
@@ -111,6 +113,7 @@ export async function wireListRemoteFiles(input: {
     toDeviceId: input.device.id,
     path: input.path,
     requestId: input.requestId,
+    sealSecret: input.device.authSecret,
   });
   if (!res.ok) return res;
   if (res.error) return { ok: false, error: res.error };
@@ -161,7 +164,144 @@ export async function wireSendFiles(input: {
     files: prepared,
     resumeOffset: input.resumeOffset,
     onProgress: input.onProgress,
+    sealSecret: input.device.authSecret,
   });
+}
+
+/** Notify a peer that we unpaired them (best-effort). */
+export async function wireUnpairNotify(input: {
+  device: PairedDevice;
+  identity: DeviceIdentity;
+  privateKey: string;
+}): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (!input.device.host || !input.device.authSecret) {
+    return { ok: false, error: "No live trusted peer" };
+  }
+  const session = await ensureSession(input);
+  if (!session.ok) return session;
+  const { createEnvelope, sendEnvelope } = await import("@lyra-sync-app/net");
+  const envelope = createEnvelope({
+    type: "pair_reject",
+    fromDeviceId: input.identity.id,
+    toDeviceId: input.device.id,
+    payload: {
+      reason: "unpaired",
+      deviceId: input.identity.id,
+      fingerprint: input.identity.fingerprint,
+    },
+  });
+  const res = await sendEnvelope(session.endpoint, envelope, {
+    sessionToken: session.sessionToken,
+    sealSecret: input.device.authSecret,
+  });
+  if (!res.ok) return { ok: false, error: res.error };
+  return { ok: true };
+}
+
+/** Download remote file in chunks (desktop peer with real FS). */
+export async function wireReadRemoteFile(input: {
+  device: PairedDevice;
+  identity: DeviceIdentity;
+  privateKey: string;
+  path: string;
+  onChunk?: (chunk: Uint8Array, offset: number, eof: boolean) => void;
+}): Promise<{ ok: true; bytes: Uint8Array; size: number } | { ok: false; error: string }> {
+  const session = await ensureSession(input);
+  if (!session.ok) return session;
+  const { createEnvelope, sendEnvelope, base64ToBytes } = await import("@lyra-sync-app/net");
+  const chunks: Uint8Array[] = [];
+  let offset = 0;
+  let size = 0;
+  const requestIdBase = `fsr_${Date.now()}`;
+  for (let i = 0; i < 10_000; i++) {
+    const envelope = createEnvelope({
+      type: "fs_read",
+      fromDeviceId: input.identity.id,
+      toDeviceId: input.device.id,
+      payload: {
+        path: input.path,
+        requestId: `${requestIdBase}_${i}`,
+        offset,
+        maxBytes: 256 * 1024,
+      },
+    });
+    const res = await sendEnvelope(session.endpoint, envelope, {
+      sessionToken: session.sessionToken,
+      sealSecret: input.device.authSecret,
+    });
+    if (!res.ok) return { ok: false, error: res.error };
+    if (res.envelope?.type !== "fs_read_response") {
+      return { ok: false, error: "Unexpected fs_read response" };
+    }
+    const p = res.envelope.payload as {
+      dataBase64?: string;
+      eof?: boolean;
+      size?: number;
+      error?: string;
+      offset?: number;
+    };
+    if (p.error) return { ok: false, error: p.error };
+    if (typeof p.size === "number") size = p.size;
+    if (p.dataBase64) {
+      const bytes = base64ToBytes(p.dataBase64);
+      chunks.push(bytes);
+      input.onChunk?.(bytes, offset, Boolean(p.eof));
+      offset += bytes.byteLength;
+    }
+    if (p.eof) break;
+    if (!p.dataBase64 || p.dataBase64.length === 0) break;
+  }
+  const total = chunks.reduce((a, c) => a + c.byteLength, 0);
+  const out = new Uint8Array(total);
+  let o = 0;
+  for (const c of chunks) {
+    out.set(c, o);
+    o += c.byteLength;
+  }
+  return { ok: true, bytes: out, size: size || total };
+}
+
+/** Promote a manual/probed peer to dual-confirm pairing (trust). */
+export async function wireTrustHandshake(input: {
+  device: PairedDevice;
+  identity: DeviceIdentity;
+  privateKey: string;
+  pairingToken: string;
+}): Promise<{ ok: true; authSecret: string } | { ok: false; error: string }> {
+  if (!input.device.host) return { ok: false, error: "Peer has no host" };
+  const { deriveMutualAuthSecret, fetchPeerInfo } = await import("@lyra-sync-app/net");
+  const info = await fetchPeerInfo({
+    host: input.device.host,
+    port: input.device.port,
+  });
+  if (!info.ok) return { ok: false, error: info.error };
+  const authSecret = await deriveMutualAuthSecret({
+    pairingToken: input.pairingToken,
+    localFingerprint: input.identity.fingerprint,
+    remoteFingerprint: info.identity.fingerprint,
+    localPublicKey: input.identity.publicKey,
+    remotePublicKey: info.identity.publicKey,
+  });
+  // Send pair_request so remote can dual-confirm
+  await wireSendPairRequest({
+    host: input.device.host,
+    port: input.device.port,
+    identity: input.identity,
+    payload: {
+      version: 1,
+      deviceId: input.identity.id,
+      name: input.identity.name,
+      type: input.identity.type,
+      platform: input.identity.platform,
+      fingerprint: input.identity.fingerprint,
+      publicKey: input.identity.publicKey,
+      token: input.pairingToken,
+      host: undefined,
+      port: undefined,
+      expiresAt: Date.now() + 5 * 60 * 1000,
+    },
+  });
+  return { ok: true, authSecret };
 }
 
 export async function wireSendPairRequest(input: {

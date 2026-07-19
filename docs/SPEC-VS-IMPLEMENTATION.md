@@ -445,6 +445,7 @@ Expo native    ──► core store (demo mesh); no listen server
 | 2026-07-19 | Initial detailed code-vs-spec report (chat). |
 | 2026-07-19 | **Rev 2:** T3 MCP load verification of web `:3001`; Playwright crawl of web + Expo web; screenshots; UI parity table; saved as `docs/SPEC-VS-IMPLEMENTATION.md`. |
 | 2026-07-19 | **Rev 3 (implementation):** Dual-confirm + mutual `authSecret`; message auth gate; multi-chunk wire transfers; clipboard images; open_url / fs_list wire; native Network/integrity/Open URL/Resume parity; mid-transfer speed+ETA; integration + T3 re-verify web+Expo. See `AGENT-PROGRESS.md`. |
+| 2026-07-19 | **Rev 4 (gap-fix plan):** Superseded for planning by `docs/GAP-FIX-PLAN.md`. Implementation Phases 1–5: ECDSA identity, AES-GCM seal default when paired, live code-hash pairing, Electron trust map, unpair revoke, real OS FS browse, seedDemo production-safe, transfer search, retention days UI. Early sections of this file remain historical; use GAP-FIX-PLAN + AGENT-PROGRESS for current state. |
 
 ---
 

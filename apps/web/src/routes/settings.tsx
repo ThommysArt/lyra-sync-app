@@ -9,7 +9,7 @@ import { Input } from "@lyra-sync-app/ui/components/input";
 import { Label } from "@lyra-sync-app/ui/components/label";
 import { Separator } from "@lyra-sync-app/ui/components/separator";
 import { Switch } from "@lyra-sync-app/ui/components/switch";
-import { isDesktopShell } from "@/lib/desktop-bridge";
+import { getDesktopApi, isDesktopShell } from "@/lib/desktop-bridge";
 import { useLyraSelector, useLyraStore } from "@/lib/lyra";
 
 export const Route = createFileRoute("/settings")({
@@ -166,6 +166,30 @@ function SettingsPage() {
               }
             />
           </div>
+          <Separator />
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <p className="text-sm font-medium">Clipboard retention (days)</p>
+              <p className="text-xs text-muted-foreground">
+                0 = keep by count limit only. Pinned items are never auto-removed.
+              </p>
+            </div>
+            <Input
+              type="number"
+              min={0}
+              max={365}
+              className="w-24 rounded-full"
+              value={settings.clipboardRetentionDays}
+              onChange={(e) =>
+                store.updateSettings({
+                  clipboardRetentionDays: Math.min(
+                    365,
+                    Math.max(0, Number(e.target.value) || 0),
+                  ),
+                })
+              }
+            />
+          </div>
         </CardContent>
       </Card>
 
@@ -223,7 +247,18 @@ function SettingsPage() {
               disabled={probeBusy || !settings.tailscaleEnabled}
               onClick={() => {
                 setProbeBusy(true);
-                void store.probeTailscalePeers().finally(() => setProbeBusy(false));
+                void (async () => {
+                  try {
+                    const api = getDesktopApi();
+                    if (api?.scanTailscale) {
+                      const res = await api.scanTailscale();
+                      if (res.ok) store.ingestTailscalePeers(res.peers);
+                    }
+                    await store.probeTailscalePeers();
+                  } finally {
+                    setProbeBusy(false);
+                  }
+                })();
               }}
             >
               Probe Tailscale peers
@@ -233,6 +268,11 @@ function SettingsPage() {
             Real sockets run in the Electron desktop shell or{" "}
             <code className="rounded bg-muted px-1">pnpm peer-server</code>. The browser UI probes
             known hosts via HTTP <code className="rounded bg-muted px-1">/lyra/info</code>.
+          </p>
+          <p className="text-xs text-muted-foreground">
+            Post-pairing payloads use app-level AES-GCM when a shared auth secret exists. Mobile /
+            browser cannot accept unsolicited LAN connections — keep a desktop peer online to
+            receive.
           </p>
         </CardContent>
       </Card>

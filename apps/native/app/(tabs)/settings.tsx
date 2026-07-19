@@ -173,6 +173,18 @@ export default function SettingsScreen() {
               ink={ink}
               accent={accent}
             />
+            <Text
+              style={{
+                color: muted,
+                fontFamily: fonts.regular,
+                fontSize: 11,
+                marginHorizontal: 16,
+                marginBottom: 8,
+              }}
+            >
+              Foreground only. Android background capture needs a future Accessibility Service;
+              iOS blocks auto-detect of copy events — use manual Send.
+            </Text>
             <Row
               label="Auto-accept transfers"
               value={settings.autoAcceptTransfers}

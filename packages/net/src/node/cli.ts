@@ -8,6 +8,7 @@ import { createHash, randomBytes } from "node:crypto";
 import type { DeviceIdentity } from "@lyra-sync-app/protocol";
 
 import { startDiscovery } from "./discovery";
+import { deleteOsPath, listOsFiles, readOsFileChunk, renameOsPath } from "./fs-browse";
 import { startPeerServer } from "./peer-server";
 
 function createFallbackIdentity(): DeviceIdentity {
@@ -48,9 +49,12 @@ async function main() {
   const port = Number(process.env.LYRA_PORT ?? 53317);
   const identity = await resolveIdentity();
 
+  const useTls = process.env.LYRA_TLS === "1" || process.env.LYRA_TLS === "true";
+
   const peer = await startPeerServer({
     identity,
     port,
+    tls: useTls,
     // Fall through to built-in handlers (transfer chunks, clipboard, fs, pair)
     onEnvelope: async (envelope) => {
       console.log(`[envelope] ${envelope.type} from ${envelope.fromDeviceId}`);
@@ -58,23 +62,24 @@ async function main() {
     },
     handlers: {
       onFsList: async (path) => {
-        // Minimal demo tree when no real FS binding is configured
-        if (path === "/" || path === "") {
-          return [
-            { name: "Documents", path: "/Documents", isDirectory: true },
-            { name: "Downloads", path: "/Downloads", isDirectory: true },
-            { name: "readme.txt", path: "/readme.txt", isDirectory: false, size: 128 },
-          ];
+        // Real OS smart folders + browse (fallback message on error)
+        try {
+          return await listOsFiles(path);
+        } catch (e) {
+          console.warn("[fs_list]", e instanceof Error ? e.message : e);
+          // Demo fallback if OS path missing (e.g. headless CI)
+          if (path === "/" || path === "") {
+            return [
+              { name: "Documents", path: "/Documents", isDirectory: true },
+              { name: "Downloads", path: "/Downloads", isDirectory: true },
+            ];
+          }
+          return [];
         }
-        return [
-          {
-            name: "sample.txt",
-            path: `${path.replace(/\/$/, "")}/sample.txt`,
-            isDirectory: false,
-            size: 64,
-          },
-        ];
       },
+      onFsRead: (path, offset, maxBytes) => readOsFileChunk(path, offset, maxBytes),
+      onFsDelete: (path) => deleteOsPath(path),
+      onFsRename: (path, newName) => renameOsPath(path, newName),
       onOpenUrl: (url) => {
         console.log(`[open_url] ${url}`);
         return true;
@@ -87,7 +92,7 @@ async function main() {
       },
       onTransferComplete: (state) => {
         console.log(
-          `[transfer_complete] ${state.transferId} · ${state.receivedBytes} bytes · ${state.files.length} file(s)`,
+          `[transfer_complete] ${state.transferId} · ${state.receivedBytes} bytes · ${state.files.length} file(s)${state.diskPath ? ` · disk ${state.diskPath}` : ""}`,
         );
       },
     },
@@ -96,6 +101,9 @@ async function main() {
   console.log(`Lyra peer server listening on ${peer.url}`);
   console.log(`  device: ${identity.name} (${identity.id})`);
   console.log(`  fingerprint: ${identity.fingerprint}`);
+  if (peer.protocol === "https") {
+    console.log(`  TLS fingerprint: ${peer.tlsFingerprint ?? "(unknown)"}`);
+  }
 
   let discovery: Awaited<ReturnType<typeof startDiscovery>> | null = null;
   if (process.env.LYRA_DISCOVERY !== "0") {

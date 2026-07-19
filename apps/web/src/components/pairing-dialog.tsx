@@ -40,19 +40,16 @@ export function PairingDialog({
   };
 
   const onSubmitCode = () => {
-    const result = store.submitPairingCode(code);
-    if (result.ok) {
-      setCode("");
-      setError(null);
-      // Dual-confirm: keep dialog open only if fully paired; pending uses banner
-      if ("pending" in result && result.pending) {
-        setOpen(false);
-      } else if ("device" in result) {
-        setOpen(false);
+    void store.submitPairingCode(code).then((result) => {
+      if (result.ok) {
+        setCode("");
+        setError(null);
+        // Dual-confirm: pending request uses incoming banner
+        if (result.pending) setOpen(false);
+      } else {
+        setError(result.error);
       }
-    } else {
-      setError(result.error);
-    }
+    });
   };
 
   const qrValue = active ? JSON.stringify(active.payload) : "";

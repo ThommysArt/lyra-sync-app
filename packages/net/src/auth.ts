@@ -10,16 +10,108 @@ import { randomHex, sha256Hex } from "./crypto-util";
 const CHALLENGE_TTL_MS = 60_000;
 const SESSION_TTL_MS = 60 * 60_000;
 
+const ECDSA_KEY_PREFIX = "ecdsa-p256:";
+
 export type AuthSession = {
   sessionToken: string;
   deviceId: string;
   fingerprint: string;
+  publicKey?: string;
+  /** Pairing-derived shared secret when auth used shared-secret proof */
+  sharedSecret?: string;
   expiresAt: number;
 };
 
+export function isEcdsaPublicKey(publicKey: string): boolean {
+  return publicKey.startsWith(ECDSA_KEY_PREFIX);
+}
+
+export function isEcdsaPrivateKey(privateKey: string): boolean {
+  return privateKey.startsWith(ECDSA_KEY_PREFIX);
+}
+
+function bytesToBase64Url(bytes: Uint8Array): string {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]!);
+  const b64 =
+    typeof btoa === "function"
+      ? btoa(binary)
+      : Buffer.from(bytes).toString("base64");
+  return b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function base64UrlToBytes(b64url: string): Uint8Array {
+  const b64 = b64url.replace(/-/g, "+").replace(/_/g, "/") + "==".slice(0, (4 - (b64url.length % 4)) % 4);
+  if (typeof atob === "function") {
+    const binary = atob(b64);
+    const out = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+    return out;
+  }
+  return new Uint8Array(Buffer.from(b64, "base64"));
+}
+
+async function importEcdsaPrivateKey(privateKey: string): Promise<CryptoKey> {
+  const raw = base64UrlToBytes(privateKey.slice(ECDSA_KEY_PREFIX.length));
+  return crypto.subtle.importKey(
+    "pkcs8",
+    raw as BufferSource,
+    { name: "ECDSA", namedCurve: "P-256" },
+    false,
+    ["sign"],
+  );
+}
+
+async function importEcdsaPublicKey(publicKey: string): Promise<CryptoKey> {
+  const raw = base64UrlToBytes(publicKey.slice(ECDSA_KEY_PREFIX.length));
+  return crypto.subtle.importKey(
+    "spki",
+    raw as BufferSource,
+    { name: "ECDSA", namedCurve: "P-256" },
+    false,
+    ["verify"],
+  );
+}
+
+/** Sign challenge nonce with ECDSA private key (or legacy sha256). */
+export async function signAuthNonce(privateKey: string, nonce: string): Promise<string> {
+  if (isEcdsaPrivateKey(privateKey) && typeof crypto?.subtle?.sign === "function") {
+    const key = await importEcdsaPrivateKey(privateKey);
+    const data = new TextEncoder().encode(nonce);
+    const sig = new Uint8Array(
+      await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, key, data as BufferSource),
+    );
+    return `${ECDSA_KEY_PREFIX}sig:${bytesToBase64Url(sig)}`;
+  }
+  return sha256Hex(`${nonce}:${privateKey}`);
+}
+
+export async function verifyEcdsaAuthProof(
+  publicKey: string,
+  nonce: string,
+  proof: string,
+): Promise<boolean> {
+  if (!isEcdsaPublicKey(publicKey) || !proof.startsWith(`${ECDSA_KEY_PREFIX}sig:`)) {
+    return false;
+  }
+  if (typeof crypto?.subtle?.verify !== "function") return false;
+  try {
+    const key = await importEcdsaPublicKey(publicKey);
+    const sig = base64UrlToBytes(proof.slice(`${ECDSA_KEY_PREFIX}sig:`.length));
+    const data = new TextEncoder().encode(nonce);
+    return crypto.subtle.verify(
+      { name: "ECDSA", hash: "SHA-256" },
+      key,
+      sig as BufferSource,
+      data as BufferSource,
+    );
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Create an auth challenge for an incoming peer.
- * Client must respond with proof = sha256(nonce + ":" + privateKey).
  */
 export async function createAuthChallenge(
   serverIdentity: Pick<DeviceIdentity, "fingerprint">,
@@ -32,13 +124,13 @@ export async function createAuthChallenge(
   };
 }
 
-/** Client-side: sign a challenge with local private key material. */
+/** Client-side: sign a challenge with local private key material (ECDSA preferred). */
 export async function createAuthResponse(input: {
   challenge: AuthChallengePayload;
   identity: Pick<DeviceIdentity, "id" | "fingerprint" | "publicKey">;
   privateKey: string;
 }): Promise<AuthResponsePayload> {
-  const proof = await sha256Hex(`${input.challenge.nonce}:${input.privateKey}`);
+  const proof = await signAuthNonce(input.privateKey, input.challenge.nonce);
   return {
     challengeId: input.challenge.challengeId,
     deviceId: input.identity.id,
@@ -50,57 +142,23 @@ export async function createAuthResponse(input: {
 
 /**
  * Server-side: verify auth response.
- * When the peer is already paired, `expectedPublicKey` / fingerprint must match
- * the stored trusted values. For first-contact pairing, pass `trusted: false`.
+ * Prefer: shared secret proof (post-pairing) OR ECDSA signature over nonce.
+ * Legacy first-contact identity-binding still accepted when no stronger material provided.
  */
 export async function verifyAuthResponse(input: {
   challenge: AuthChallengePayload;
   response: AuthResponsePayload;
-  /** Known private-key proof material for the peer — only available if we share demo mesh keys.
-   * In real use we verify proof against the *peer's claimed public binding*:
-   * proof must equal sha256(nonce + ":" + material) where material is derived from
-   * publicKey only for demo; production would use asymmetric verify.
-   *
-   * For the wire protocol we accept proof that hashes to a deterministic binding:
-   *   expectedProofCandidate is not re-derived from private key (server never has it).
-   * Instead we store `authBinding = sha256("bind:" + publicKey + ":" + privateKey)`
-   * at pairing time… but for MVP we use a challenge-response where:
-   *   proof = sha256(nonce + ":" + privateKey)
-   * and we verify against a pre-shared binding token stored at pairing:
-   *   bindingToken = sha256("bind:" + publicKey)
-   * Wait — that doesn't work without private key.
-   *
-   * Practical MVP approach (matches LocalSend-style trust after pairing):
-   * - At pairing, store publicKey + fingerprint.
-   * - Auth uses proof = sha256(nonce + ":" + privateKey).
-   * - Server cannot recompute that without private key.
-   * - So we use a shared pairing secret OR asymmetric keys.
-   *
-   * For this codebase (symmetric key material as privateKey hex):
-   * At pairing, both sides store the peer's publicKey and fingerprint.
-   * Auth binding token stored locally at pairing:
-   *   peerAuthSecret is NOT the private key — we exchange a mutual session secret.
-   *
-   * Simpler correct approach for demo + desktop:
-   * proof = sha256(nonce + ":" + publicKey + ":" + fingerprint)
-   * This proves the peer *claims* that identity (weak) + session continuity.
-   * For stronger auth, also require `knownFingerprint` match on paired devices.
-   *
-   * Stronger local-only scheme without asymmetric crypto:
-   * When pairing completes, each side stores:
-   *   sharedSecret = sha256(token + localPrivate + remotePublic)
-   * Auth proof = sha256(nonce + ":" + sharedSecret)
-   *
-   * We'll use: proof must match sha256(nonce + ":" + privateKey) when verifying
-   * *our own* responses in tests, and for remote peers we verify fingerprint match
-   * against the paired device registry + proof format validity.
-   */
   expectedFingerprint?: string;
   expectedDeviceId?: string;
   /** If provided, recompute expected proof (only for self/test loops) */
   privateKeyForVerify?: string;
   /** Paired-device shared secret established at pairing time */
   sharedSecret?: string;
+  /**
+   * When true (default), accept weak identity-binding proof for first contact.
+   * Production peer servers should set false once resolvePeerAuth is configured.
+   */
+  allowIdentityBinding?: boolean;
 }): Promise<{ ok: true; session: AuthSession } | { ok: false; error: string }> {
   const { challenge, response } = input;
 
@@ -117,19 +175,40 @@ export async function verifyAuthResponse(input: {
     return { ok: false, error: "Device id mismatch" };
   }
 
-  const candidates: string[] = [];
-  if (input.sharedSecret) {
-    candidates.push(await sha256Hex(`${challenge.nonce}:${input.sharedSecret}`));
-  }
-  if (input.privateKeyForVerify) {
-    candidates.push(await sha256Hex(`${challenge.nonce}:${input.privateKeyForVerify}`));
-  }
-  // Identity-binding proof (weaker first-contact / migration)
-  candidates.push(
-    await sha256Hex(`${challenge.nonce}:${response.publicKey}:${response.fingerprint}`),
-  );
+  let proofOk = false;
+  let usedSharedSecret = false;
 
-  if (!candidates.includes(response.proof)) {
+  if (input.sharedSecret) {
+    const expected = await sha256Hex(`${challenge.nonce}:${input.sharedSecret}`);
+    if (response.proof === expected) {
+      proofOk = true;
+      usedSharedSecret = true;
+    }
+  }
+
+  if (!proofOk && input.privateKeyForVerify) {
+    const expected = await signAuthNonce(input.privateKeyForVerify, challenge.nonce);
+    if (response.proof === expected) proofOk = true;
+  }
+
+  if (!proofOk && isEcdsaPublicKey(response.publicKey)) {
+    proofOk = await verifyEcdsaAuthProof(
+      response.publicKey,
+      challenge.nonce,
+      response.proof,
+    );
+  }
+
+  // Weak first-contact / migration (only if allowed)
+  const allowBinding = input.allowIdentityBinding !== false;
+  if (!proofOk && allowBinding && !input.sharedSecret) {
+    const binding = await sha256Hex(
+      `${challenge.nonce}:${response.publicKey}:${response.fingerprint}`,
+    );
+    if (response.proof === binding) proofOk = true;
+  }
+
+  if (!proofOk) {
     return { ok: false, error: "Invalid proof" };
   }
 
@@ -138,6 +217,8 @@ export async function verifyAuthResponse(input: {
     sessionToken,
     deviceId: response.deviceId,
     fingerprint: response.fingerprint,
+    publicKey: response.publicKey,
+    sharedSecret: usedSharedSecret ? input.sharedSecret : undefined,
     expiresAt: Date.now() + SESSION_TTL_MS,
   };
   return { ok: true, session };
@@ -154,7 +235,6 @@ export async function createSharedSecretProof(
 /**
  * Derive a **mutual** auth secret both peers can recompute after dual-confirm pairing.
  * Order-independent: fingerprints and public keys are sorted before hashing.
- * Token is the short-lived QR/code secret; private keys never leave the device.
  */
 export async function deriveMutualAuthSecret(input: {
   pairingToken: string;
@@ -171,9 +251,7 @@ export async function deriveMutualAuthSecret(input: {
 }
 
 /**
- * @deprecated Prefer {@link deriveMutualAuthSecret}. Kept for older call sites;
- * now delegates to mutual derivation when remote fingerprint/public key are provided
- * via the optional fields, otherwise falls back to a local-only hash (not mutual).
+ * @deprecated Prefer {@link deriveMutualAuthSecret}.
  */
 export async function derivePairingSharedSecret(input: {
   pairingToken: string;
@@ -196,7 +274,6 @@ export async function derivePairingSharedSecret(input: {
       remotePublicKey: input.remotePublicKey,
     });
   }
-  // Legacy non-mutual (tests / migration)
   return sha256Hex(
     `pair:${input.pairingToken}:${input.localPrivateKey}:${input.remotePublicKey}`,
   );
@@ -218,7 +295,7 @@ export async function createAuthResponseWithSharedSecret(input: {
   };
 }
 
-/** Identity-binding proof used for first-contact / unpaired hello. */
+/** Identity-binding proof used for first-contact / unpaired hello (weak). */
 export async function createIdentityBindingProof(
   nonce: string,
   publicKey: string,
@@ -230,7 +307,16 @@ export async function createIdentityBindingProof(
 export async function createFirstContactAuthResponse(input: {
   challenge: AuthChallengePayload;
   identity: Pick<DeviceIdentity, "id" | "fingerprint" | "publicKey">;
+  /** Prefer ECDSA signature when private key is available */
+  privateKey?: string;
 }): Promise<AuthResponsePayload> {
+  if (input.privateKey && isEcdsaPrivateKey(input.privateKey)) {
+    return createAuthResponse({
+      challenge: input.challenge,
+      identity: input.identity,
+      privateKey: input.privateKey,
+    });
+  }
   const proof = await createIdentityBindingProof(
     input.challenge.nonce,
     input.identity.publicKey,

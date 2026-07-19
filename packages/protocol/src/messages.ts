@@ -35,6 +35,11 @@ export const MessageTypeSchema = z.enum([
   "transfer_chunk_ack",
   "fs_list",
   "fs_list_response",
+  "fs_read",
+  "fs_read_response",
+  "fs_delete",
+  "fs_rename",
+  "fs_mutate_ack",
   "open_url",
   "open_url_ack",
   "ping",
@@ -179,6 +184,45 @@ export const FsListResponsePayloadSchema = z.object({
   path: z.string(),
   entries: z.array(FileEntrySchema),
   error: z.string().optional(),
+});
+
+export const FsReadPayloadSchema = z.object({
+  path: z.string(),
+  requestId: z.string(),
+  /** Byte offset for large files */
+  offset: z.number().int().nonnegative().default(0),
+  /** Max bytes to return in this chunk (default 256 KiB) */
+  maxBytes: z.number().int().positive().max(1024 * 1024).default(256 * 1024),
+});
+export type FsReadPayload = z.infer<typeof FsReadPayloadSchema>;
+
+export const FsReadResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  path: z.string(),
+  offset: z.number().int().nonnegative(),
+  dataBase64: z.string().optional(),
+  eof: z.boolean(),
+  size: z.number().int().nonnegative().optional(),
+  error: z.string().optional(),
+});
+export type FsReadResponsePayload = z.infer<typeof FsReadResponsePayloadSchema>;
+
+export const FsDeletePayloadSchema = z.object({
+  path: z.string(),
+  requestId: z.string(),
+});
+
+export const FsRenamePayloadSchema = z.object({
+  path: z.string(),
+  newName: z.string().min(1),
+  requestId: z.string(),
+});
+
+export const FsMutateAckPayloadSchema = z.object({
+  requestId: z.string(),
+  ok: z.boolean(),
+  error: z.string().optional(),
+  path: z.string().optional(),
 });
 
 export const OpenUrlPayloadSchema = z.object({

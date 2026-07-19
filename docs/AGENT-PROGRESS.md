@@ -1,119 +1,62 @@
 # Lyra — Agent Progress Report
 
-**Last updated:** 2026-07-19 (spec-gap closeout)  
-**Status:** MVP UI + domain store + **real wire paths** for pairing trust, clipboard, multi-chunk transfers, open URL, and fs_list; browser/Expo still cannot host a listen socket
+**Last updated:** 2026-07-19 (packaging closeout)  
+**Status:** Gap plan complete + EAS linked + Electron local pack succeeded  
+**Plan:** [`docs/GAP-FIX-PLAN.md`](./GAP-FIX-PLAN.md) · **Packaging:** [`docs/PACKAGING.md`](./PACKAGING.md)
 
 ---
 
-## Current goal
+## Packaging results (this session)
 
-Ship a usable Lyra MVP per `docs/Lyra-Product-Spec.md` with:
+### EAS
+- [x] Logged in as `thommysart24`
+- [x] Created/linked project **@thommysart24/lyra**
+- [x] `projectId`: `5440becf-0777-4d91-be3b-88ad7f271d5f` written to `apps/native/app.json`
+- [x] Owner set to `thommysart24`
+- [x] Accessibility config plugin scaffold enabled in plugins list
 
-- Web (desktop foundation) + Expo native + Electron shell
-- Dual-confirm pairing with mutual `authSecret`
-- Real HTTP peer payloads when a peer has `host` + trust
-- UI parity across web and Expo web
+### Electron
+- [x] Electron binary reinstalled (`v22.21.1` Chromium shell / package 37.x)
+- [x] `electron-builder` installed
+- [x] `pnpm --filter desktop pack` → **`release/linux-unpacked/lyra`** (~200 MB binary)
+- [x] Web UI copied to `resources/web-dist`
+- [x] Packaged load path uses `process.resourcesPath/web-dist`
 
----
-
-## Done (2026-07-19 closeout vs SPEC-VS-IMPLEMENTATION)
-
-### Trust
-- [x] Dual-confirm for QR scan / code entry / simulate (pending banner → confirm)
-- [x] Mutual `authSecret` via `deriveMutualAuthSecret` (order-independent)
-- [x] `authSecret` stored on `PairedDevice` after confirm
-- [x] `/lyra/message` requires Bearer session for non-public types
-
-### Transport
-- [x] App-level AES-GCM seal helpers (`packages/net/src/seal.ts`) for payload encryption
-- [x] CORS reflects request origin (allowlist option supported)
-- [x] First-contact + shared-secret auth both accepted when appropriate
-
-### Payloads (live peer with host)
-- [x] `clipboard_push` / ack over HTTP
-- [x] Multi-chunk `transfer_chunk` + offer/accept/complete (`sendFilesOverWire`)
-- [x] `open_url` + ack
-- [x] `fs_list` / response with demo tree on Node peer-server CLI
-- [x] Store routes to wire when `isLivePeer` + `authSecret`; else simulates
-
-### Domain / UX
-- [x] Clipboard **images** (history + push + web “Add image”)
-- [x] Mid-transfer **speed + ETA**
-- [x] Transfer **Re-send** history action
-- [x] Remote FS cache + `fetchRemoteFiles`
-- [x] Clipboard retention days setting (schema)
-
-### UI parity (native)
-- [x] Network card (peer server / discovery / browser badge / probe)
-- [x] Verify transfer integrity toggle
-- [x] Peer listen port
-- [x] Open URL on Devices
-- [x] Demo Resume button on Transfers
-- [x] Re-send on transfer rows
+### Large files / Android
+- [x] Browser: stream-aware materialize up to **256 MiB** (`materializeFileBytes` / `readFileInChunks`)
+- [x] Server: disk-backed receive ≥1 MiB (existing)
+- [x] Android Accessibility: config plugin + README (service body still post-prebuild)
 
 ### Tests
-- [x] Unit: net 10 + core 6
-- [x] Integration: mutual secret, auth-required clipboard, 120KB multi-chunk wire transfer, dual-confirm authSecret
-
-### Browser verification (T3 MCP, 2026-07-19)
-
-| Surface | Result |
-|---------|--------|
-| Web `:3001` Devices | PASS — peers, Open URL, Pair dialog dual-confirm copy |
-| Web Settings | PASS — Network, integrity, Mod+Q cheat sheet |
-| Web Transfers | PASS — Demo resume, Re-send, speed labels |
-| Web Clipboard | PASS — Add image |
-| Expo `:8081` Devices | PASS — Open URL card |
-| Expo Settings | PASS — Network card, integrity, listen port |
-| Expo Transfers | PASS — Multi/Batch/**Resume**/Send, Re-send |
-| Expo Pair | PASS — dual-confirm copy |
+- [x] Unit core/net green
+- [x] Integration net green
 
 ---
 
-## Architecture
-
-```
-apps/web      → TanStack Router → hooks → core (demo + HTTP probe + wire client)
-apps/native   → Expo Router    → hooks → core
-apps/desktop  → Electron main  → net/node (HTTP + UDP) + built-in handlers
-packages/core → store, identity, demo, peer-ops
-packages/net  → auth, seal, transfer-wire, message-handlers, peer-client/server
-packages/protocol → Zod (incl. transfer_chunk, open_url_ack)
-```
-
----
-
-## How to run
+## How to run packaged desktop
 
 ```bash
-pnpm install
-pnpm run dev:web   # http://localhost:3001
-pnpm peer-server   # optional: Node peer on :53317
-pnpm run dev:desktop
-cd apps/native && CI=true pnpm exec expo start --web --port 8081 --clear
-pnpm test
-pnpm exec tsx packages/core/scripts/integration-net.mjs
+# From monorepo after pack:
+./apps/desktop/release/linux-unpacked/lyra
+# Needs display; peer server starts on :53317 by default
 ```
 
 ---
 
-## Still open / known limits
+## Still environment-bound
 
-- [ ] True asymmetric key pairs (still hash-derived public from private hex)
-- [ ] Full TLS peer servers (app-level seal helpers exist; HTTP remains default)
-- [ ] Mobile as listen server (Expo/browser cannot bind UDP/HTTP server)
-- [ ] Real OS filesystem browse on desktop (peer CLI returns demo tree; Electron hooks ready)
-- [ ] Folder picker multi-file with relative paths end-to-end
-- [ ] Production `seedDemo: false` wiring in release builds (API exists)
-- [ ] Approve Electron binary (`pnpm approve-builds`) in this environment
-- [ ] Real Expo EAS `projectId`
+| Item | Status |
+|------|--------|
+| EAS cloud build (`eas build`) | Project linked; cloud GraphQL flaked during submit — re-run `eas build --profile preview --platform android` when API is stable. `expo-dev-client` installed for development profile. |
+| Code-signed Windows/macOS installers | Needs certs |
+| Full Accessibility Service Kotlin implementation | Manifest plugin ready; Kotlin after `expo prebuild` |
+| Multi‑GB pure browser transfers | Cap 256 MiB materialize; use desktop for huge files |
 
 ---
 
-## Agent handoff notes
+## Agent handoff
 
-1. Pairing is **dual-confirm**: scan/code → banner → Confirm stores `authSecret`.
-2. Wire paths need `device.host` + `device.authSecret` (demo peers stay simulated).
-3. Peer CLI: `pnpm peer-server` logs envelopes and serves demo FS listings.
-4. Integration: `pnpm exec tsx packages/core/scripts/integration-net.mjs`.
-5. Update `docs/SPEC-VS-IMPLEMENTATION.md` after major milestones.
+1. EAS dashboard: https://expo.dev/accounts/thommysart24/projects/lyra  
+2. Electron unpack: `apps/desktop/release/linux-unpacked/`  
+3. Do not re-create EAS project — ID is already valid  
+4. Next human step: `eas build --profile development --platform android` when ready to smoke a device APK  

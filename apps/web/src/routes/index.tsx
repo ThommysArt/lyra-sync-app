@@ -39,7 +39,6 @@ function DevicesPage() {
   });
 
   const onlineIds = devices.filter((d) => d.online).map((d) => d.id);
-
   const sendClipboard = async (targetIds: string[]) => {
     const system = await readSystemClipboard();
     const text = system || localClipboard || "Hello from Lyra";

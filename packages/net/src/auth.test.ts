@@ -19,12 +19,23 @@ describe("auth challenge-response", () => {
   it("accepts first-contact identity-binding proof", async () => {
     const challenge = await createAuthChallenge({ fingerprint: "serverfp01234567" });
     const response = await createFirstContactAuthResponse({ challenge, identity });
-    const result = await verifyAuthResponse({ challenge, response });
+    const result = await verifyAuthResponse({ challenge, response, allowIdentityBinding: true });
     assert.equal(result.ok, true);
     if (result.ok) {
       assert.ok(result.session.sessionToken.length > 8);
       assert.equal(result.session.deviceId, "dev_a");
     }
+  });
+
+  it("rejects identity-binding when disabled", async () => {
+    const challenge = await createAuthChallenge({ fingerprint: "serverfp01234567" });
+    const response = await createFirstContactAuthResponse({ challenge, identity });
+    const result = await verifyAuthResponse({
+      challenge,
+      response,
+      allowIdentityBinding: false,
+    });
+    assert.equal(result.ok, false);
   });
 
   it("accepts shared-secret proof after pairing", async () => {

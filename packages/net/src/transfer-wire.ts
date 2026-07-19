@@ -57,6 +57,8 @@ export type SendFilesOverWireInput = {
   chunkSize?: number;
   onProgress?: (p: WireTransferProgress) => void;
   signal?: AbortSignal;
+  /** Pairing secret — seals transfer envelopes when set */
+  sealSecret?: string;
 };
 
 /**
@@ -94,6 +96,7 @@ export async function sendFilesOverWire(
   const offerRes = await sendEnvelope(input.endpoint, offer, {
     sessionToken: input.sessionToken,
     signal: input.signal,
+    sealSecret: input.sealSecret,
   });
   if (!offerRes.ok) return { ok: false, error: offerRes.error };
 
@@ -148,8 +151,14 @@ export async function sendFilesOverWire(
     const chunkRes = await sendEnvelope(input.endpoint, chunkEnv, {
       sessionToken: input.sessionToken,
       signal: input.signal,
+      sealSecret: input.sealSecret,
     });
     if (!chunkRes.ok) return { ok: false, error: chunkRes.error };
+
+    // Honor pause: server may reply with transfer_pause
+    if (chunkRes.envelope?.type === "transfer_pause") {
+      return { ok: false, error: "Transfer paused by peer" };
+    }
 
     sent = nextOffset;
     const now = Date.now();
@@ -178,6 +187,7 @@ export async function sendFilesOverWire(
   await sendEnvelope(input.endpoint, complete, {
     sessionToken: input.sessionToken,
     signal: input.signal,
+    sealSecret: input.sealSecret,
   });
 
   const checksums: string[] = [];

@@ -226,5 +226,12 @@ export const AppSettingsSchema = z.object({
   verifyTransferIntegrity: z.boolean().default(true),
   /** Preferred local peer listen port (Electron / Node peer server) */
   peerListenPort: z.number().int().positive().default(53317),
+  /**
+   * Prefer HTTPS for peer servers when certificates are available (desktop/Node).
+   * Browser clients still probe HTTP by default unless peer advertises https.
+   */
+  preferHttpsPeer: z.boolean().default(false),
+  /** Publish lightweight status to peers when online (desktop) */
+  statusBroadcastEnabled: z.boolean().default(true),
 });
 export type AppSettings = z.infer<typeof AppSettingsSchema>;

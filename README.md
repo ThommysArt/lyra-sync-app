@@ -136,7 +136,7 @@ Verify no “Maximum update depth” in console (Vite HMR debug only is fine).
 - TanStack Router devtools footer on web.
 - Expo/Metro cold bundle duration and first navigate timeout.
 - Font “slow network” interventions in the preview browser.
-- No real P2P yet — demo mesh only (seeded peers, simulated transfers/pairing).
+- Demo mesh seeds in **dev only** (disable with `VITE_LYRA_SEED_DEMO=0`). Real wire needs desktop/peer-server + pairing trust.
 
 ### 7. After verification
 
@@ -170,7 +170,7 @@ docs/
 - Per-device settings (auto-accept, nickname, unpair)
 - Local-only persistence (`localStorage` on web)
 
-Real UDP multicast / local HTTP servers are not wired yet — the core store and Zod protocol are structured so networking can plug in without rewriting the UI.
+**Networking:** Electron desktop and `pnpm peer-server` host HTTP(S) peer servers + UDP multicast + real FS. Browser/Expo are clients (probe `/lyra/info`, send sealed messages when paired). Optional `LYRA_TLS=1` for HTTPS. See `docs/GAP-FIX-PLAN.md` and `docs/PACKAGING.md`.
 
 ## Theme
 

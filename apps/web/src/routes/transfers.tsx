@@ -7,12 +7,14 @@ import {
 } from "@lyra-sync-app/core";
 import { createFileRoute } from "@tanstack/react-router";
 import { AlertTriangle, Pause, Play, Upload, X } from "lucide-react";
+import { useMemo, useState } from "react";
 
 import { Badge } from "@lyra-sync-app/ui/components/badge";
 import { Button } from "@lyra-sync-app/ui/components/button";
 import { Card, CardContent } from "@lyra-sync-app/ui/components/card";
+import { Input } from "@lyra-sync-app/ui/components/input";
 import { Progress } from "@lyra-sync-app/ui/components/progress";
-import { pickFiles } from "@/lib/file-picker";
+import { materializeFileBytes, pickFiles } from "@/lib/file-picker";
 import { useLyraSelector, useLyraStore } from "@/lib/lyra";
 
 export const Route = createFileRoute("/transfers")({
@@ -33,15 +35,41 @@ function TransfersPage() {
     [...s.transfers].sort((a, b) => b.createdAt - a.createdAt),
   );
   const onlineIds = useLyraSelector((s) => s.devices.filter((d) => d.online).map((d) => d.id));
+  const [filter, setFilter] = useState("");
+
+  const filtered = useMemo(() => {
+    const q = filter.trim().toLowerCase();
+    if (!q) return transfers;
+    return transfers.filter((tx) => {
+      const names = tx.files.map((f) => f.name).join(" ").toLowerCase();
+      return (
+        names.includes(q) ||
+        tx.deviceName.toLowerCase().includes(q) ||
+        tx.status.toLowerCase().includes(q) ||
+        tx.direction.toLowerCase().includes(q)
+      );
+    });
+  }, [filter, transfers]);
 
   const pickAndSend = async () => {
     if (onlineIds.length === 0) return;
     const files = await pickFiles({ multiple: true });
     if (files.length === 0) return;
-    store.startFileTransfer(
-      onlineIds.slice(0, 2),
-      files.map((f) => ({ name: f.name, size: f.size, mimeType: f.mimeType })),
+    // Materialize up to 256 MiB (streamed read); larger stays synthetic/demo
+    const prepared = await Promise.all(
+      files.map(async (f) => {
+        const bytes =
+          f.bytes ?? (f.file ? await materializeFileBytes(f.file) : undefined);
+        return {
+          name: f.name,
+          size: f.size,
+          mimeType: f.mimeType,
+          relativePath: f.relativePath,
+          bytes,
+        };
+      }),
     );
+    store.startFileTransfer(onlineIds.slice(0, 2), prepared);
   };
 
   return (
@@ -97,11 +125,21 @@ function TransfersPage() {
         </div>
       </div>
 
+      <Input
+        value={filter}
+        onChange={(e) => setFilter(e.target.value)}
+        placeholder="Search transfers by name, device, or status…"
+        className="rounded-full"
+        aria-label="Search transfer history"
+      />
+
       <div className="space-y-3">
-        {transfers.length === 0 ? (
-          <p className="py-12 text-center text-sm text-muted-foreground">No transfers yet.</p>
+        {filtered.length === 0 ? (
+          <p className="py-12 text-center text-sm text-muted-foreground">
+            {transfers.length === 0 ? "No transfers yet." : "No transfers match your search."}
+          </p>
         ) : (
-          transfers.map((tx) => {
+          filtered.map((tx) => {
             const pct = formatPercent(tx.transferredBytes, tx.totalBytes);
             const names = tx.files.map((f) => f.name).join(", ");
             return (

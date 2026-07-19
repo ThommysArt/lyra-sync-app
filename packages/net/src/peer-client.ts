@@ -11,10 +11,46 @@ import {
 } from "@lyra-sync-app/protocol";
 
 import {
+  createAuthResponse,
   createAuthResponseWithSharedSecret,
   createFirstContactAuthResponse,
+  isEcdsaPrivateKey,
 } from "./auth";
 import { createEnvelope, parseEnvelope } from "./envelope";
+import { isSealedString, openSealedJson, sealJson } from "./seal";
+
+/** Marker object for AES-GCM sealed payloads (post-pairing encryption default). */
+export const SEALED_PAYLOAD_KEY = "__lyra_sealed";
+
+export function isSealedPayload(payload: unknown): payload is { [SEALED_PAYLOAD_KEY]: string } {
+  return (
+    typeof payload === "object" &&
+    payload !== null &&
+    SEALED_PAYLOAD_KEY in payload &&
+    typeof (payload as Record<string, unknown>)[SEALED_PAYLOAD_KEY] === "string"
+  );
+}
+
+export async function sealEnvelopePayload(
+  sharedSecret: string,
+  payload: unknown,
+): Promise<{ [typeof SEALED_PAYLOAD_KEY]: string }> {
+  const sealed = await sealJson(sharedSecret, payload);
+  return { [SEALED_PAYLOAD_KEY]: sealed };
+}
+
+export async function openEnvelopePayload(
+  sharedSecret: string,
+  payload: unknown,
+): Promise<unknown> {
+  if (isSealedPayload(payload)) {
+    return openSealedJson(sharedSecret, payload[SEALED_PAYLOAD_KEY]);
+  }
+  if (isSealedString(payload)) {
+    return openSealedJson(sharedSecret, payload);
+  }
+  return payload;
+}
 
 export type PeerUrl = {
   host: string;
@@ -101,6 +137,12 @@ async function getJson<T = unknown>(
   }
 }
 
+export type PeerPairingOffer = {
+  codeHash: string;
+  token: string;
+  expiresAt: number;
+};
+
 /** GET /lyra/info — unauthenticated peer hello. */
 export async function fetchPeerInfo(
   endpoint: PeerUrl,
@@ -113,6 +155,7 @@ export async function fetchPeerInfo(
       host?: string;
       port?: number;
       protocolVersion: number;
+      pairing?: PeerPairingOffer;
     }
   | { ok: false; error: string }
 > {
@@ -123,6 +166,7 @@ export async function fetchPeerInfo(
     host?: string;
     port?: number;
     protocolVersion?: number;
+    pairing?: PeerPairingOffer;
   }>(`${base}/lyra/info`, opts);
   if (!res.ok) return { ok: false, error: res.error };
   if (!res.data?.identity) return { ok: false, error: "Missing identity" };
@@ -133,24 +177,53 @@ export async function fetchPeerInfo(
     host: res.data.host,
     port: res.data.port,
     protocolVersion: res.data.protocolVersion ?? LYRA_PROTOCOL_VERSION,
+    pairing: res.data.pairing,
   };
 }
 
-/** POST /lyra/message — send a protocol envelope. */
+/** POST /lyra/message — send a protocol envelope. Seals payload when sealSecret is set. */
 export async function sendEnvelope(
   endpoint: PeerUrl,
   envelope: Envelope,
-  opts?: { sessionToken?: string; signal?: AbortSignal },
+  opts?: {
+    sessionToken?: string;
+    signal?: AbortSignal;
+    /** When set, encrypt payload with AES-GCM (post-pairing default). */
+    sealSecret?: string;
+  },
 ): Promise<{ ok: true; envelope?: Envelope } | { ok: false; error: string }> {
   const base = peerBaseUrl(endpoint);
-  const res = await postJson(`${base}/lyra/message`, envelope, {
+  let outbound: Envelope = envelope;
+  if (opts?.sealSecret && envelope.payload !== undefined) {
+    try {
+      const sealed = await sealEnvelopePayload(opts.sealSecret, envelope.payload);
+      outbound = { ...envelope, payload: sealed };
+    } catch (e) {
+      return {
+        ok: false,
+        error: e instanceof Error ? e.message : "Failed to seal payload",
+      };
+    }
+  }
+  const res = await postJson(`${base}/lyra/message`, outbound, {
     headers: opts?.sessionToken ? { authorization: `Bearer ${opts.sessionToken}` } : undefined,
     signal: opts?.signal,
   });
   if (!res.ok) return { ok: false, error: res.error };
   if (res.data && typeof res.data === "object" && res.data !== null && "type" in res.data) {
     const parsed = parseEnvelope(res.data);
-    if (parsed.ok) return { ok: true, envelope: parsed.envelope };
+    if (!parsed.ok) return { ok: true };
+    let env = parsed.envelope;
+    // Open sealed replies when we have the secret
+    if (opts?.sealSecret && isSealedPayload(env.payload)) {
+      try {
+        const opened = await openEnvelopePayload(opts.sealSecret, env.payload);
+        env = { ...env, payload: opened };
+      } catch {
+        // leave sealed if open fails
+      }
+    }
+    return { ok: true, envelope: env };
   }
   return { ok: true };
 }
@@ -182,10 +255,17 @@ export async function authenticateWithPeer(input: {
         identity: input.identity,
         sharedSecret: input.sharedSecret,
       })
-    : await createFirstContactAuthResponse({
-        challenge: challengeParsed.data,
-        identity: input.identity,
-      });
+    : isEcdsaPrivateKey(input.privateKey)
+      ? await createAuthResponse({
+          challenge: challengeParsed.data,
+          identity: input.identity,
+          privateKey: input.privateKey,
+        })
+      : await createFirstContactAuthResponse({
+          challenge: challengeParsed.data,
+          identity: input.identity,
+          privateKey: input.privateKey,
+        });
 
   const authRes = await postJson(`${base}/lyra/auth/response`, response, {
     signal: input.signal,
@@ -257,6 +337,8 @@ export async function pushClipboardToPeer(input: {
     createdAt: number;
   };
   signal?: AbortSignal;
+  /** Pairing secret — seals clipboard payload when set (encryption default). */
+  sealSecret?: string;
 }): Promise<{ ok: true } | { ok: false; error: string }> {
   const envelope = createEnvelope({
     type: "clipboard_push",
@@ -267,6 +349,7 @@ export async function pushClipboardToPeer(input: {
   const res = await sendEnvelope(input.endpoint, envelope, {
     sessionToken: input.sessionToken,
     signal: input.signal,
+    sealSecret: input.sealSecret,
   });
   if (!res.ok) return { ok: false, error: res.error };
   return { ok: true };
@@ -281,6 +364,7 @@ export async function openUrlOnPeer(input: {
   url: string;
   title?: string;
   signal?: AbortSignal;
+  sealSecret?: string;
 }): Promise<{ ok: true; opened?: boolean } | { ok: false; error: string }> {
   const envelope = createEnvelope({
     type: "open_url",
@@ -291,6 +375,7 @@ export async function openUrlOnPeer(input: {
   const res = await sendEnvelope(input.endpoint, envelope, {
     sessionToken: input.sessionToken,
     signal: input.signal,
+    sealSecret: input.sealSecret,
   });
   if (!res.ok) return { ok: false, error: res.error };
   const payload = res.envelope?.payload as { opened?: boolean } | undefined;
@@ -306,6 +391,7 @@ export async function listRemoteFs(input: {
   path: string;
   requestId: string;
   signal?: AbortSignal;
+  sealSecret?: string;
 }): Promise<
   | { ok: true; path: string; entries: import("@lyra-sync-app/protocol").FileEntry[]; error?: string }
   | { ok: false; error: string }
@@ -319,6 +405,7 @@ export async function listRemoteFs(input: {
   const res = await sendEnvelope(input.endpoint, envelope, {
     sessionToken: input.sessionToken,
     signal: input.signal,
+    sealSecret: input.sealSecret,
   });
   if (!res.ok) return { ok: false, error: res.error };
   if (res.envelope?.type === "fs_list_response") {

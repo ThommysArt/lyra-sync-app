@@ -135,9 +135,10 @@ export default function PairScreen() {
         ) : null}
         <Pressable
           onPress={() => {
-            const result = store.submitPairingCode(code);
-            if (!result.ok) setError(result.error);
-            else setError(null);
+            void store.submitPairingCode(code).then((result) => {
+              if (!result.ok) setError(result.error);
+              else setError(null);
+            });
           }}
           style={{
             alignItems: "center",

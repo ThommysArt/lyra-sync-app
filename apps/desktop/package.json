@@ -1,14 +1,49 @@
 {
   "name": "desktop",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
+  "description": "Lyra desktop shell — local peer network for clipboard and files",
+  "author": "Lyra",
   "type": "module",
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "tsx scripts/dev.ts",
     "build:electron": "tsx scripts/build-electron.ts",
+    "build": "pnpm run build:electron",
     "start": "electron .",
+    "pack": "pnpm run build:electron && electron-builder --dir",
+    "dist": "pnpm run build:electron && electron-builder",
     "check-types": "tsc --noEmit"
+  },
+  "build": {
+    "appId": "app.lyra.desktop",
+    "productName": "Lyra",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist-electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../web/dist",
+        "to": "web-dist",
+        "filter": ["**/*"]
+      }
+    ],
+    "linux": {
+      "target": ["AppImage", "dir"],
+      "category": "Network",
+      "executableName": "lyra"
+    },
+    "mac": {
+      "target": ["dmg", "dir"],
+      "category": "public.app-category.utilities"
+    },
+    "win": {
+      "target": ["nsis", "dir"]
+    }
   },
   "dependencies": {
     "@lyra-sync-app/core": "workspace:*",
@@ -19,6 +54,7 @@
     "@lyra-sync-app/config": "workspace:*",
     "@types/node": "^22.13.14",
     "electron": "^37.2.0",
+    "electron-builder": "^25.1.8",
     "tsx": "^4.22.5",
     "typescript": "^6"
   }

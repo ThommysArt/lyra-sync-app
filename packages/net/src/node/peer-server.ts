@@ -1,4 +1,10 @@
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import {
+  createServer,
+  type IncomingMessage,
+  type Server as HttpServer,
+  type ServerResponse,
+} from "node:http";
+import { createServer as createHttpsServer, type Server as HttpsServer } from "node:https";
 import { networkInterfaces } from "node:os";
 
 import {
@@ -23,14 +29,38 @@ import {
   type MessageHandlerContext,
   type TransferReceiveState,
 } from "../message-handlers";
+import { isSealedPayload, openEnvelopePayload, sealEnvelopePayload } from "../peer-client";
 import type { AuthChallengePayload } from "@lyra-sync-app/protocol";
+import {
+  appendDiskChunk,
+  cleanupDiskTransfer,
+  createDiskTransferState,
+  finalizeDiskTransfer,
+} from "./transfer-disk";
+import { tryCreateSelfSignedTls } from "./tls-certs";
 
 export type PeerServerOptions = {
   identity: DeviceIdentity;
   /** Optional status payload returned from /lyra/info */
   getStatus?: () => DeviceStatus | undefined;
+  /**
+   * Active pairing offer advertised on /lyra/info (code hash only — never raw code).
+   */
+  getPairingOffer?: () =>
+    | {
+        codeHash: string;
+        token: string;
+        expiresAt: number;
+      }
+    | undefined
+    | null;
   port?: number;
   host?: string;
+  /**
+   * Enable HTTPS with self-signed cert (when openssl available) or explicit key/cert.
+   * true = try self-signed; {key,cert} = use provided PEM; false/undefined = HTTP.
+   */
+  tls?: boolean | { key: string; cert: string };
   /**
    * Lookup trusted peer auth material. Return sharedSecret when paired.
    * For first-contact identity-binding, return {}.
@@ -51,8 +81,10 @@ export type PeerServerOptions = {
   allowFirstContactAuth?: boolean;
   /** Require Bearer session for non-public message types (default true). */
   requireAuthForMessages?: boolean;
+  /** Encrypt reply payloads with session.sharedSecret when present (default true). */
+  sealReplies?: boolean;
   /** Built-in handlers for clipboard / fs / transfer / pair (merged with onEnvelope). */
-  handlers?: Omit<MessageHandlerContext, "identity" | "transfers">;
+  handlers?: Omit<MessageHandlerContext, "identity" | "transfers" | "revokeDeviceSessions">;
   /** Handle protocol envelopes (runs after built-in handlers when provided as override). */
   onEnvelope?: (
     envelope: Envelope,
@@ -66,12 +98,17 @@ export type PeerServerOptions = {
 };
 
 export type PeerServer = {
-  server: Server;
+  server: HttpServer | HttpsServer;
   port: number;
   host: string;
   url: string;
+  /** http or https */
+  protocol: "http" | "https";
+  /** SHA-256 fingerprint of TLS cert when HTTPS */
+  tlsFingerprint?: string;
   close: () => Promise<void>;
   getSessions: () => Map<string, AuthSession>;
+  revokeDevice: (deviceId: string) => number;
 };
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -140,25 +177,79 @@ export async function startPeerServer(options: PeerServerOptions): Promise<PeerS
   const transfers = new Map<string, TransferReceiveState>();
   const requireAuth = options.requireAuthForMessages !== false;
   const allowFirstContact = options.allowFirstContactAuth !== false;
+  const sealReplies = options.sealReplies !== false;
 
   const handlerCtx: MessageHandlerContext = {
     identity: options.identity,
     transfers,
+    revokeDeviceSessions: (deviceId: string) => {
+      let n = 0;
+      for (const [token, s] of sessions) {
+        if (s.deviceId === deviceId) {
+          sessions.delete(token);
+          n++;
+        }
+      }
+      return n;
+    },
+    createDiskTransfer: async (input) => {
+      const disk = await createDiskTransferState(input);
+      const state: TransferReceiveState = {
+        transferId: disk.transferId,
+        totalBytes: disk.totalBytes,
+        receivedBytes: disk.receivedBytes,
+        files: disk.files,
+        chunks: [],
+        paused: false,
+        checksums: disk.checksums,
+        diskPath: disk.filePath,
+        appendChunk: async (bytes, offset) => {
+          await appendDiskChunk(disk, bytes, offset);
+          state.receivedBytes = disk.receivedBytes;
+        },
+        finalizeDisk: async () => {
+          const fin = await finalizeDiskTransfer(disk);
+          return fin;
+        },
+        cleanupDisk: async () => {
+          await cleanupDiskTransfer(disk);
+        },
+      };
+      return state;
+    },
     ...options.handlers,
   };
 
-  const server = createServer(async (req, res) => {
+  let tlsMaterial: { key: string; cert: string; fingerprintSha256?: string } | null = null;
+  if (options.tls === true) {
+    const generated = tryCreateSelfSignedTls({
+      commonName: options.identity.name || "lyra-peer.local",
+    });
+    if (generated) {
+      tlsMaterial = generated;
+    } else {
+      console.warn(
+        "[lyra peer] HTTPS requested but self-signed cert generation failed (install openssl). Falling back to HTTP + app-level seal.",
+      );
+    }
+  } else if (options.tls && typeof options.tls === "object") {
+    tlsMaterial = { key: options.tls.key, cert: options.tls.cert };
+  }
+
+  const requestListener = async (req: IncomingMessage, res: ServerResponse) => {
     const cors = options.cors;
     if (req.method === "OPTIONS") {
       sendJson(res, req, 204, {}, cors);
       return;
     }
 
-    const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+    const protocol = tlsMaterial ? "https" : "http";
+    const url = new URL(req.url ?? "/", `${protocol}://${req.headers.host ?? "localhost"}`);
 
     try {
       if (req.method === "GET" && url.pathname === "/lyra/info") {
         const lan = getLocalIPv4();
+        const pairingOffer = options.getPairingOffer?.() ?? undefined;
         sendJson(
           res,
           req,
@@ -168,7 +259,17 @@ export async function startPeerServer(options: PeerServerOptions): Promise<PeerS
             status: options.getStatus?.(),
             host: lan ?? undefined,
             port,
+            protocol: protocol,
             protocolVersion: LYRA_PROTOCOL_VERSION,
+            tlsFingerprint: tlsMaterial?.fingerprintSha256,
+            pairing:
+              pairingOffer && pairingOffer.expiresAt > Date.now()
+                ? {
+                    codeHash: pairingOffer.codeHash,
+                    token: pairingOffer.token,
+                    expiresAt: pairingOffer.expiresAt,
+                  }
+                : undefined,
           },
           cors,
         );
@@ -241,11 +342,18 @@ export async function startPeerServer(options: PeerServerOptions): Promise<PeerS
           expectedFingerprint: hints.expectedFingerprint,
           expectedDeviceId: hints.expectedDeviceId,
           sharedSecret: hints.sharedSecret,
+          // Allow ECDSA + shared secret always; identity-binding only if first-contact allowed
+          allowIdentityBinding: allowFirstContact && !hasShared,
         });
 
         if (!verified.ok) {
           sendJson(res, req, 401, { error: verified.error }, cors);
           return;
+        }
+
+        // Attach shared secret from registry even if proof was ECDSA
+        if (hints.sharedSecret && !verified.session.sharedSecret) {
+          verified.session.sharedSecret = hints.sharedSecret;
         }
 
         sessions.set(verified.session.sessionToken, verified.session);
@@ -276,7 +384,20 @@ export async function startPeerServer(options: PeerServerOptions): Promise<PeerS
           if (s && s.expiresAt > Date.now()) session = s;
         }
 
-        const msgType = parsed.envelope.type;
+        let envelope = parsed.envelope;
+
+        // Unseal AES-GCM payloads when session has shared secret (encryption default)
+        if (session?.sharedSecret && isSealedPayload(envelope.payload)) {
+          try {
+            const opened = await openEnvelopePayload(session.sharedSecret, envelope.payload);
+            envelope = { ...envelope, payload: opened };
+          } catch {
+            sendJson(res, req, 400, { error: "Failed to open sealed payload" }, cors);
+            return;
+          }
+        }
+
+        const msgType = envelope.type;
         if (requireAuth && !PUBLIC_MESSAGE_TYPES.has(msgType) && !session) {
           sendJson(res, req, 401, { error: "Auth required" }, cors);
           return;
@@ -284,16 +405,18 @@ export async function startPeerServer(options: PeerServerOptions): Promise<PeerS
 
         // Custom handler first (Electron / CLI can override)
         if (options.onEnvelope) {
-          const reply = await options.onEnvelope(parsed.envelope, session);
+          const reply = await options.onEnvelope(envelope, session);
           if (reply) {
-            sendJson(res, req, 200, reply, cors);
+            const out = await maybeSealReply(reply, session, sealReplies);
+            sendJson(res, req, 200, out, cors);
             return;
           }
         }
 
         // Built-in protocol handlers (clipboard, transfer chunks, fs, pair, ping…)
-        const builtin = await handlePeerEnvelope(parsed.envelope, session, handlerCtx);
-        sendJson(res, req, 200, builtin, cors);
+        const builtin = await handlePeerEnvelope(envelope, session, handlerCtx);
+        const out = await maybeSealReply(builtin, session, sealReplies);
+        sendJson(res, req, 200, out, cors);
         return;
       }
 
@@ -307,7 +430,11 @@ export async function startPeerServer(options: PeerServerOptions): Promise<PeerS
         cors,
       );
     }
-  });
+  };
+
+  const server: HttpServer | HttpsServer = tlsMaterial
+    ? createHttpsServer({ key: tlsMaterial.key, cert: tlsMaterial.cert }, requestListener)
+    : createServer(requestListener);
 
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -317,16 +444,45 @@ export async function startPeerServer(options: PeerServerOptions): Promise<PeerS
   const address = server.address();
   const boundPort =
     address && typeof address === "object" ? address.port : port;
+  const protocol = tlsMaterial ? "https" : "http";
 
   return {
     server,
     port: boundPort,
     host,
-    url: `http://127.0.0.1:${boundPort}`,
+    protocol,
+    tlsFingerprint: tlsMaterial?.fingerprintSha256,
+    url: `${protocol}://127.0.0.1:${boundPort}`,
     getSessions: () => sessions,
+    revokeDevice: (deviceId: string) => {
+      let n = 0;
+      for (const [token, s] of sessions) {
+        if (s.deviceId === deviceId) {
+          sessions.delete(token);
+          n++;
+        }
+      }
+      return n;
+    },
     close: () =>
       new Promise((resolve, reject) => {
         server.close((err) => (err ? reject(err) : resolve()));
       }),
   };
+}
+
+async function maybeSealReply(
+  reply: Envelope | Record<string, unknown>,
+  session: AuthSession | null,
+  sealReplies: boolean,
+): Promise<Envelope | Record<string, unknown>> {
+  if (!sealReplies || !session?.sharedSecret) return reply;
+  if (!reply || typeof reply !== "object") return reply;
+  if (!("payload" in reply) || !("type" in reply)) return reply;
+  try {
+    const sealed = await sealEnvelopePayload(session.sharedSecret, (reply as Envelope).payload);
+    return { ...(reply as Envelope), payload: sealed };
+  } catch {
+    return reply;
+  }
 }

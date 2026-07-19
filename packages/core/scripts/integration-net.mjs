@@ -98,7 +98,7 @@ try {
   );
   assert(pong.ok && pong.envelope?.type === "pong", "pong");
 
-  // clipboard_push requires session
+  // clipboard_push requires session — sealed with pairing secret (encryption default)
   const clip = await pushClipboardToPeer({
     endpoint: { host: "127.0.0.1", port: serverA.port },
     sessionToken: auth.sessionToken,
@@ -112,11 +112,15 @@ try {
       sourceDeviceName: b.identity.name,
       createdAt: Date.now(),
     },
+    sealSecret: sharedSecret,
   });
-  assert(clip.ok, "clipboard push");
+  assert(clip.ok, "clipboard push sealed " + (clip.ok ? "" : clip.error));
   assert(received.clipboard?.text === "hello wire", "clipboard received");
 
-  // multi-chunk transfer
+  // ECDSA identity shape
+  assert(a.identity.publicKey.startsWith("ecdsa-p256:") || a.privateKey.length === 64, "identity material");
+
+  // multi-chunk transfer (sealed)
   const body = textToBytes("x".repeat(120_000));
   const wire = await sendFilesOverWire({
     endpoint: { host: "127.0.0.1", port: serverA.port },
@@ -126,6 +130,7 @@ try {
     transferId: "tx_wire_1",
     files: [{ name: "big.txt", size: body.byteLength, bytes: body }],
     chunkSize: 16_384,
+    sealSecret: sharedSecret,
   });
   assert(wire.ok, "wire transfer " + (wire.ok ? "" : wire.error));
 
@@ -162,10 +167,14 @@ try {
   assert(store.getState().transfers[0].status === "transferring", "resumed");
 
   // dual-confirm + authSecret in store
-  const pending = store.submitPairingCode("ZZ9K2A");
+  const pending = await store.submitPairingCode("ZZ9K2A");
   assert(pending.ok && pending.pending, "pair pending");
   await store.confirmIncomingPair(pending.requestId);
   assert(store.getState().devices.some((d) => d.authSecret), "authSecret stored");
+
+  // unpair revoke sessions
+  const n = serverA.revokeDevice(b.identity.id);
+  assert(n >= 1, "revoke sessions");
 
   console.log("INTEGRATION PASS", {
     portA: serverA.port,
@@ -173,6 +182,8 @@ try {
     latencyMs: device.lastProbeLatencyMs,
     authTokenLen: auth.sessionToken.length,
     wireBytes: body.byteLength,
+    ecdsa: a.identity.publicKey.startsWith("ecdsa-p256:"),
+    revoked: n,
   });
 } finally {
   await serverA.close();

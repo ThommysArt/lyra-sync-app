@@ -23,7 +23,12 @@ export function LyraProvider({ children }: { children: ReactNode }) {
   return (
     <BaseLyraProvider
       storage={storage}
-      seedDemo
+      // Seed demo mesh only when explicitly requested or __DEV__
+      seedDemo={
+        typeof __DEV__ !== "undefined"
+          ? __DEV__
+          : process.env.EXPO_PUBLIC_LYRA_SEED_DEMO === "1"
+      }
       platformHint="native"
       fallback={
         <View

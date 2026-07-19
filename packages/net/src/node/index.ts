@@ -10,3 +10,25 @@ export {
   type DiscoveryHandle,
   type DiscoveryOptions,
 } from "./discovery";
+export {
+  listOsFiles,
+  resolveSmartFolder,
+  virtualToAbsolute,
+  assertSafePath,
+  readOsFileChunk,
+  deleteOsPath,
+  renameOsPath,
+} from "./fs-browse";
+export {
+  fetchTailscaleStatus,
+  tailscalePeersToProbeTargets,
+  type TailscalePeerHint,
+  type TailscaleStatusResult,
+} from "./tailscale";
+export { tryCreateSelfSignedTls, createSelfSignedTls } from "./tls-certs";
+export {
+  createDiskTransferState,
+  appendDiskChunk,
+  finalizeDiskTransfer,
+  cleanupDiskTransfer,
+} from "./transfer-disk";

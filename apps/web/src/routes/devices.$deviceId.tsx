@@ -71,7 +71,31 @@ function DeviceDetailPage() {
     );
   };
 
-  const downloadSelected = () => {
+  const downloadSelected = async () => {
+    const live = Boolean(device.host && device.authSecret && !device.id.startsWith("demo_"));
+    if (live) {
+      for (const e of entries.filter((x) => selected.includes(x.path) && !x.isDirectory)) {
+        const res = await store.downloadRemoteFile(device.id, e.path);
+        if (!res.ok) {
+          // fall through to demo transfer for this file
+          store.startFileTransfer(
+            [device.id],
+            [{ name: e.name, size: e.size ?? 1024, mimeType: e.mimeType }],
+            { direction: "received", forceSimulate: true },
+          );
+          continue;
+        }
+        // Trigger browser download of real bytes
+        const blob = new Blob([res.bytes as BlobPart]);
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = e.name;
+        a.click();
+        URL.revokeObjectURL(url);
+      }
+      return;
+    }
     const files = entries
       .filter((e) => selected.includes(e.path) && !e.isDirectory)
       .map((e) => ({
@@ -138,7 +162,22 @@ function DeviceDetailPage() {
             <div className="rounded-3xl bg-muted/50 px-3 py-2 text-xs">
               <p className="text-muted-foreground">Fingerprint</p>
               <p className="font-mono">{formatFingerprint(device.fingerprint)}</p>
+              {device.host ? (
+                <p className="mt-1 text-muted-foreground">
+                  {device.host}:{device.port ?? 53317}
+                  {device.authSecret ? " · trusted" : " · untrusted"}
+                </p>
+              ) : null}
             </div>
+            {device.host && !device.authSecret ? (
+              <Button
+                size="sm"
+                className="w-full"
+                onClick={() => void store.trustDevice(device.id)}
+              >
+                Establish trust (pair)
+              </Button>
+            ) : null}
             <Separator />
             <ToggleRow
               label="Auto-accept transfers"

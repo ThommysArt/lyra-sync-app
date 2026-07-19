@@ -3,6 +3,7 @@ import { useEffect } from "react";
 
 import { useLyraStore } from "@/lib/lyra";
 import { readSystemClipboard } from "@/lib/clipboard";
+import { getDesktopApi } from "@/lib/desktop-bridge";
 
 /**
  * In-app keyboard shortcuts (spec §5.10).
@@ -22,6 +23,16 @@ export function KeyboardShortcuts() {
         (target.tagName === "INPUT" ||
           target.tagName === "TEXTAREA" ||
           target.isContentEditable);
+
+      // Quit desktop shell — Ctrl/Cmd+Q
+      if (isMod(e) && e.key.toLowerCase() === "q") {
+        const api = getDesktopApi();
+        if (api?.quit) {
+          e.preventDefault();
+          void api.quit();
+        }
+        return;
+      }
 
       // Focus search / device list — Ctrl/Cmd+K
       if (isMod(e) && e.key.toLowerCase() === "k") {

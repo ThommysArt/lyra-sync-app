@@ -88,7 +88,7 @@ describe("createLyraStore", () => {
       platformHint: "web",
     });
     await store.hydrate();
-    const submit = store.submitPairingCode("AB12CD");
+    const submit = await store.submitPairingCode("AB12CD");
     assert.equal(submit.ok, true);
     if (!submit.ok || !("pending" in submit)) throw new Error("expected pending");
     assert.equal(submit.pending, true);
