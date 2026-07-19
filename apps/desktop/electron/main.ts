@@ -512,11 +512,23 @@ function createWindow() {
   });
 }
 
-// Avoid stacking zombie instances when launched repeatedly from Gear Lever
-const gotLock = app.requestSingleInstanceLock();
+// Allow two Electron windows on one PC for local pairing tests:
+//   LYRA_ALLOW_MULTI=1 LYRA_INSTANCE=a LYRA_PORT=53317 pnpm run dev:desktop
+//   LYRA_ALLOW_MULTI=1 LYRA_INSTANCE=b LYRA_PORT=53319 pnpm run dev:desktop
+const allowMulti =
+  process.env.LYRA_ALLOW_MULTI === "1" || process.env.LYRA_ALLOW_MULTI === "true";
+const instanceId = (process.env.LYRA_INSTANCE ?? "").trim();
+
+// Isolate storage/session so two instances don't share localStorage identity
+if (instanceId) {
+  const base = app.getPath("userData");
+  app.setPath("userData", path.join(base, `instance-${instanceId}`));
+}
+
+const gotLock = allowMulti ? true : app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
-} else {
+} else if (!allowMulti) {
   app.on("second-instance", () => {
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore();
@@ -529,6 +541,11 @@ if (!gotLock) {
 }
 
 app.whenReady().then(async () => {
+  if (allowMulti || instanceId) {
+    console.log(
+      `[lyra] multi-instance mode instance=${instanceId || "default"} port=${PEER_PORT} name=${process.env.LYRA_NAME ?? "Lyra Desktop"}`,
+    );
+  }
   installApplicationMenu();
 
   ipcMain.handle("lyra:get-peer-status", () => ({
