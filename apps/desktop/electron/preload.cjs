@@ -7,6 +7,11 @@ const { contextBridge, ipcRenderer } = require("electron");
 contextBridge.exposeInMainWorld("lyraDesktop", {
   getPeerStatus: () => ipcRenderer.invoke("lyra:get-peer-status"),
   getIdentity: () => ipcRenderer.invoke("lyra:get-identity"),
+  getShellInfo: () => ipcRenderer.invoke("lyra:get-shell-info"),
+  getDownloadDirectory: () => ipcRenderer.invoke("lyra:get-download-directory"),
+  setDownloadDirectory: (dir) => ipcRenderer.invoke("lyra:set-download-directory", dir),
+  chooseDownloadDirectory: () => ipcRenderer.invoke("lyra:choose-download-directory"),
+  openPath: (targetPath) => ipcRenderer.invoke("lyra:open-path", targetPath),
   restartNetworking: () => ipcRenderer.invoke("lyra:restart-networking"),
   syncTrustedPeers: (peers) => ipcRenderer.invoke("lyra:sync-trusted-peers", peers),
   setPairingOffer: (offer) => ipcRenderer.invoke("lyra:set-pairing-offer", offer),
@@ -47,5 +52,10 @@ contextBridge.exposeInMainWorld("lyraDesktop", {
     const listener = (_event, peers) => handler(peers);
     ipcRenderer.on("lyra:tailscale-peers", listener);
     return () => ipcRenderer.removeListener("lyra:tailscale-peers", listener);
+  },
+  onTransferComplete: (handler) => {
+    const listener = (_event, data) => handler(data);
+    ipcRenderer.on("lyra:transfer-complete", listener);
+    return () => ipcRenderer.removeListener("lyra:transfer-complete", listener);
   },
 });

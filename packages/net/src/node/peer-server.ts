@@ -397,6 +397,20 @@ export async function startPeerServer(options: PeerServerOptions): Promise<PeerS
           }
         }
 
+        // For pair_request, fill missing host from the TCP peer so mutual pairing can call back
+        if (envelope.type === "pair_request" && envelope.payload && typeof envelope.payload === "object") {
+          const p = envelope.payload as { host?: string };
+          if (!p.host || p.host === "127.0.0.1" || p.host === "0.0.0.0" || p.host === "localhost") {
+            const remote = req.socket.remoteAddress?.replace(/^::ffff:/, "");
+            if (remote && remote !== "127.0.0.1" && remote !== "::1") {
+              envelope = {
+                ...envelope,
+                payload: { ...p, host: remote },
+              };
+            }
+          }
+        }
+
         const msgType = envelope.type;
         if (requireAuth && !PUBLIC_MESSAGE_TYPES.has(msgType) && !session) {
           sendJson(res, req, 401, { error: "Auth required" }, cors);

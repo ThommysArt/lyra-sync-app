@@ -98,6 +98,49 @@ describe("createLyraStore", () => {
     const devices = store.getState().devices;
     assert.equal(devices.length, 1);
     assert.ok(devices[0]!.authSecret && devices[0]!.authSecret.length >= 16);
+    assert.equal(store.getState().incomingPairRequests.length, 0);
+  });
+
+  it("does not re-queue pair request for already trusted device", async () => {
+    const store = createLyraStore({
+      storage: memoryStorage(),
+      seedDemo: false,
+      platformHint: "web",
+    });
+    await store.hydrate();
+    const submit = await store.submitPairingCode("ZZ99YY");
+    if (!submit.ok || !("pending" in submit)) throw new Error("expected pending");
+    await store.confirmIncomingPair(submit.requestId);
+    const device = store.getState().devices[0]!;
+    store.enqueuePairRequest({
+      version: 1,
+      deviceId: device.id,
+      name: device.name,
+      type: device.type,
+      platform: device.platform,
+      fingerprint: device.fingerprint,
+      publicKey: device.publicKey,
+      token: "tok_again",
+      host: "192.168.1.50",
+      port: 53317,
+      expiresAt: Date.now() + 60_000,
+    });
+    assert.equal(store.getState().incomingPairRequests.length, 0);
+    assert.equal(store.getState().devices[0]!.host, "192.168.1.50");
+  });
+
+  it("manual peers are nearby not trusted", async () => {
+    const store = createLyraStore({
+      storage: memoryStorage(),
+      seedDemo: false,
+      platformHint: "web",
+    });
+    await store.hydrate();
+    const res = store.addManualPeer({ host: "10.0.0.9", name: "Lab" });
+    assert.equal(res.ok, true);
+    if (!res.ok) throw new Error("expected ok");
+    assert.equal(res.device.showInMainList, false);
+    assert.equal(res.device.authSecret, undefined);
   });
 
   it("stores clipboard images in history", async () => {

@@ -1,1 +1,18 @@
 @import "@lyra-sync-app/ui/globals.css";
+
+/* Electron: custom chrome merged with sidebar (no classic menu bar feel) */
+.lyra-desktop-shell .lyra-titlebar-drag {
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+
+.lyra-desktop-shell button,
+.lyra-desktop-shell a,
+.lyra-desktop-shell input,
+.lyra-desktop-shell textarea,
+.lyra-desktop-shell [role="button"],
+.lyra-desktop-shell [data-slot="switch"] {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+

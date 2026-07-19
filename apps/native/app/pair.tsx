@@ -51,7 +51,8 @@ export default function PairScreen() {
       <Stack.Screen options={{ title: "Pair device", headerShadowVisible: false }} />
       <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 40 }}>
         <Text style={{ color: muted, fontFamily: fonts.medium, fontSize: 14, marginBottom: 20 }}>
-          Scan a QR on desktop, show your QR, or enter a pairing code. Both sides confirm trust.
+          Scan a QR on desktop, show your QR, or enter a pairing code. Each side accepts once to
+          establish trust — discovery alone is not pairing.
         </Text>
 
         <Text style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 16 }}>Your QR & code</Text>

@@ -233,5 +233,10 @@ export const AppSettingsSchema = z.object({
   preferHttpsPeer: z.boolean().default(false),
   /** Publish lightweight status to peers when online (desktop) */
   statusBroadcastEnabled: z.boolean().default(true),
+  /**
+   * Preferred download folder for received files (desktop shell).
+   * Empty / omitted = system Downloads directory.
+   */
+  downloadDirectory: z.string().optional(),
 });
 export type AppSettings = z.infer<typeof AppSettingsSchema>;

@@ -16,9 +16,34 @@ export type TrustedPeerSync = {
   authSecret: string;
 };
 
+export type DesktopShellInfo = {
+  platform: NodeJS.Platform | string;
+  isDesktop: true;
+  downloadDirectory: string;
+};
+
+export type TransferCompleteEvent = {
+  transferId: string;
+  receivedBytes: number;
+  files: { name: string; size: number }[];
+  diskPath?: string;
+  savedPaths?: string[];
+  downloadDir?: string;
+};
+
 export type LyraDesktopApi = {
   getPeerStatus: () => Promise<DesktopPeerStatus>;
   getIdentity: () => Promise<unknown>;
+  getShellInfo?: () => Promise<DesktopShellInfo>;
+  getDownloadDirectory?: () => Promise<string>;
+  setDownloadDirectory?: (
+    dir: string | null,
+  ) => Promise<{ ok: boolean; path: string; error?: string }>;
+  chooseDownloadDirectory?: () => Promise<
+    | { ok: true; path: string }
+    | { ok: false; cancelled?: boolean; path: string }
+  >;
+  openPath?: (targetPath: string) => Promise<{ ok: boolean; error?: string }>;
   restartNetworking: () => Promise<DesktopPeerStatus>;
   syncTrustedPeers?: (peers: TrustedPeerSync[]) => Promise<{ count: number }>;
   setPairingOffer?: (
@@ -39,6 +64,7 @@ export type LyraDesktopApi = {
   onTailscalePeers?: (
     handler: (peers: { host: string; port?: number; name?: string; online?: boolean }[]) => void,
   ) => () => void;
+  onTransferComplete?: (handler: (data: TransferCompleteEvent) => void) => () => void;
 };
 
 declare global {

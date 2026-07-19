@@ -70,6 +70,26 @@ export function LyraProvider({ children }: { children: ReactNode }) {
     const unsubPair = store.subscribe(syncPairingOffer);
     syncPairingOffer();
 
+    // Sync download directory preference to Electron shell
+    let lastDl = store.getState().settings.downloadDirectory ?? "";
+    const syncDownloadDir = () => {
+      if (!api.setDownloadDirectory) return;
+      const dir = store.getState().settings.downloadDirectory ?? "";
+      if (dir === lastDl) return;
+      lastDl = dir;
+      void api.setDownloadDirectory(dir || null);
+    };
+    const unsubDl = store.subscribe(syncDownloadDir);
+    // Load shell default into settings if empty
+    if (api.getDownloadDirectory && !store.getState().settings.downloadDirectory) {
+      void api.getDownloadDirectory().then((path) => {
+        if (path && !store.getState().settings.downloadDirectory) {
+          // Keep display path in settings without forcing custom override until user sets it
+          // (empty string means system default — we only surface path in UI via shell info)
+        }
+      });
+    }
+
     // Wire pair_request from Electron main
     const unsubPairReq = api.onPairRequest?.((payload) => {
       store.enqueuePairRequest(payload as import("@lyra-sync-app/protocol").PairingPayload, "wire");
@@ -89,14 +109,49 @@ export function LyraProvider({ children }: { children: ReactNode }) {
       store.ingestTailscalePeers(peers);
     });
 
+    // LAN multicast discovery → nearby (untrusted) devices
+    const unsubDisc = api.onDiscoveredPeer?.((peer) => {
+      const announce = peer as {
+        identity?: {
+          id: string;
+          name: string;
+          type?: import("@lyra-sync-app/protocol").PairedDevice["type"];
+          platform?: import("@lyra-sync-app/protocol").PairedDevice["platform"];
+          fingerprint: string;
+          publicKey?: string;
+        };
+        host?: string;
+        port?: number;
+      };
+      if (!announce?.identity?.id || !announce.host) return;
+      store.ingestDiscoveredPeer({
+        identity: announce.identity,
+        host: announce.host,
+        port: announce.port ?? store.getState().settings.peerListenPort ?? 53317,
+      });
+    });
+
+    const unsubTx = api.onTransferComplete?.((data) => {
+      store.recordReceivedTransfer({
+        transferId: data.transferId,
+        files: data.files,
+        receivedBytes: data.receivedBytes,
+        savedPaths: data.savedPaths,
+        deviceName: "Peer",
+      });
+    });
+
     return () => {
       unsubStatus();
       unsubStore();
       unsubPair();
+      unsubDl();
       unsubPairReq?.();
       unsubUnpair?.();
       unsubClip?.();
       unsubTs?.();
+      unsubDisc?.();
+      unsubTx?.();
     };
   }, []);
 

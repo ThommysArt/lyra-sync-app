@@ -32,21 +32,38 @@ export default function TransfersScreen() {
   const accent = isDark ? ACCENT_DARK : ACCENT;
 
   const pickAndSend = async () => {
-    if (!onlineIds[0]) return;
+    const target =
+      onlineIds.find((id) => {
+        const d = store.getState().devices.find((x) => x.id === id);
+        return d?.authSecret || d?.id.startsWith("demo_");
+      }) ?? onlineIds[0];
+    if (!target) return;
     try {
       const result = await DocumentPicker.getDocumentAsync({
         multiple: true,
         copyToCacheDirectory: true,
       });
       if (result.canceled || !result.assets?.length) return;
-      store.startFileTransfer(
-        [onlineIds[0]],
-        result.assets.map((a) => ({
-          name: a.name,
-          size: a.size ?? 1024,
-          mimeType: a.mimeType ?? undefined,
-        })),
+      const prepared = await Promise.all(
+        result.assets.map(async (a) => {
+          let bytes: Uint8Array | undefined;
+          try {
+            if (a.uri && (a.size ?? 0) <= 32 * 1024 * 1024) {
+              const res = await fetch(a.uri);
+              bytes = new Uint8Array(await res.arrayBuffer());
+            }
+          } catch {
+            bytes = undefined;
+          }
+          return {
+            name: a.name,
+            size: a.size ?? bytes?.byteLength ?? 1024,
+            mimeType: a.mimeType ?? undefined,
+            bytes,
+          };
+        }),
       );
+      store.startFileTransfer([target], prepared);
     } catch {
       // cancelled
     }

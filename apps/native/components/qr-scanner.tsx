@@ -198,15 +198,25 @@ export function QrScanner({ isDark, accent, ink, muted, card, onScanned }: QrSca
       {successName ? (
         <View
           style={{
-            backgroundColor: isDark ? "rgba(52,199,89,0.15)" : "rgba(52,199,89,0.12)",
+            backgroundColor: isDark ? "rgba(122,162,255,0.18)" : "rgba(47,107,255,0.12)",
             borderRadius: 16,
             marginTop: 12,
             paddingHorizontal: 14,
             paddingVertical: 12,
           }}
         >
-          <Text style={{ color: isDark ? "#6EE7A0" : "#1B7A3D", fontFamily: fonts.semiBold, fontSize: 14 }}>
-            Paired with {successName}
+          <Text style={{ color: accent, fontFamily: fonts.semiBold, fontSize: 14 }}>
+            Confirm pairing with {successName}
+          </Text>
+          <Text
+            style={{
+              color: muted,
+              fontFamily: fonts.medium,
+              fontSize: 12,
+              marginTop: 4,
+            }}
+          >
+            Tap Accept on the banner above to finish. The other device must accept once too.
           </Text>
         </View>
       ) : null}

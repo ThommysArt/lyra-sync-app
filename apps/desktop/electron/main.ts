@@ -2,8 +2,17 @@
  * Lyra desktop shell (Electron).
  * Hosts the local HTTP peer server + UDP multicast discovery, and loads the web UI.
  */
-import { app, BrowserWindow, ipcMain, safeStorage, shell } from "electron";
-import { existsSync } from "node:fs";
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  ipcMain,
+  Menu,
+  safeStorage,
+  shell,
+} from "electron";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -54,6 +63,18 @@ const trustedPeers = new Map<string, TrustedPeer>();
 
 /** Active pairing session advertised on /lyra/info (code hash only) */
 let pairingOffer: { codeHash: string; token: string; expiresAt: number } | null = null;
+
+/** User-selected download directory (empty = system Downloads) */
+let downloadDirectory: string | null = null;
+
+function resolveDownloadDir(): string {
+  if (downloadDirectory && existsSync(downloadDirectory)) return downloadDirectory;
+  try {
+    return app.getPath("downloads");
+  } catch {
+    return app.getPath("userData");
+  }
+}
 
 const status: RuntimeStatus = {
   running: false,
@@ -173,12 +194,51 @@ async function startNetworking() {
         onFsRead: (fsPath, offset, maxBytes) => readOsFileChunk(fsPath, offset, maxBytes),
         onFsDelete: (fsPath) => deleteOsPath(fsPath),
         onFsRename: (fsPath, newName) => renameOsPath(fsPath, newName),
-        onTransferComplete: (state) => {
+        onTransferComplete: async (state) => {
+          const destDir = resolveDownloadDir();
+          try {
+            mkdirSync(destDir, { recursive: true });
+          } catch {
+            // continue with best-effort write
+          }
+          const savedPaths: string[] = [];
+          try {
+            // Prefer disk-backed path; fall back to in-memory chunks
+            let blob: Buffer | null = null;
+            if (state.diskPath && existsSync(state.diskPath)) {
+              blob = await readFile(state.diskPath);
+            } else if (state.chunks?.length) {
+              blob = Buffer.concat(state.chunks.map((c) => Buffer.from(c)));
+            }
+            if (blob && state.files.length > 0) {
+              let offset = 0;
+              for (const file of state.files) {
+                const size = Math.min(file.size, Math.max(0, blob.length - offset));
+                const safeName = path.basename(file.name).replace(/[^\w.\- ()[\]]+/g, "_") || "file";
+                let dest = path.join(destDir, safeName);
+                // Avoid overwrite: append counter
+                let n = 1;
+                while (existsSync(dest)) {
+                  const ext = path.extname(safeName);
+                  const base = path.basename(safeName, ext);
+                  dest = path.join(destDir, `${base} (${n})${ext}`);
+                  n++;
+                }
+                writeFileSync(dest, blob.subarray(offset, offset + size));
+                savedPaths.push(dest);
+                offset += size;
+              }
+            }
+          } catch (e) {
+            console.warn("[transfer] save failed", e instanceof Error ? e.message : e);
+          }
           mainWindow?.webContents.send("lyra:transfer-complete", {
             transferId: state.transferId,
             receivedBytes: state.receivedBytes,
             files: state.files,
             diskPath: state.diskPath,
+            savedPaths,
+            downloadDir: destDir,
           });
         },
       },
@@ -232,7 +292,50 @@ function resolvePackagedWebIndex(): string | null {
   return null;
 }
 
+function installApplicationMenu() {
+  // T3-style: no classic File/Edit/View chrome. Keep a minimal macOS app menu only.
+  if (process.platform === "darwin") {
+    Menu.setApplicationMenu(
+      Menu.buildFromTemplate([
+        {
+          label: app.name,
+          submenu: [
+            { role: "about" },
+            { type: "separator" },
+            { role: "hide" },
+            { role: "hideOthers" },
+            { role: "unhide" },
+            { type: "separator" },
+            { role: "quit" },
+          ],
+        },
+        {
+          label: "Edit",
+          submenu: [
+            { role: "undo" },
+            { role: "redo" },
+            { type: "separator" },
+            { role: "cut" },
+            { role: "copy" },
+            { role: "paste" },
+            { role: "selectAll" },
+          ],
+        },
+        {
+          label: "Window",
+          submenu: [{ role: "minimize" }, { role: "zoom" }, { type: "separator" }, { role: "front" }],
+        },
+      ]),
+    );
+  } else {
+    Menu.setApplicationMenu(null);
+  }
+}
+
 function createWindow() {
+  const isMac = process.platform === "darwin";
+  const isWin = process.platform === "win32";
+
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
@@ -241,6 +344,23 @@ function createWindow() {
     title: "Lyra",
     show: false,
     backgroundColor: "#0B0F17",
+    // Merge window chrome with the app shell (sidebar drag region in renderer).
+    autoHideMenuBar: true,
+    titleBarStyle: isMac || isWin ? "hidden" : "default",
+    ...(isMac
+      ? {
+          trafficLightPosition: { x: 16, y: 18 },
+        }
+      : {}),
+    ...(isWin
+      ? {
+          titleBarOverlay: {
+            color: "#0B0F17",
+            symbolColor: "#F5F7FF",
+            height: 44,
+          },
+        }
+      : {}),
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -313,6 +433,8 @@ if (!gotLock) {
 }
 
 app.whenReady().then(async () => {
+  installApplicationMenu();
+
   ipcMain.handle("lyra:get-peer-status", () => ({
     running: status.running,
     port: status.port,
@@ -323,6 +445,56 @@ app.whenReady().then(async () => {
   }));
 
   ipcMain.handle("lyra:get-identity", () => status.identity);
+
+  ipcMain.handle("lyra:get-shell-info", () => ({
+    platform: process.platform,
+    isDesktop: true,
+    downloadDirectory: resolveDownloadDir(),
+  }));
+
+  ipcMain.handle("lyra:get-download-directory", () => resolveDownloadDir());
+
+  ipcMain.handle("lyra:set-download-directory", (_e, dir: string | null) => {
+    if (!dir) {
+      downloadDirectory = null;
+      return { ok: true as const, path: resolveDownloadDir() };
+    }
+    const trimmed = String(dir).trim();
+    if (!trimmed) {
+      downloadDirectory = null;
+      return { ok: true as const, path: resolveDownloadDir() };
+    }
+    try {
+      mkdirSync(trimmed, { recursive: true });
+      downloadDirectory = trimmed;
+      return { ok: true as const, path: downloadDirectory };
+    } catch (e) {
+      return {
+        ok: false as const,
+        error: e instanceof Error ? e.message : String(e),
+        path: resolveDownloadDir(),
+      };
+    }
+  });
+
+  ipcMain.handle("lyra:choose-download-directory", async () => {
+    const result = await dialog.showOpenDialog(mainWindow!, {
+      title: "Choose download folder",
+      properties: ["openDirectory", "createDirectory"],
+      defaultPath: resolveDownloadDir(),
+    });
+    if (result.canceled || !result.filePaths[0]) {
+      return { ok: false as const, cancelled: true as const, path: resolveDownloadDir() };
+    }
+    downloadDirectory = result.filePaths[0];
+    return { ok: true as const, path: downloadDirectory };
+  });
+
+  ipcMain.handle("lyra:open-path", async (_e, targetPath: string) => {
+    if (!targetPath) return { ok: false as const };
+    const err = await shell.openPath(targetPath);
+    return { ok: !err, error: err || undefined };
+  });
 
   ipcMain.handle("lyra:restart-networking", async () => {
     await stopNetworking();

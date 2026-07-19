@@ -24,12 +24,22 @@ export default function DevicesScreen() {
       s.incomingPairRequests.length > 0 || s.transfers.some((t) => t.status === "conflict"),
   );
   const devices = useLyraSelector((s) =>
-    s.devices.filter((d) => d.showInMainList).sort((a, b) => Number(b.online) - Number(a.online)),
+    s.devices
+      .filter((d) => d.authSecret || (d.showInMainList && d.id.startsWith("demo_")))
+      .sort((a, b) => Number(b.online) - Number(a.online)),
+  );
+  const nearby = useLyraSelector((s) =>
+    s.devices
+      .filter((d) => !d.authSecret && !d.id.startsWith("demo_") && Boolean(d.host))
+      .sort((a, b) => Number(b.online) - Number(a.online)),
   );
   const discoveryEnabled = useLyraSelector((s) => s.settings.discoveryEnabled);
   const [manualHost, setManualHost] = useState("");
   const [openUrl, setOpenUrl] = useState("");
-  const onlineIds = useLyraSelector((s) => s.devices.filter((d) => d.online).map((d) => d.id));
+  const [trustBusy, setTrustBusy] = useState<string | null>(null);
+  const onlineIds = useLyraSelector((s) =>
+    s.devices.filter((d) => d.online && (d.authSecret || d.id.startsWith("demo_"))).map((d) => d.id),
+  );
   const bg = isDark ? PAGE_BG.dark : PAGE_BG.light;
   const ink = isDark ? "#F5F7FF" : "#0B1220";
   const muted = isDark ? "rgba(255,255,255,0.55)" : "rgba(0,0,0,0.45)";
@@ -55,14 +65,27 @@ export default function DevicesScreen() {
         copyToCacheDirectory: true,
       });
       if (result.canceled || !result.assets?.length) return;
-      store.startFileTransfer(
-        [deviceId],
-        result.assets.map((a) => ({
-          name: a.name,
-          size: a.size ?? 1024,
-          mimeType: a.mimeType ?? undefined,
-        })),
+      const prepared = await Promise.all(
+        result.assets.map(async (a) => {
+          let bytes: Uint8Array | undefined;
+          try {
+            if (a.uri && (a.size ?? 0) <= 32 * 1024 * 1024) {
+              const res = await fetch(a.uri);
+              const buf = await res.arrayBuffer();
+              bytes = new Uint8Array(buf);
+            }
+          } catch {
+            bytes = undefined;
+          }
+          return {
+            name: a.name,
+            size: a.size ?? bytes?.byteLength ?? 1024,
+            mimeType: a.mimeType ?? undefined,
+            bytes,
+          };
+        }),
       );
+      store.startFileTransfer([deviceId], prepared);
     } catch {
       // user cancelled or picker unavailable
     }
@@ -112,7 +135,10 @@ export default function DevicesScreen() {
         <View style={{ gap: 12, paddingHorizontal: 16 }}>
           <View style={{ backgroundColor: card, borderRadius: 22, gap: 10, padding: 14 }}>
             <Text style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 14 }}>
-              Add by address
+              Find by address (nearby)
+            </Text>
+            <Text style={{ color: muted, fontFamily: fonts.regular, fontSize: 12 }}>
+              Does not pair yet — use Pair on the nearby card, or the link button for QR/code.
             </Text>
             <TextInput
               onChangeText={setManualHost}
@@ -151,10 +177,72 @@ export default function DevicesScreen() {
               }}
             >
               <Text style={{ color: "#fff", fontFamily: fonts.semiBold, fontSize: 13 }}>
-                Add peer
+                Find peer
               </Text>
             </Pressable>
           </View>
+
+          {nearby.length > 0 ? (
+            <View style={{ gap: 8 }}>
+              <Text style={{ color: muted, fontFamily: fonts.semiBold, fontSize: 13 }}>
+                Nearby — not paired
+              </Text>
+              {nearby.map((device) => (
+                <View
+                  key={device.id}
+                  style={{
+                    backgroundColor: card,
+                    borderColor: isDark ? "rgba(122,162,255,0.25)" : "rgba(47,107,255,0.2)",
+                    borderRadius: 20,
+                    borderStyle: "dashed",
+                    borderWidth: 1,
+                    padding: 14,
+                  }}
+                >
+                  <Text style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 15 }}>
+                    {device.nickname || device.name}
+                  </Text>
+                  <Text style={{ color: muted, fontFamily: fonts.regular, fontSize: 12, marginTop: 2 }}>
+                    {device.host}
+                    {device.port ? `:${device.port}` : ""} · {device.online ? "online" : "offline"}
+                  </Text>
+                  <View style={{ flexDirection: "row", gap: 8, marginTop: 12 }}>
+                    <Pressable
+                      disabled={!device.host || trustBusy === device.id}
+                      onPress={() => {
+                        setTrustBusy(device.id);
+                        void store.trustDevice(device.id).finally(() => setTrustBusy(null));
+                      }}
+                      style={{
+                        backgroundColor: accent,
+                        borderRadius: 999,
+                        opacity: trustBusy === device.id ? 0.7 : 1,
+                        paddingHorizontal: 14,
+                        paddingVertical: 8,
+                      }}
+                    >
+                      <Text style={{ color: "#fff", fontFamily: fonts.semiBold, fontSize: 13 }}>
+                        {trustBusy === device.id ? "Pairing…" : "Pair"}
+                      </Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={() => store.unpairDevice(device.id)}
+                      style={{
+                        backgroundColor: isDark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.04)",
+                        borderRadius: 999,
+                        paddingHorizontal: 14,
+                        paddingVertical: 8,
+                      }}
+                    >
+                      <Text style={{ color: ink, fontFamily: fonts.medium, fontSize: 13 }}>
+                        Dismiss
+                      </Text>
+                    </Pressable>
+                  </View>
+                </View>
+              ))}
+            </View>
+          ) : null}
 
           <Pressable
             onPress={() => {

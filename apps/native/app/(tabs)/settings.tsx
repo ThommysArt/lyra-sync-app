@@ -1,8 +1,9 @@
 import { formatFingerprint } from "@lyra-sync-app/core";
-import { Pressable, ScrollView, Switch, Text, TextInput, View } from "react-native";
+import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { useState } from "react";
 
 import { ScreenHeader, useTabBottomPadding } from "@/components/ui/screen-header";
+import { IosSwitch } from "@/components/ui/ios-switch";
 import { useAppTheme } from "@/contexts/app-theme-context";
 import { ACCENT, ACCENT_DARK, fonts, PAGE_BG } from "@/lib/constants";
 import { useLyraSelector, useLyraStore } from "@/lib/lyra";
@@ -13,7 +14,9 @@ export default function SettingsScreen() {
   const bottomPad = useTabBottomPadding();
   const identity = useLyraSelector((s) => s.identity);
   const settings = useLyraSelector((s) => s.settings);
-  const devices = useLyraSelector((s) => s.devices);
+  const devices = useLyraSelector((s) =>
+    s.devices.filter((d) => d.authSecret || d.id.startsWith("demo_")),
+  );
   const peerServer = useLyraSelector((s) => s.peerServer);
   const lastProbeSummary = useLyraSelector((s) => s.lastProbeSummary);
   const hasTopBanners = useLyraSelector(
@@ -319,12 +322,7 @@ function Row({
       }}
     >
       <Text style={{ color: ink, flex: 1, fontFamily: fonts.medium, fontSize: 15 }}>{label}</Text>
-      <Switch
-        trackColor={{ false: "#767577", true: accent }}
-        thumbColor="#fff"
-        value={value}
-        onValueChange={onValueChange}
-      />
+      <IosSwitch accent={accent} value={value} onValueChange={onValueChange} />
     </View>
   );
 }
