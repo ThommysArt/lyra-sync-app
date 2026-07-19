@@ -9,6 +9,12 @@ export default defineConfig({
   // Absolute "/assets/..." breaks under AppImage/asar resources.
   base: "./",
   server: {
+    // Listen on 0.0.0.0 so LAN / Tailscale can reach the UI (same as `vite --host`).
+    host: true,
+    port: 3001,
+  },
+  preview: {
+    host: true,
     port: 3001,
   },
   resolve: {

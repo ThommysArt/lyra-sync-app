@@ -15,6 +15,7 @@ import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { KeyboardProvider } from "react-native-keyboard-controller";
 
 import { ClipboardMonitor } from "@/components/clipboard-monitor";
+import { ToastListener } from "@/components/toast-listener";
 import { AppThemeProvider, useAppTheme } from "@/contexts/app-theme-context";
 import { LyraProvider } from "@/lib/lyra";
 
@@ -82,6 +83,7 @@ export default function Layout() {
             <LyraProvider>
               <RootNavigator />
               <ClipboardMonitor />
+              <ToastListener />
             </LyraProvider>
           </HeroUINativeProvider>
         </AppThemeProvider>

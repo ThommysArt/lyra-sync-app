@@ -1,7 +1,8 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { Link2, Plus, Radar, Send } from "lucide-react";
+import { Link2, Plus, Radar, Send, ShieldCheck } from "lucide-react";
 import { useState } from "react";
 
+import { Badge } from "@lyra-sync-app/ui/components/badge";
 import { Button } from "@lyra-sync-app/ui/components/button";
 import { Card, CardContent } from "@lyra-sync-app/ui/components/card";
 import { Input } from "@lyra-sync-app/ui/components/input";
@@ -9,17 +10,40 @@ import { Label } from "@lyra-sync-app/ui/components/label";
 import { DeviceCard } from "@/components/device-card";
 import { PairingDialog } from "@/components/pairing-dialog";
 import { readSystemClipboard } from "@/lib/clipboard";
-import { pickFiles } from "@/lib/file-picker";
+import { materializeFileBytes, pickFiles, type PickedFile } from "@/lib/file-picker";
 import { useLyraSelector, useLyraStore } from "@/lib/lyra";
 
 export const Route = createFileRoute("/")({
   component: DevicesPage,
 });
 
+async function prepareFilesForWire(files: PickedFile[]) {
+  return Promise.all(
+    files.map(async (f) => {
+      const bytes = f.bytes ?? (f.file ? await materializeFileBytes(f.file) : undefined);
+      return {
+        name: f.name,
+        size: f.size,
+        mimeType: f.mimeType,
+        relativePath: f.relativePath,
+        bytes,
+      };
+    }),
+  );
+}
+
 function DevicesPage() {
   const store = useLyraStore();
+  // Trusted network only (paired with authSecret, or demo seeds shown in main list)
   const devices = useLyraSelector((s) =>
-    s.devices.filter((d) => d.showInMainList).sort((a, b) => Number(b.online) - Number(a.online)),
+    s.devices
+      .filter((d) => d.authSecret || (d.showInMainList && d.id.startsWith("demo_")))
+      .sort((a, b) => Number(b.online) - Number(a.online)),
+  );
+  const nearby = useLyraSelector((s) =>
+    s.devices
+      .filter((d) => !d.authSecret && !d.id.startsWith("demo_") && Boolean(d.host))
+      .sort((a, b) => Number(b.online) - Number(a.online)),
   );
   const localClipboard = useLyraSelector((s) => s.localClipboardText);
   const discoveryEnabled = useLyraSelector((s) => s.settings.discoveryEnabled);
@@ -30,6 +54,7 @@ function DevicesPage() {
   const [manualPort, setManualPort] = useState("53317");
   const [manualName, setManualName] = useState("");
   const [manualError, setManualError] = useState<string | null>(null);
+  const [trustBusy, setTrustBusy] = useState<string | null>(null);
 
   const filtered = devices.filter((d) => {
     const name = (d.nickname || d.name).toLowerCase();
@@ -49,10 +74,8 @@ function DevicesPage() {
   const sendFilesTo = async (deviceId: string) => {
     const files = await pickFiles({ multiple: true });
     if (files.length === 0) return;
-    store.startFileTransfer(
-      [deviceId],
-      files.map((f) => ({ name: f.name, size: f.size, mimeType: f.mimeType })),
-    );
+    const prepared = await prepareFilesForWire(files);
+    store.startFileTransfer([deviceId], prepared);
   };
 
   const addManual = () => {
@@ -112,9 +135,10 @@ function DevicesPage() {
       <Card className="rounded-4xl">
         <CardContent className="space-y-3 p-4">
           <div>
-            <p className="text-sm font-medium">Add device by address</p>
+            <p className="text-sm font-medium">Find device by address</p>
             <p className="text-xs text-muted-foreground">
-              Manual IP / hostname when multicast discovery cannot see a peer (default port 53317).
+              Adds a <strong>nearby</strong> peer (not trusted yet). Use Pair to establish trust.
+              Default port 53317.
             </p>
           </div>
           <div className="grid gap-3 sm:grid-cols-[1fr_7rem_1fr_auto]">
@@ -192,6 +216,52 @@ function DevicesPage() {
         </div>
       </div>
 
+      {nearby.length > 0 ? (
+        <section className="space-y-3">
+          <div className="flex items-center gap-2">
+            <h2 className="text-sm font-semibold tracking-tight">Nearby (not paired)</h2>
+            <Badge variant="outline" className="rounded-full">
+              {nearby.length}
+            </Badge>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Discovered on the LAN or added by address. Pairing is separate — accept once on each
+            device to trust.
+          </p>
+          <div className="grid gap-3 sm:grid-cols-2">
+            {nearby.map((device) => (
+              <Card key={device.id} className="rounded-3xl border-dashed border-border/80">
+                <CardContent className="flex items-center justify-between gap-3 p-4">
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium">{device.nickname || device.name}</p>
+                    <p className="truncate text-xs text-muted-foreground">
+                      {device.host}
+                      {device.port ? `:${device.port}` : ""} · {device.online ? "online" : "offline"}
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 gap-2">
+                    <Button
+                      size="sm"
+                      disabled={!device.host || trustBusy === device.id}
+                      onClick={() => {
+                        setTrustBusy(device.id);
+                        void store.trustDevice(device.id).finally(() => setTrustBusy(null));
+                      }}
+                    >
+                      <ShieldCheck className="size-3.5" />
+                      Pair
+                    </Button>
+                    <Button size="sm" variant="ghost" onClick={() => store.unpairDevice(device.id)}>
+                      Dismiss
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        </section>
+      ) : null}
+
       {filtered.length === 0 ? (
         <div className="flex flex-col items-center justify-center rounded-4xl border border-dashed border-border px-6 py-16 text-center">
           <div className="mb-3 flex size-12 items-center justify-center rounded-full bg-primary/10 text-primary">
@@ -199,11 +269,15 @@ function DevicesPage() {
           </div>
           <h2 className="font-medium">No paired devices yet</h2>
           <p className="mt-1 max-w-sm text-sm text-muted-foreground">
-            Pair a phone or computer to sync clipboard and transfer files privately on your network.
+            On the same Wi‑Fi, tap <strong>Refresh discovery</strong> so devices appear under Nearby,
+            then Pair — or share a pairing code. Discovery alone does not create trust.
           </p>
-          <Button className="mt-4" onClick={() => setPairOpen(true)}>
-            Pair your first device
-          </Button>
+          <div className="mt-4 flex flex-wrap justify-center gap-2">
+            <Button variant="secondary" onClick={() => void store.refreshDiscovery()}>
+              Refresh discovery
+            </Button>
+            <Button onClick={() => setPairOpen(true)}>Pair with code</Button>
+          </div>
         </div>
       ) : (
         <div className="grid gap-4 sm:grid-cols-2">
@@ -215,10 +289,9 @@ function DevicesPage() {
               onSendFiles={() => void sendFilesTo(device.id)}
               onDropFiles={(files) => {
                 if (!device.online || files.length === 0) return;
-                store.startFileTransfer(
-                  [device.id],
-                  files.map((f) => ({ name: f.name, size: f.size, mimeType: f.mimeType })),
-                );
+                void prepareFilesForWire(files).then((prepared) => {
+                  store.startFileTransfer([device.id], prepared);
+                });
               }}
             />
           ))}

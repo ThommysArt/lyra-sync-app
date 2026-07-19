@@ -1,7 +1,8 @@
 import { LyraProvider as BaseLyraProvider, useLyraSelector, useLyraState, useLyraStore } from "@lyra-sync-app/hooks";
 import type { ReactNode } from "react";
-import { useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 import { ActivityIndicator, View } from "react-native";
+import * as Network from "expo-network";
 
 import { ACCENT, PAGE_BG } from "@/lib/constants";
 import { useAppTheme } from "@/contexts/app-theme-context";
@@ -20,16 +21,27 @@ export function LyraProvider({ children }: { children: ReactNode }) {
     void migratePrivateKeyToSecureStore(storage);
   }, [storage]);
 
+  /** Seed /24 LAN scan for pairing-code lookup when possible */
+  const onStoreReady = useCallback((store: import("@lyra-sync-app/core").LyraStore) => {
+    void Network.getIpAddressAsync()
+      .then((ip) => {
+        if (ip && ip !== "0.0.0.0") store.setLocalLanHint(ip);
+      })
+      .catch(() => {
+        // ignore — pairing still works with manual/discovered hosts
+      });
+  }, []);
+
   return (
     <BaseLyraProvider
       storage={storage}
-      // Seed demo mesh only when explicitly requested or __DEV__
+      // Opt-in dummy mesh only (never default in dev)
       seedDemo={
-        typeof __DEV__ !== "undefined"
-          ? __DEV__
-          : process.env.EXPO_PUBLIC_LYRA_SEED_DEMO === "1"
+        process.env.EXPO_PUBLIC_LYRA_SEED_DEMO === "1" ||
+        process.env.EXPO_PUBLIC_LYRA_SEED_DEMO === "true"
       }
       platformHint="native"
+      onStoreReady={onStoreReady}
       fallback={
         <View
           style={{

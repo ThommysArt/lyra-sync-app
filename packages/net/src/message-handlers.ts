@@ -38,6 +38,15 @@ export const PUBLIC_MESSAGE_TYPES = new Set([
 
 export type IncomingPairHandler = (payload: PairingPayload & { code?: string }) => void | Promise<void>;
 
+/**
+ * Optional long-poll gate for pair_request: host UI Accept/Decline.
+ * When provided, pair_request waits until this resolves instead of returning a provisional ack.
+ */
+export type WaitForPairDecision = (payload: PairingPayload & { code?: string }) => Promise<
+  | { accepted: true; host?: string; port?: number }
+  | { accepted: false; reason?: string }
+>;
+
 export type ClipboardPushHandler = (item: Omit<ClipboardItem, "pinned"> & { pinned?: boolean }) => void | Promise<void>;
 
 export type OpenUrlHandler = (url: string, title?: string) => boolean | Promise<boolean>;
@@ -83,6 +92,11 @@ export type MessageHandlerContext = {
   identity: DeviceIdentity;
   /** Trusted peer lookup for auth secrets is separate; this is app callbacks */
   onPairRequest?: IncomingPairHandler;
+  /**
+   * When set, pair_request blocks until the host user Accepts/Declines.
+   * Used for code-based same-network pairing.
+   */
+  waitForPairDecision?: WaitForPairDecision;
   onPairConfirm?: (payload: {
     identity: DeviceIdentity;
     token: string;
@@ -143,18 +157,45 @@ export async function handlePeerEnvelope(
     case "pair_request": {
       const parsed = PairRequestPayloadSchema.safeParse(envelope.payload);
       if (!parsed.success) return { ok: false, error: "Invalid pair_request" };
-      // Dual-confirm: queue for local user accept; do not auto pair_confirm.
+      // Register long-poll waiter first so Accept cannot race past it, then notify UI.
+      if (ctx.waitForPairDecision) {
+        const decisionPromise = ctx.waitForPairDecision(parsed.data);
+        await ctx.onPairRequest?.(parsed.data);
+        const decision = await decisionPromise;
+        if (!decision.accepted) {
+          return createEnvelope({
+            type: "pair_reject",
+            fromDeviceId: ctx.identity.id,
+            toDeviceId: from,
+            payload: {
+              deviceId: ctx.identity.id,
+              reason: decision.reason ?? "rejected",
+            },
+          });
+        }
+        return createEnvelope({
+          type: "pair_confirm",
+          fromDeviceId: ctx.identity.id,
+          toDeviceId: from,
+          payload: {
+            identity: ctx.identity,
+            token: parsed.data.token,
+            publicKey: ctx.identity.publicKey,
+            host: decision.host,
+            port: decision.port,
+          },
+        });
+      }
+      // No long-poll gate (e.g. unit tests): notify + confirm immediately.
       await ctx.onPairRequest?.(parsed.data);
       return createEnvelope({
         type: "pair_confirm",
         fromDeviceId: ctx.identity.id,
         toDeviceId: from,
         payload: {
-          // Provisional ack only — full trust requires host user confirm + authSecret.
           identity: ctx.identity,
           token: parsed.data.token,
           publicKey: ctx.identity.publicKey,
-          pending: true,
         },
       });
     }

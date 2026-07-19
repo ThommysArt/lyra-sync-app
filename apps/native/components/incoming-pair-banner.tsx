@@ -1,4 +1,5 @@
-import { Pressable, Text, View } from "react-native";
+import { useState } from "react";
+import { ActivityIndicator, Pressable, Text, View } from "react-native";
 
 import { useAppTheme } from "@/contexts/app-theme-context";
 import { ACCENT, ACCENT_DARK, fonts } from "@/lib/constants";
@@ -9,9 +10,11 @@ export function IncomingPairBanner() {
   const { isDark } = useAppTheme();
   const requests = useLyraSelector((s) => s.incomingPairRequests);
   const accent = isDark ? ACCENT_DARK : ACCENT;
+  const [busyId, setBusyId] = useState<string | null>(null);
 
   if (requests.length === 0) return null;
   const req = requests[0]!;
+  const busy = busyId === req.id;
 
   return (
     <View
@@ -41,10 +44,16 @@ export function IncomingPairBanner() {
       </View>
       <View style={{ flexDirection: "row", gap: 8 }}>
         <Pressable
-          onPress={() => store.rejectIncomingPair(req.id)}
+          disabled={busy}
+          onPress={() => {
+            setBusyId(req.id);
+            store.rejectIncomingPair(req.id);
+            setBusyId(null);
+          }}
           style={{
             backgroundColor: isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)",
             borderRadius: 999,
+            opacity: busy ? 0.6 : 1,
             paddingHorizontal: 14,
             paddingVertical: 8,
           }}
@@ -60,15 +69,28 @@ export function IncomingPairBanner() {
           </Text>
         </Pressable>
         <Pressable
-          onPress={() => store.confirmIncomingPair(req.id)}
+          disabled={busy}
+          onPress={() => {
+            setBusyId(req.id);
+            void Promise.resolve(store.confirmIncomingPair(req.id)).finally(() => {
+              setBusyId(null);
+            });
+          }}
           style={{
+            alignItems: "center",
             backgroundColor: accent,
             borderRadius: 999,
+            flexDirection: "row",
+            gap: 6,
+            opacity: busy ? 0.85 : 1,
             paddingHorizontal: 14,
             paddingVertical: 8,
           }}
         >
-          <Text style={{ color: "#fff", fontFamily: fonts.semiBold, fontSize: 13 }}>Accept</Text>
+          {busy ? <ActivityIndicator color="#fff" size="small" /> : null}
+          <Text style={{ color: "#fff", fontFamily: fonts.semiBold, fontSize: 13 }}>
+            {busy ? "Pairing…" : "Accept"}
+          </Text>
         </Pressable>
       </View>
     </View>

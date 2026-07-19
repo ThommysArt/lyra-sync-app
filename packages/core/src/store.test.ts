@@ -81,7 +81,7 @@ describe("createLyraStore", () => {
     assert.equal(store.getState().settings.discoveryEnabled, false);
   });
 
-  it("dual-confirm pairing derives authSecret", async () => {
+  it("unknown pairing code fails without inventing a fake peer", async () => {
     const store = createLyraStore({
       storage: memoryStorage(),
       seedDemo: false,
@@ -89,15 +89,96 @@ describe("createLyraStore", () => {
     });
     await store.hydrate();
     const submit = await store.submitPairingCode("AB12CD");
-    assert.equal(submit.ok, true);
-    if (!submit.ok || !("pending" in submit)) throw new Error("expected pending");
-    assert.equal(submit.pending, true);
+    assert.equal(submit.ok, false);
+    if (submit.ok) throw new Error("expected failure");
+    assert.match(submit.error, /No device found/i);
     assert.equal(store.getState().devices.length, 0);
+    assert.equal(store.getState().incomingPairRequests.length, 0);
+  });
+
+  it("host accept of wire pair request derives authSecret", async () => {
+    const store = createLyraStore({
+      storage: memoryStorage(),
+      seedDemo: false,
+      platformHint: "web",
+    });
+    await store.hydrate();
+    store.startPairingSession();
+    const token = store.getState().activePairing!.token;
+    store.enqueuePairRequest({
+      version: 1,
+      deviceId: "joiner_dev",
+      name: "Joiner Phone",
+      type: "mobile",
+      platform: "android",
+      fingerprint: "joinerfingerprint0001abcdef",
+      publicKey: "pub_joiner",
+      token,
+      host: "192.168.1.40",
+      port: 53317,
+      expiresAt: Date.now() + 60_000,
+    });
     assert.equal(store.getState().incomingPairRequests.length, 1);
-    await store.confirmIncomingPair(submit.requestId);
+    const requestId = store.getState().incomingPairRequests[0]!.id;
+    await store.confirmIncomingPair(requestId);
     const devices = store.getState().devices;
     assert.equal(devices.length, 1);
+    assert.equal(devices[0]!.id, "joiner_dev");
     assert.ok(devices[0]!.authSecret && devices[0]!.authSecret.length >= 16);
+    assert.equal(store.getState().incomingPairRequests.length, 0);
+  });
+
+  it("does not re-queue pair request for already trusted device", async () => {
+    const store = createLyraStore({
+      storage: memoryStorage(),
+      seedDemo: false,
+      platformHint: "web",
+    });
+    await store.hydrate();
+    store.enqueuePairRequest({
+      version: 1,
+      deviceId: "peer_a",
+      name: "Peer A",
+      type: "desktop",
+      platform: "linux",
+      fingerprint: "peeraaaaaaaaaaaaaaaaaaaaaaa",
+      publicKey: "pub_a",
+      token: "tok_1",
+      host: "192.168.1.10",
+      port: 53317,
+      expiresAt: Date.now() + 60_000,
+    });
+    await store.confirmIncomingPair(store.getState().incomingPairRequests[0]!.id);
+    const device = store.getState().devices[0]!;
+    store.enqueuePairRequest({
+      version: 1,
+      deviceId: device.id,
+      name: device.name,
+      type: device.type,
+      platform: device.platform,
+      fingerprint: device.fingerprint,
+      publicKey: device.publicKey,
+      token: "tok_again",
+      host: "192.168.1.50",
+      port: 53317,
+      expiresAt: Date.now() + 60_000,
+    });
+    assert.equal(store.getState().incomingPairRequests.length, 0);
+    assert.equal(store.getState().devices[0]!.host, "192.168.1.50");
+  });
+
+  it("manual peers are nearby not trusted", async () => {
+    const store = createLyraStore({
+      storage: memoryStorage(),
+      seedDemo: false,
+      platformHint: "web",
+    });
+    await store.hydrate();
+    const res = store.addManualPeer({ host: "10.0.0.9", name: "Lab" });
+    assert.equal(res.ok, true);
+    if (!res.ok) throw new Error("expected ok");
+    assert.equal(res.device.showInMainList, false);
+    assert.equal(res.device.authSecret, undefined);
   });
 
   it("stores clipboard images in history", async () => {

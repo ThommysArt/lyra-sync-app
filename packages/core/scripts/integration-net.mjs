@@ -1,8 +1,8 @@
 /**
  * Integration: spin up two peer servers, auth, ping, probe via store,
- * dual-confirm authSecret, clipboard wire, multi-chunk transfer.
+ * real code-pairing (host accept long-poll), clipboard wire, multi-chunk transfer.
  */
-import { createDeviceIdentity, createLyraStore } from "@lyra-sync-app/core";
+import { createDeviceIdentity, createLyraStore, hashPairingCode } from "@lyra-sync-app/core";
 import {
   authenticateWithPeer,
   createEnvelope,
@@ -43,11 +43,23 @@ const sharedFromB = await deriveMutualAuthSecret({
 assert(sharedSecret === sharedFromB, "mutual auth secret");
 
 const received = { clipboard: null, pair: null };
+/** Live pairing offer advertised on /lyra/info */
+const livePairCode = "ZZ9K2A";
+const livePairToken = "tok_live_pair";
+const livePairOffer = {
+  codeHash: await hashPairingCode(livePairCode),
+  token: livePairToken,
+  expiresAt: Date.now() + 5 * 60 * 1000,
+};
 
-const serverA = await startPeerServer({
+/** set after startPeerServer so onPairRequest can resolve long-poll */
+let serverA = null;
+
+serverA = await startPeerServer({
   identity: a.identity,
   port: 0,
   host: "127.0.0.1",
+  getPairingOffer: () => livePairOffer,
   resolvePeerAuth: ({ fingerprint }) => {
     if (fingerprint === b.identity.fingerprint) {
       return {
@@ -64,6 +76,13 @@ const serverA = await startPeerServer({
     },
     onPairRequest: (payload) => {
       received.pair = payload;
+      // Host user Accept (simulated) — unblocks joiner long-poll
+      setTimeout(() => {
+        serverA.resolvePairRequest(
+          { deviceId: payload.deviceId, token: payload.token },
+          { accepted: true, host: "127.0.0.1", port: serverA.port },
+        );
+      }, 30);
     },
   },
 });
@@ -166,11 +185,16 @@ try {
   store.resumeTransfer(tx.id);
   assert(store.getState().transfers[0].status === "transferring", "resumed");
 
-  // dual-confirm + authSecret in store
-  const pending = await store.submitPairingCode("ZZ9K2A");
-  assert(pending.ok && pending.pending, "pair pending");
-  await store.confirmIncomingPair(pending.requestId);
-  assert(store.getState().devices.some((d) => d.authSecret), "authSecret stored");
+  // Real code pairing: store finds A's offer, waits for host Accept, stores authSecret
+  const infoOffer = await fetchPeerInfo({ host: "127.0.0.1", port: serverA.port });
+  assert(infoOffer.ok && infoOffer.pairing?.token === livePairToken, "pairing offer advertised");
+
+  // Joiner knows a candidate address (LAN discovery / manual); ephemeral test port ≠ default
+  store.addManualPeer({ host: "127.0.0.1", port: serverA.port, name: "Host A" });
+  const paired = await store.submitPairingCode(livePairCode);
+  assert(paired.ok && "device" in paired, "code pair completed " + (paired.ok ? "" : paired.error));
+  assert(store.getState().devices.some((d) => d.authSecret && d.id === a.identity.id), "authSecret for host A");
+  assert(received.pair?.token === livePairToken, "host received pair_request");
 
   // unpair revoke sessions
   const n = serverA.revokeDevice(b.identity.id);

@@ -97,6 +97,10 @@ export type PeerServerOptions = {
   cors?: boolean | string[];
 };
 
+export type PeerPairDecision =
+  | { accepted: true; host?: string; port?: number }
+  | { accepted: false; reason?: string };
+
 export type PeerServer = {
   server: HttpServer | HttpsServer;
   port: number;
@@ -109,6 +113,19 @@ export type PeerServer = {
   close: () => Promise<void>;
   getSessions: () => Map<string, AuthSession>;
   revokeDevice: (deviceId: string) => number;
+  /**
+   * Resolve a waiting pair_request (host user Accept / Decline).
+   * Keyed by joiner deviceId and/or pairing token.
+   */
+  resolvePairRequest: (
+    key: { deviceId?: string; token?: string },
+    decision: PeerPairDecision,
+  ) => boolean;
+  /** Update advertised identity without restarting the server. */
+  setIdentity: (identity: DeviceIdentity) => void;
+  getIdentity: () => DeviceIdentity;
+  /** Local non-loopback IPv4 when available */
+  getLanHost: () => string | null;
 };
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -170,8 +187,10 @@ function getLocalIPv4(): string | null {
 }
 
 export async function startPeerServer(options: PeerServerOptions): Promise<PeerServer> {
-  const port = options.port ?? LYRA_DEFAULT_PORT;
+  const requestedPort = options.port ?? LYRA_DEFAULT_PORT;
   const host = options.host ?? "0.0.0.0";
+  /** Updated after listen when port is 0 (ephemeral) */
+  let boundPort = requestedPort;
   const challenges = new Map<string, AuthChallengePayload>();
   const sessions = new Map<string, AuthSession>();
   const transfers = new Map<string, TransferReceiveState>();
@@ -179,9 +198,71 @@ export async function startPeerServer(options: PeerServerOptions): Promise<PeerS
   const allowFirstContact = options.allowFirstContactAuth !== false;
   const sealReplies = options.sealReplies !== false;
 
+  /** Mutable identity so renderer can sync after hydrate */
+  let currentIdentity: DeviceIdentity = options.identity;
+
+  type PendingPair = {
+    deviceId: string;
+    token: string;
+    resolve: (decision: PeerPairDecision) => void;
+    timer: ReturnType<typeof setTimeout>;
+  };
+  const pendingPairs = new Map<string, PendingPair>();
+
+  const pairKey = (deviceId: string, token: string) => `${token}::${deviceId}`;
+
+  const waitForPairDecision: MessageHandlerContext["waitForPairDecision"] = (payload) => {
+    const key = pairKey(payload.deviceId, payload.token);
+    // Replace any stale waiter for the same joiner/token
+    const existing = pendingPairs.get(key);
+    if (existing) {
+      clearTimeout(existing.timer);
+      existing.resolve({ accepted: false, reason: "superseded" });
+      pendingPairs.delete(key);
+    }
+    return new Promise<PeerPairDecision>((resolve) => {
+      const timer = setTimeout(() => {
+        pendingPairs.delete(key);
+        resolve({ accepted: false, reason: "timeout" });
+      }, 120_000);
+      pendingPairs.set(key, {
+        deviceId: payload.deviceId,
+        token: payload.token,
+        resolve: (decision) => {
+          clearTimeout(timer);
+          pendingPairs.delete(key);
+          resolve(decision);
+        },
+        timer,
+      });
+    });
+  };
+
+  const resolvePairRequest = (
+    key: { deviceId?: string; token?: string },
+    decision: PeerPairDecision,
+  ): boolean => {
+    // Match by exact key, or by deviceId / token alone
+    let matched = false;
+    for (const [k, pending] of pendingPairs) {
+      const byDevice = key.deviceId && pending.deviceId === key.deviceId;
+      const byToken = key.token && pending.token === key.token;
+      if (byDevice || byToken || (key.deviceId && key.token && k === pairKey(key.deviceId, key.token))) {
+        pending.resolve(decision);
+        matched = true;
+        // Only resolve one waiter per call when deviceId is unique; break after first if both set
+        if (key.deviceId && key.token) break;
+      }
+    }
+    return matched;
+  };
+
   const handlerCtx: MessageHandlerContext = {
-    identity: options.identity,
+    get identity() {
+      return currentIdentity;
+    },
     transfers,
+    waitForPairDecision,
     revokeDeviceSessions: (deviceId: string) => {
       let n = 0;
       for (const [token, s] of sessions) {
@@ -220,6 +301,11 @@ export async function startPeerServer(options: PeerServerOptions): Promise<PeerS
     ...options.handlers,
   };
 
+  // Ensure waitForPairDecision is not overwritten by handlers spread if they omit it
+  if (!handlerCtx.waitForPairDecision) {
+    handlerCtx.waitForPairDecision = waitForPairDecision;
+  }
+
   let tlsMaterial: { key: string; cert: string; fingerprintSha256?: string } | null = null;
   if (options.tls === true) {
     const generated = tryCreateSelfSignedTls({
@@ -250,26 +336,36 @@ export async function startPeerServer(options: PeerServerOptions): Promise<PeerS
       if (req.method === "GET" && url.pathname === "/lyra/info") {
         const lan = getLocalIPv4();
         const pairingOffer = options.getPairingOffer?.() ?? undefined;
+        const pairing =
+          pairingOffer && pairingOffer.expiresAt > Date.now()
+            ? {
+                codeHash: pairingOffer.codeHash,
+                token: pairingOffer.token,
+                expiresAt: pairingOffer.expiresAt,
+              }
+            : undefined;
+        // Helpful when debugging "code not found" — only logs when an offer is active
+        if (pairing) {
+          console.log(
+            "[lyra peer] /lyra/info pairing offer",
+            pairing.codeHash.slice(0, 12),
+            "→",
+            req.socket.remoteAddress,
+          );
+        }
         sendJson(
           res,
           req,
           200,
           {
-            identity: options.identity,
+            identity: currentIdentity,
             status: options.getStatus?.(),
             host: lan ?? undefined,
-            port,
+            port: boundPort,
             protocol: protocol,
             protocolVersion: LYRA_PROTOCOL_VERSION,
             tlsFingerprint: tlsMaterial?.fingerprintSha256,
-            pairing:
-              pairingOffer && pairingOffer.expiresAt > Date.now()
-                ? {
-                    codeHash: pairingOffer.codeHash,
-                    token: pairingOffer.token,
-                    expiresAt: pairingOffer.expiresAt,
-                  }
-                : undefined,
+            pairing,
           },
           cors,
         );
@@ -277,12 +373,12 @@ export async function startPeerServer(options: PeerServerOptions): Promise<PeerS
       }
 
       if (req.method === "GET" && url.pathname === "/lyra/health") {
-        sendJson(res, req, 200, { ok: true, deviceId: options.identity.id }, cors);
+        sendJson(res, req, 200, { ok: true, deviceId: currentIdentity.id }, cors);
         return;
       }
 
       if (req.method === "POST" && url.pathname === "/lyra/auth/challenge") {
-        const challenge = await createAuthChallenge(options.identity);
+        const challenge = await createAuthChallenge(currentIdentity);
         challenges.set(challenge.challengeId, challenge);
         // GC expired
         for (const [id, c] of challenges) {
@@ -397,6 +493,20 @@ export async function startPeerServer(options: PeerServerOptions): Promise<PeerS
           }
         }
 
+        // For pair_request, fill missing host from the TCP peer so mutual pairing can call back
+        if (envelope.type === "pair_request" && envelope.payload && typeof envelope.payload === "object") {
+          const p = envelope.payload as { host?: string };
+          if (!p.host || p.host === "127.0.0.1" || p.host === "0.0.0.0" || p.host === "localhost") {
+            const remote = req.socket.remoteAddress?.replace(/^::ffff:/, "");
+            if (remote && remote !== "127.0.0.1" && remote !== "::1") {
+              envelope = {
+                ...envelope,
+                payload: { ...p, host: remote },
+              };
+            }
+          }
+        }
+
         const msgType = envelope.type;
         if (requireAuth && !PUBLIC_MESSAGE_TYPES.has(msgType) && !session) {
           sendJson(res, req, 401, { error: "Auth required" }, cors);
@@ -438,12 +548,11 @@ export async function startPeerServer(options: PeerServerOptions): Promise<PeerS
 
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
-    server.listen(port, host, () => resolve());
+    server.listen(requestedPort, host, () => resolve());
   });
 
   const address = server.address();
-  const boundPort =
-    address && typeof address === "object" ? address.port : port;
+  boundPort = address && typeof address === "object" ? address.port : requestedPort;
   const protocol = tlsMaterial ? "https" : "http";
 
   return {
@@ -464,8 +573,19 @@ export async function startPeerServer(options: PeerServerOptions): Promise<PeerS
       }
       return n;
     },
+    resolvePairRequest,
+    setIdentity: (next) => {
+      currentIdentity = next;
+    },
+    getIdentity: () => currentIdentity,
+    getLanHost: () => getLocalIPv4(),
     close: () =>
       new Promise((resolve, reject) => {
+        for (const pending of pendingPairs.values()) {
+          clearTimeout(pending.timer);
+          pending.resolve({ accepted: false, reason: "server_closing" });
+        }
+        pendingPairs.clear();
         server.close((err) => (err ? reject(err) : resolve()));
       }),
   };

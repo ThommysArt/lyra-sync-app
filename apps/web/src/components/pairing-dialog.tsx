@@ -2,6 +2,7 @@ import { formatFingerprint } from "@lyra-sync-app/core";
 import { QrCode, Shuffle } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import { useState } from "react";
+import { toast } from "sonner";
 
 import { Button } from "@lyra-sync-app/ui/components/button";
 import {
@@ -29,27 +30,48 @@ export function PairingDialog({
   const store = useLyraStore();
   const identity = useLyraSelector((s) => s.identity);
   const active = useLyraSelector((s) => s.activePairing);
+  const outbound = useLyraSelector((s) => s.outboundPairing);
+  const peerRunning = useLyraSelector((s) => s.peerServer.running);
+  const lanHost = useLyraSelector((s) => s.peerServer.lanHost ?? s.localLanHint);
   const [code, setCode] = useState("");
+  const [hostHint, setHostHint] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [tab, setTab] = useState("show");
   const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
   const open = controlledOpen ?? uncontrolledOpen;
   const setOpen = onOpenChange ?? setUncontrolledOpen;
 
   const startSession = () => {
-    store.startPairingSession();
+    const session = store.startPairingSession();
+    toast.message(`Sharing code ${session.code}`, {
+      description: peerRunning
+        ? "Other devices can enter this code on the same Wi‑Fi."
+        : "Peer server idle — run the desktop app so others can find this code.",
+    });
   };
 
   const onSubmitCode = () => {
-    void store.submitPairingCode(code).then((result) => {
-      if (result.ok) {
-        setCode("");
-        setError(null);
-        // Dual-confirm: pending request uses incoming banner
-        if (result.pending) setOpen(false);
-      } else {
-        setError(result.error);
-      }
-    });
+    setBusy(true);
+    setError(null);
+    void store
+      .submitPairingCode(code, hostHint.trim() ? { host: hostHint.trim() } : undefined)
+      .then((result) => {
+        if (result.ok) {
+          setCode("");
+          setError(null);
+          if ("device" in result) {
+            toast.success(`Paired with ${result.device.name}`);
+            setOpen(false);
+          } else {
+            toast.message("Waiting for the other device to accept…");
+          }
+        } else {
+          setError(result.error);
+          toast.error(result.error);
+        }
+      })
+      .finally(() => setBusy(false));
   };
 
   const qrValue = active ? JSON.stringify(active.payload) : "";
@@ -59,8 +81,12 @@ export function PairingDialog({
       open={open}
       onOpenChange={(next) => {
         setOpen(next);
-        if (next && !active) startSession();
-        if (!next) store.cancelPairingSession();
+        // Do NOT auto-start a code when opening "Enter code" — only host when
+        // the user is on Show code (or taps Generate). Hosting without the
+        // peer server advertising the offer is the #1 cause of "not found".
+        if (next && tab === "show" && !store.getState().activePairing && peerRunning) {
+          startSession();
+        }
       }}
     >
       {trigger ? <DialogTrigger render={trigger as never} /> : null}
@@ -68,12 +94,26 @@ export function PairingDialog({
         <DialogHeader>
           <DialogTitle>Pair a device</DialogTitle>
           <DialogDescription>
-            Scan the QR code or enter a pairing code. Both devices must confirm before trust is
-            stored (auth secret is derived on accept).
+            <strong>Desktop shows the code</strong> (peer server must be running). The other device
+            enters it. Expo Go can enter a code but cannot host one.
           </DialogDescription>
         </DialogHeader>
 
-        <Tabs defaultValue="show">
+        {outbound?.status === "waiting" ? (
+          <p className="rounded-2xl bg-primary/10 px-3 py-2 text-sm text-primary">
+            Waiting for <strong>{outbound.hostName}</strong> to accept pairing…
+          </p>
+        ) : null}
+
+        <Tabs
+          value={tab}
+          onValueChange={(v) => {
+            setTab(v);
+            if (v === "show" && !store.getState().activePairing && peerRunning) {
+              startSession();
+            }
+          }}
+        >
           <TabsList className="grid w-full grid-cols-2 rounded-full">
             <TabsTrigger value="show" className="rounded-full">
               Show code
@@ -84,6 +124,17 @@ export function PairingDialog({
           </TabsList>
 
           <TabsContent value="show" className="space-y-4 pt-3">
+            {!peerRunning ? (
+              <p className="text-xs text-amber-600 dark:text-amber-400">
+                Peer server is idle — other devices cannot discover this code. Use the{" "}
+                <strong>desktop app</strong> (not browser-only / not Expo Go as host).
+              </p>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                Advertising on {lanHost ?? "LAN"}:{store.getState().peerServer.port ?? 53317}
+                {active ? " · offer active" : ""}
+              </p>
+            )}
             {active ? (
               <>
                 <div className="mx-auto w-fit rounded-3xl bg-white p-4 shadow-sm ring-1 ring-border/60">
@@ -103,16 +154,32 @@ export function PairingDialog({
                     {active.code}
                   </p>
                   <p className="mt-2 text-xs text-muted-foreground">
+                    Leave this open (or use Stop sharing). You will be asked to accept when the other
+                    device connects.
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
                     Fingerprint {formatFingerprint(identity?.fingerprint ?? "")}
                   </p>
                 </div>
-                <Button variant="outline" className="w-full" onClick={startSession}>
-                  <Shuffle className="size-4" />
-                  Refresh code
-                </Button>
+                <div className="flex gap-2">
+                  <Button variant="outline" className="flex-1" onClick={startSession}>
+                    <Shuffle className="size-4" />
+                    Refresh code
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    className="flex-1"
+                    onClick={() => {
+                      store.cancelPairingSession();
+                      toast.message("Stopped sharing code");
+                    }}
+                  >
+                    Stop sharing
+                  </Button>
+                </div>
               </>
             ) : (
-              <Button className="w-full" onClick={startSession}>
+              <Button className="w-full" onClick={startSession} disabled={!peerRunning}>
                 <QrCode className="size-4" />
                 Generate pairing code
               </Button>
@@ -121,7 +188,7 @@ export function PairingDialog({
 
           <TabsContent value="enter" className="space-y-3 pt-3">
             <div className="space-y-2">
-              <Label htmlFor="pair-code">Code from other device</Label>
+              <Label htmlFor="pair-code">Code from desktop</Label>
               <Input
                 id="pair-code"
                 value={code}
@@ -129,19 +196,38 @@ export function PairingDialog({
                 placeholder="ABC123"
                 className="rounded-full text-center font-mono text-lg tracking-widest"
                 maxLength={8}
+                disabled={busy}
               />
-              {error ? <p className="text-xs text-destructive">{error}</p> : null}
             </div>
-            <Button className="w-full" onClick={onSubmitCode}>
-              Pair device
+            <div className="space-y-2">
+              <Label htmlFor="pair-host">Desktop IP (optional)</Label>
+              <Input
+                id="pair-host"
+                value={hostHint}
+                onChange={(e) => setHostHint(e.target.value)}
+                placeholder="192.168.1.152"
+                className="rounded-full font-mono text-sm"
+                disabled={busy}
+              />
+              <p className="text-xs text-muted-foreground">
+                If scan fails (common on Expo Go / guest Wi‑Fi), paste the desktop LAN IP from
+                Settings → Network.
+              </p>
+            </div>
+            {error ? <p className="text-xs text-destructive">{error}</p> : null}
+            <Button className="w-full" onClick={onSubmitCode} disabled={busy || code.length < 4}>
+              {busy ? "Searching network…" : "Start pairing"}
             </Button>
-            <Button
-              variant="ghost"
-              className="w-full"
-              onClick={() => store.simulateIncomingPair()}
-            >
-              Simulate incoming request
-            </Button>
+            {import.meta.env.VITE_LYRA_SEED_DEMO === "1" ||
+            import.meta.env.VITE_LYRA_SEED_DEMO === "true" ? (
+              <Button
+                variant="ghost"
+                className="w-full"
+                onClick={() => store.simulateIncomingPair()}
+              >
+                Simulate incoming request
+              </Button>
+            ) : null}
           </TabsContent>
         </Tabs>
       </DialogContent>

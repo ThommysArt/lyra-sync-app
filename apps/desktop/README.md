@@ -12,6 +12,33 @@ pnpm run dev:web   # http://localhost:3001
 pnpm --filter desktop dev
 ```
 
+## Single-PC pairing test (no phone / Android)
+
+### Automated (fastest)
+
+```bash
+pnpm test:pair
+```
+
+Spins up two peer servers on localhost, runs the real **show code → enter code → accept** path, and exits. No UI.
+
+### Two desktop windows on this machine
+
+```bash
+# Terminal 1 — shared web UI
+pnpm run dev:web
+
+# Terminal 2
+pnpm run dev:pair-a   # Computer A · port 53317
+
+# Terminal 3
+pnpm run dev:pair-b   # Computer B · port 53319
+```
+
+Then in **A**: Pair → Show code. In **B**: Enter code → Start pairing. Accept on **A**.
+
+Uses `LYRA_ALLOW_MULTI=1` + separate `userData` so both windows keep their own identity.
+
 ## Environment
 
 | Variable | Default | Purpose |
@@ -20,6 +47,8 @@ pnpm --filter desktop dev
 | `LYRA_PORT` | `53317` | Peer HTTP(S) listen port |
 | `LYRA_NAME` | `Lyra Desktop` | Device display name |
 | `LYRA_TLS` | unset | Set `1` to enable HTTPS with self-signed cert (requires `openssl` on PATH) |
+| `LYRA_ALLOW_MULTI` | unset | `1` = allow second Electron window (pairing tests) |
+| `LYRA_INSTANCE` | unset | Isolates `userData` (`a` / `b`) so two windows don’t share state |
 
 ## IPC bridge (`window.lyraDesktop`)
 

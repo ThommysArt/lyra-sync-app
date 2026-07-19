@@ -2,10 +2,28 @@
  * Lyra desktop shell (Electron).
  * Hosts the local HTTP peer server + UDP multicast discovery, and loads the web UI.
  */
-import { app, BrowserWindow, ipcMain, safeStorage, shell } from "electron";
-import { existsSync } from "node:fs";
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  ipcMain,
+  Menu,
+  safeStorage,
+  shell,
+} from "electron";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+
+// Dev / CI Linux often lacks a setuid chrome-sandbox. Honor flag set by scripts/dev.ts.
+if (
+  process.env.ELECTRON_DISABLE_SANDBOX === "1" ||
+  process.argv.includes("--no-sandbox")
+) {
+  app.commandLine.appendSwitch("no-sandbox");
+  app.commandLine.appendSwitch("disable-setuid-sandbox");
+}
 
 import { createDeviceIdentity, hashPairingCode } from "@lyra-sync-app/core";
 import {
@@ -38,6 +56,8 @@ type RuntimeStatus = {
   running: boolean;
   port: number | null;
   url: string | null;
+  /** Non-loopback LAN IPv4 for pairing QR / candidates */
+  lanHost: string | null;
   discoveryActive: boolean;
   lastError: string | null;
   identity: DeviceIdentity | null;
@@ -55,10 +75,23 @@ const trustedPeers = new Map<string, TrustedPeer>();
 /** Active pairing session advertised on /lyra/info (code hash only) */
 let pairingOffer: { codeHash: string; token: string; expiresAt: number } | null = null;
 
+/** User-selected download directory (empty = system Downloads) */
+let downloadDirectory: string | null = null;
+
+function resolveDownloadDir(): string {
+  if (downloadDirectory && existsSync(downloadDirectory)) return downloadDirectory;
+  try {
+    return app.getPath("downloads");
+  } catch {
+    return app.getPath("userData");
+  }
+}
+
 const status: RuntimeStatus = {
   running: false,
   port: null,
   url: null,
+  lanHost: null,
   discoveryActive: false,
   lastError: null,
   identity: null,
@@ -69,6 +102,7 @@ function broadcastStatus() {
     running: status.running,
     port: status.port,
     url: status.url,
+    lanHost: status.lanHost,
     discoveryActive: status.discoveryActive,
     lastError: status.lastError,
     updatedAt: Date.now(),
@@ -101,6 +135,45 @@ async function ensureIdentity() {
     } catch {
       // keep in memory only
     }
+  }
+}
+
+/**
+ * Align peer-server identity with the renderer store so /lyra/info and
+ * pair_confirm match what the UI thinks this device is.
+ */
+function adoptRendererIdentity(next: DeviceIdentity, nextPrivateKey?: string | null) {
+  identity = next;
+  if (nextPrivateKey) privateKey = nextPrivateKey;
+  status.identity = identity;
+  peer?.setIdentity(next);
+  // Re-bind discovery announces with the same identity
+  if (discovery && peer) {
+    void discovery.stop().then(async () => {
+      if (!identity || !peer) return;
+      discovery = await startDiscovery({
+        identity,
+        peerPort: peer.port,
+        advertiseHost: status.lanHost ?? peer.getLanHost() ?? undefined,
+        getPairingOffer: () => {
+          if (!pairingOffer || pairingOffer.expiresAt < Date.now()) return null;
+          return pairingOffer;
+        },
+        onLog: (line) => console.log(line),
+        onPeer: (announce) => {
+          console.log(
+            "[lyra] discovered peer",
+            announce.identity?.name,
+            announce.host,
+            announce.port,
+            announce.pairing ? `(pairing offer)` : "",
+          );
+          mainWindow?.webContents.send("lyra:discovered-peer", announce);
+        },
+      });
+      status.discoveryActive = true;
+      broadcastStatus();
+    });
   }
 }
 
@@ -173,12 +246,51 @@ async function startNetworking() {
         onFsRead: (fsPath, offset, maxBytes) => readOsFileChunk(fsPath, offset, maxBytes),
         onFsDelete: (fsPath) => deleteOsPath(fsPath),
         onFsRename: (fsPath, newName) => renameOsPath(fsPath, newName),
-        onTransferComplete: (state) => {
+        onTransferComplete: async (state) => {
+          const destDir = resolveDownloadDir();
+          try {
+            mkdirSync(destDir, { recursive: true });
+          } catch {
+            // continue with best-effort write
+          }
+          const savedPaths: string[] = [];
+          try {
+            // Prefer disk-backed path; fall back to in-memory chunks
+            let blob: Buffer | null = null;
+            if (state.diskPath && existsSync(state.diskPath)) {
+              blob = await readFile(state.diskPath);
+            } else if (state.chunks?.length) {
+              blob = Buffer.concat(state.chunks.map((c) => Buffer.from(c)));
+            }
+            if (blob && state.files.length > 0) {
+              let offset = 0;
+              for (const file of state.files) {
+                const size = Math.min(file.size, Math.max(0, blob.length - offset));
+                const safeName = path.basename(file.name).replace(/[^\w.\- ()[\]]+/g, "_") || "file";
+                let dest = path.join(destDir, safeName);
+                // Avoid overwrite: append counter
+                let n = 1;
+                while (existsSync(dest)) {
+                  const ext = path.extname(safeName);
+                  const base = path.basename(safeName, ext);
+                  dest = path.join(destDir, `${base} (${n})${ext}`);
+                  n++;
+                }
+                writeFileSync(dest, blob.subarray(offset, offset + size));
+                savedPaths.push(dest);
+                offset += size;
+              }
+            }
+          } catch (e) {
+            console.warn("[transfer] save failed", e instanceof Error ? e.message : e);
+          }
           mainWindow?.webContents.send("lyra:transfer-complete", {
             transferId: state.transferId,
             receivedBytes: state.receivedBytes,
             files: state.files,
             diskPath: state.diskPath,
+            savedPaths,
+            downloadDir: destDir,
           });
         },
       },
@@ -187,16 +299,39 @@ async function startNetworking() {
     status.running = true;
     status.port = peer.port;
     status.url = peer.url;
+    status.lanHost = peer.getLanHost() ?? null;
+    // Prefer a non-loopback URL in status for pairing candidates
+    if (status.lanHost) {
+      status.url = `${peer.protocol}://${status.lanHost}:${peer.port}`;
+    }
     status.lastError = null;
 
     discovery = await startDiscovery({
       identity,
       peerPort: peer.port,
+      advertiseHost: status.lanHost ?? undefined,
+      getPairingOffer: () => {
+        if (!pairingOffer || pairingOffer.expiresAt < Date.now()) return null;
+        return pairingOffer;
+      },
+      onLog: (line) => console.log(line),
       onPeer: (announce) => {
+        console.log(
+          "[lyra] discovered peer",
+          announce.identity?.name,
+          announce.host,
+          announce.port,
+          announce.pairing ? `(pairing offer)` : "",
+        );
         mainWindow?.webContents.send("lyra:discovered-peer", announce);
       },
     });
     status.discoveryActive = true;
+    console.log(
+      "[lyra] discovery active",
+      discovery.localAddresses(),
+      "multicast → peers on same LAN",
+    );
     broadcastStatus();
 
     // Best-effort Tailscale MagicDNS peer discovery
@@ -221,6 +356,7 @@ async function stopNetworking() {
   status.running = false;
   status.port = null;
   status.url = null;
+  status.lanHost = null;
   broadcastStatus();
 }
 
@@ -232,7 +368,52 @@ function resolvePackagedWebIndex(): string | null {
   return null;
 }
 
+function installApplicationMenu() {
+  // T3-style: no classic File/Edit/View chrome. Keep a minimal macOS app menu only.
+  if (process.platform === "darwin") {
+    Menu.setApplicationMenu(
+      Menu.buildFromTemplate([
+        {
+          label: app.name,
+          submenu: [
+            { role: "about" },
+            { type: "separator" },
+            { role: "hide" },
+            { role: "hideOthers" },
+            { role: "unhide" },
+            { type: "separator" },
+            { role: "quit" },
+          ],
+        },
+        {
+          label: "Edit",
+          submenu: [
+            { role: "undo" },
+            { role: "redo" },
+            { type: "separator" },
+            { role: "cut" },
+            { role: "copy" },
+            { role: "paste" },
+            { role: "selectAll" },
+          ],
+        },
+        {
+          label: "Window",
+          submenu: [{ role: "minimize" }, { role: "zoom" }, { type: "separator" }, { role: "front" }],
+        },
+      ]),
+    );
+  } else {
+    Menu.setApplicationMenu(null);
+  }
+}
+
 function createWindow() {
+  const isMac = process.platform === "darwin";
+
+  // Fully custom chrome (T3-style):
+  // - macOS: keep the frame for traffic lights, hide the title bar (hiddenInset)
+  // - Win/Linux: frameless; renderer draws min/max/close and drag regions
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
@@ -241,6 +422,18 @@ function createWindow() {
     title: "Lyra",
     show: false,
     backgroundColor: "#0B0F17",
+    autoHideMenuBar: true,
+    transparent: false,
+    hasShadow: true,
+    ...(isMac
+      ? {
+          frame: true,
+          titleBarStyle: "hiddenInset" as const,
+          trafficLightPosition: { x: 14, y: 16 },
+        }
+      : {
+          frame: false,
+        }),
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -249,9 +442,32 @@ function createWindow() {
     },
   });
 
+  // Keep a short title if any WM still surfaces it
+  mainWindow.setTitle("Lyra");
+  mainWindow.webContents.on("page-title-updated", (e) => {
+    e.preventDefault();
+    mainWindow?.setTitle("Lyra");
+  });
+
+  const broadcastWindowState = () => {
+    if (!mainWindow) return;
+    mainWindow.webContents.send("lyra:window-state", {
+      maximized: mainWindow.isMaximized(),
+      fullscreen: mainWindow.isFullScreen(),
+      focused: mainWindow.isFocused(),
+    });
+  };
+  mainWindow.on("maximize", broadcastWindowState);
+  mainWindow.on("unmaximize", broadcastWindowState);
+  mainWindow.on("enter-full-screen", broadcastWindowState);
+  mainWindow.on("leave-full-screen", broadcastWindowState);
+  mainWindow.on("focus", broadcastWindowState);
+  mainWindow.on("blur", broadcastWindowState);
+
   mainWindow.once("ready-to-show", () => {
     mainWindow?.show();
     mainWindow?.focus();
+    broadcastWindowState();
   });
 
   // Fallback if ready-to-show never fires (some Linux WMs)
@@ -296,11 +512,23 @@ function createWindow() {
   });
 }
 
-// Avoid stacking zombie instances when launched repeatedly from Gear Lever
-const gotLock = app.requestSingleInstanceLock();
+// Allow two Electron windows on one PC for local pairing tests:
+//   LYRA_ALLOW_MULTI=1 LYRA_INSTANCE=a LYRA_PORT=53317 pnpm run dev:desktop
+//   LYRA_ALLOW_MULTI=1 LYRA_INSTANCE=b LYRA_PORT=53319 pnpm run dev:desktop
+const allowMulti =
+  process.env.LYRA_ALLOW_MULTI === "1" || process.env.LYRA_ALLOW_MULTI === "true";
+const instanceId = (process.env.LYRA_INSTANCE ?? "").trim();
+
+// Isolate storage/session so two instances don't share localStorage identity
+if (instanceId) {
+  const base = app.getPath("userData");
+  app.setPath("userData", path.join(base, `instance-${instanceId}`));
+}
+
+const gotLock = allowMulti ? true : app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
-} else {
+} else if (!allowMulti) {
   app.on("second-instance", () => {
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore();
@@ -313,16 +541,147 @@ if (!gotLock) {
 }
 
 app.whenReady().then(async () => {
+  if (allowMulti || instanceId) {
+    console.log(
+      `[lyra] multi-instance mode instance=${instanceId || "default"} port=${PEER_PORT} name=${process.env.LYRA_NAME ?? "Lyra Desktop"}`,
+    );
+  }
+  installApplicationMenu();
+
   ipcMain.handle("lyra:get-peer-status", () => ({
     running: status.running,
     port: status.port,
     url: status.url,
+    lanHost: status.lanHost,
     discoveryActive: status.discoveryActive,
     lastError: status.lastError,
     updatedAt: Date.now(),
   }));
 
   ipcMain.handle("lyra:get-identity", () => status.identity);
+
+  /** Renderer is source of truth for device identity after hydrate */
+  ipcMain.handle(
+    "lyra:set-identity",
+    (
+      _e,
+      payload: { identity: DeviceIdentity; privateKey?: string | null },
+    ) => {
+      if (!payload?.identity?.id || !payload.identity.fingerprint) {
+        return { ok: false as const, error: "Invalid identity" };
+      }
+      adoptRendererIdentity(payload.identity, payload.privateKey);
+      return { ok: true as const, identity: status.identity };
+    },
+  );
+
+  /**
+   * Host user Accept/Decline for an in-flight pair_request (long-poll).
+   * Joiner's HTTP request unblocks with pair_confirm / pair_reject.
+   */
+  ipcMain.handle(
+    "lyra:resolve-pair-request",
+    (
+      _e,
+      payload: {
+        deviceId?: string;
+        token?: string;
+        accepted: boolean;
+        reason?: string;
+      },
+    ) => {
+      if (!peer) return { ok: false as const, error: "Peer server not running" };
+      const lan = peer.getLanHost?.() ?? undefined;
+      const decision = payload.accepted
+        ? {
+            accepted: true as const,
+            host: lan,
+            port: peer.port,
+          }
+        : {
+            accepted: false as const,
+            reason: payload.reason ?? "rejected",
+          };
+      const matched = peer.resolvePairRequest(
+        { deviceId: payload.deviceId, token: payload.token },
+        decision,
+      );
+      return { ok: matched, matched };
+    },
+  );
+
+  ipcMain.handle("lyra:get-shell-info", () => ({
+    platform: process.platform,
+    isDesktop: true,
+    downloadDirectory: resolveDownloadDir(),
+    customChrome: true,
+    usesSystemTrafficLights: process.platform === "darwin",
+  }));
+
+  ipcMain.handle("lyra:window-minimize", () => {
+    mainWindow?.minimize();
+  });
+
+  ipcMain.handle("lyra:window-maximize-toggle", () => {
+    if (!mainWindow) return { maximized: false };
+    if (mainWindow.isMaximized()) mainWindow.unmaximize();
+    else mainWindow.maximize();
+    return { maximized: mainWindow.isMaximized() };
+  });
+
+  ipcMain.handle("lyra:window-close", () => {
+    mainWindow?.close();
+  });
+
+  ipcMain.handle("lyra:window-get-state", () => ({
+    maximized: mainWindow?.isMaximized() ?? false,
+    fullscreen: mainWindow?.isFullScreen() ?? false,
+    focused: mainWindow?.isFocused() ?? false,
+  }));
+
+  ipcMain.handle("lyra:get-download-directory", () => resolveDownloadDir());
+
+  ipcMain.handle("lyra:set-download-directory", (_e, dir: string | null) => {
+    if (!dir) {
+      downloadDirectory = null;
+      return { ok: true as const, path: resolveDownloadDir() };
+    }
+    const trimmed = String(dir).trim();
+    if (!trimmed) {
+      downloadDirectory = null;
+      return { ok: true as const, path: resolveDownloadDir() };
+    }
+    try {
+      mkdirSync(trimmed, { recursive: true });
+      downloadDirectory = trimmed;
+      return { ok: true as const, path: downloadDirectory };
+    } catch (e) {
+      return {
+        ok: false as const,
+        error: e instanceof Error ? e.message : String(e),
+        path: resolveDownloadDir(),
+      };
+    }
+  });
+
+  ipcMain.handle("lyra:choose-download-directory", async () => {
+    const result = await dialog.showOpenDialog(mainWindow!, {
+      title: "Choose download folder",
+      properties: ["openDirectory", "createDirectory"],
+      defaultPath: resolveDownloadDir(),
+    });
+    if (result.canceled || !result.filePaths[0]) {
+      return { ok: false as const, cancelled: true as const, path: resolveDownloadDir() };
+    }
+    downloadDirectory = result.filePaths[0];
+    return { ok: true as const, path: downloadDirectory };
+  });
+
+  ipcMain.handle("lyra:open-path", async (_e, targetPath: string) => {
+    if (!targetPath) return { ok: false as const };
+    const err = await shell.openPath(targetPath);
+    return { ok: !err, error: err || undefined };
+  });
 
   ipcMain.handle("lyra:restart-networking", async () => {
     await stopNetworking();
@@ -331,6 +690,7 @@ app.whenReady().then(async () => {
       running: status.running,
       port: status.port,
       url: status.url,
+      lanHost: status.lanHost,
       discoveryActive: status.discoveryActive,
       lastError: status.lastError,
       updatedAt: Date.now(),
@@ -372,6 +732,9 @@ app.whenReady().then(async () => {
     ) => {
       if (!offer) {
         pairingOffer = null;
+        console.log("[lyra] pairing offer cleared");
+        // Re-announce so peers drop stale offer
+        discovery?.announce();
         return { ok: true };
       }
       const codeHash = await hashPairingCode(offer.code);
@@ -380,6 +743,15 @@ app.whenReady().then(async () => {
         token: offer.token,
         expiresAt: offer.expiresAt,
       };
+      console.log(
+        "[lyra] pairing offer active",
+        `code=${offer.code}`,
+        `hash=${codeHash.slice(0, 12)}…`,
+        `until=${new Date(offer.expiresAt).toISOString()}`,
+        `info=http://${status.lanHost ?? "127.0.0.1"}:${status.port ?? PEER_PORT}/lyra/info`,
+      );
+      // Burst announce so joiners see the offer over multicast immediately
+      discovery?.announce();
       return { ok: true, codeHash };
     },
   );
@@ -400,6 +772,16 @@ app.whenReady().then(async () => {
     const peers = tailscalePeersToProbeTargets(ts.peers, peer?.port ?? PEER_PORT);
     mainWindow?.webContents.send("lyra:tailscale-peers", peers);
     return { ok: true as const, peers, backendState: ts.backendState };
+  });
+
+  /** LocalSend-style: fire UDP multicast announce burst (user Refresh discovery). */
+  ipcMain.handle("lyra:announce-discovery", () => {
+    if (!discovery) return { ok: false as const, error: "Discovery not running" };
+    discovery.announce();
+    return {
+      ok: true as const,
+      addresses: discovery.localAddresses(),
+    };
   });
 
   // Show the window first so a peer-port conflict can't leave users with no UI.

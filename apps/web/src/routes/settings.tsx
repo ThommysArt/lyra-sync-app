@@ -1,6 +1,7 @@
 import { formatFingerprint } from "@lyra-sync-app/core";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useState } from "react";
+import { FolderOpen } from "lucide-react";
+import { useEffect, useState } from "react";
 
 import { Badge } from "@lyra-sync-app/ui/components/badge";
 import { Button } from "@lyra-sync-app/ui/components/button";
@@ -20,12 +21,23 @@ function SettingsPage() {
   const store = useLyraStore();
   const identity = useLyraSelector((s) => s.identity);
   const settings = useLyraSelector((s) => s.settings);
-  const devices = useLyraSelector((s) => s.devices);
+  const devices = useLyraSelector((s) => s.devices.filter((d) => d.authSecret || d.id.startsWith("demo_")));
   const peerServer = useLyraSelector((s) => s.peerServer);
   const lastProbeSummary = useLyraSelector((s) => s.lastProbeSummary);
   const [name, setName] = useState(identity?.name ?? "");
   const [probeBusy, setProbeBusy] = useState(false);
+  const [downloadPath, setDownloadPath] = useState(settings.downloadDirectory ?? "");
   const desktop = isDesktopShell();
+
+  useEffect(() => {
+    if (!desktop) return;
+    const api = getDesktopApi();
+    if (!api?.getDownloadDirectory) return;
+    void api.getDownloadDirectory().then((path) => {
+      if (!settings.downloadDirectory) setDownloadPath(path);
+      else setDownloadPath(settings.downloadDirectory);
+    });
+  }, [desktop, settings.downloadDirectory]);
 
   return (
     <div className="mx-auto max-w-2xl space-y-6 p-4 md:p-8">
@@ -127,6 +139,62 @@ function SettingsPage() {
             onCheckedChange={(v) => store.updateSettings({ verifyTransferIntegrity: v })}
           />
           <Separator />
+          <div className="space-y-2">
+            <div>
+              <p className="text-sm font-medium">Download location</p>
+              <p className="text-xs text-muted-foreground">
+                {desktop
+                  ? "Where received files are saved. Opens the system folder dialog."
+                  : "In the browser, received files download via the browser download UI. Use the desktop or mobile app to pick a permanent folder."}
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Input
+                readOnly
+                value={
+                  downloadPath ||
+                  (desktop ? "System Downloads (default)" : "Browser downloads (default)")
+                }
+                className="min-w-0 flex-1 rounded-full font-mono text-xs"
+              />
+              {desktop ? (
+                <>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => {
+                      const api = getDesktopApi();
+                      void api?.chooseDownloadDirectory?.().then((res) => {
+                        if (res.ok) {
+                          setDownloadPath(res.path);
+                          store.updateSettings({ downloadDirectory: res.path });
+                        }
+                      });
+                    }}
+                  >
+                    <FolderOpen className="size-4" />
+                    Browse
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => {
+                      setDownloadPath("");
+                      store.updateSettings({ downloadDirectory: undefined });
+                      void getDesktopApi()?.setDownloadDirectory?.(null).then((res) => {
+                        if (res.ok) setDownloadPath(res.path);
+                      });
+                    }}
+                  >
+                    Reset
+                  </Button>
+                </>
+              ) : null}
+            </div>
+          </div>
+          <Separator />
           <div className="flex items-center justify-between gap-4">
             <div>
               <p className="text-sm font-medium">Clipboard history limit</p>
@@ -197,7 +265,7 @@ function SettingsPage() {
         <CardHeader>
           <CardTitle>Network</CardTitle>
           <CardDescription>
-            Local peer server, discovery, and Tailscale probing.
+            Local peer server, UDP multicast + HTTP subnet scan (LocalSend-style), and Tailscale.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">

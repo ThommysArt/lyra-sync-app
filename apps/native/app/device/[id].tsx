@@ -9,8 +9,9 @@ import * as Clipboard from "expo-clipboard";
 import * as DocumentPicker from "expo-document-picker";
 import { Stack, useLocalSearchParams } from "expo-router";
 import { useEffect, useState } from "react";
-import { Pressable, ScrollView, Switch, Text, TextInput, View } from "react-native";
+import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 
+import { IosSwitch } from "@/components/ui/ios-switch";
 import { useAppTheme } from "@/contexts/app-theme-context";
 import { ACCENT, ACCENT_DARK, fonts, PAGE_BG } from "@/lib/constants";
 import { useLyraSelector, useLyraStore } from "@/lib/lyra";
@@ -153,14 +154,26 @@ export default function DeviceDetailScreen() {
                     copyToCacheDirectory: true,
                   });
                   if (result.canceled || !result.assets?.length) return;
-                  store.startFileTransfer(
-                    [device.id],
-                    result.assets.map((a) => ({
-                      name: a.name,
-                      size: a.size ?? 1024,
-                      mimeType: a.mimeType ?? undefined,
-                    })),
+                  const prepared = await Promise.all(
+                    result.assets.map(async (a) => {
+                      let bytes: Uint8Array | undefined;
+                      try {
+                        if (a.uri && (a.size ?? 0) <= 32 * 1024 * 1024) {
+                          const res = await fetch(a.uri);
+                          bytes = new Uint8Array(await res.arrayBuffer());
+                        }
+                      } catch {
+                        bytes = undefined;
+                      }
+                      return {
+                        name: a.name,
+                        size: a.size ?? bytes?.byteLength ?? 1024,
+                        mimeType: a.mimeType ?? undefined,
+                        bytes,
+                      };
+                    }),
                   );
+                  store.startFileTransfer([device.id], prepared);
                 } catch {
                   // cancelled
                 }
@@ -264,11 +277,7 @@ function Toggle({
       }}
     >
       <Text style={{ color: ink, flex: 1, fontFamily: fonts.medium, fontSize: 14 }}>{label}</Text>
-      <Switch
-        trackColor={{ false: "#767577", true: accent }}
-        value={value}
-        onValueChange={onValueChange}
-      />
+      <IosSwitch accent={accent} value={value} onValueChange={onValueChange} />
     </View>
   );
 }
