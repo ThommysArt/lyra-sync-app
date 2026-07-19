@@ -85,6 +85,7 @@ Ship a usable Lyra MVP per `docs/Lyra-Product-Spec.md` with:
 - [x] This progress doc
 - [x] `apps/web/scripts/smoke-render.mjs` — happy-dom selector stability smoke
 - [x] `docs/T3-CODE-BROWSER.md`
+- [x] `docs/SPEC-VS-IMPLEMENTATION.md` — product spec vs code/UI discrepancy report (with browser verification notes + `docs/verification-artifacts/`)
 
 ---
 
