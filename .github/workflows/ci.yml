@@ -9,24 +9,35 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CI: true
+
 jobs:
   unit:
     name: Unit tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10
+        # version comes from package.json packageManager field
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: pnpm
+
       - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter @lyra-sync-app/net test
-      - run: pnpm --filter @lyra-sync-app/core test
-      - run: pnpm --filter @lyra-sync-app/core check-types
-      - run: pnpm --filter @lyra-sync-app/protocol check-types
+
+      - name: Unit tests
+        run: pnpm test
+
+      - name: Typecheck shared packages
+        run: |
+          pnpm --filter @lyra-sync-app/core check-types
+          pnpm --filter @lyra-sync-app/protocol check-types
+          pnpm --filter @lyra-sync-app/net check-types
+
       - name: happy-dom selector smoke
         run: pnpm --filter web test:unit
 
@@ -36,17 +47,91 @@ jobs:
     needs: unit
     steps:
       - uses: actions/checkout@v4
+
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: pnpm
+
       - run: pnpm install --frozen-lockfile
+
       - name: Install Playwright browser
         run: pnpm --filter web exec playwright install --with-deps chromium
+
       - name: Run e2e
         run: pnpm --filter web test:e2e
+
+  desktop:
+    name: Electron Linux package
+    runs-on: ubuntu-latest
+    needs: unit
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # pnpm 10 may skip dependency lifecycle scripts until approved.
+      # Rebuild electron binary and electron-builder native helpers.
+      - name: Ensure Electron binary
+        run: |
+          ELECTRON_DIR=$(find node_modules/.pnpm -path '*/electron@*/node_modules/electron' -type d | head -1)
+          if [ -z "$ELECTRON_DIR" ]; then
+            echo "electron package not found"
+            exit 1
+          fi
+          if [ ! -x "$ELECTRON_DIR/dist/electron" ]; then
+            echo "Downloading Electron binary into $ELECTRON_DIR"
+            (cd "$ELECTRON_DIR" && node install.js)
+          fi
+          "$ELECTRON_DIR/dist/electron" --version
+
+      - name: Build web UI
+        run: pnpm --filter web build
+
+      - name: Package Electron (dir + AppImage)
+        run: pnpm --filter desktop dist
         env:
-          CI: true
+          # Avoid interactive electron-builder prompts in CI
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+          ELECTRON_BUILDER_CACHE: ${{ runner.temp }}/electron-builder-cache
+
+      - name: Upload desktop artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: lyra-desktop-linux
+          path: |
+            apps/desktop/release/*.AppImage
+            apps/desktop/release/linux-unpacked/**
+          if-no-files-found: error
+          retention-days: 14
+
+  native-export:
+    name: Expo export check
+    runs-on: ubuntu-latest
+    needs: unit
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Expo export (web bundle smoke)
+        working-directory: apps/native
+        run: pnpm exec expo export --platform web --output-dir /tmp/lyra-expo-export
+        env:
+          EXPO_NO_TELEMETRY: 1

@@ -23,7 +23,10 @@
     "deploy": "vercel deploy",
     "deploy:prod": "vercel deploy --prod",
     "deploy:check": "vercel deploy --dry",
-    "check": "biome check --write ."
+    "check": "biome check --write .",
+    "pack:desktop": "pnpm --filter web build && pnpm --filter desktop pack",
+    "dist:desktop": "pnpm --filter web build && pnpm --filter desktop dist",
+    "eas:android:preview": "cd apps/native && eas build --platform android --profile preview --non-interactive --no-wait"
   },
   "dependencies": {
     "@lyra-sync-app/env": "workspace:*",
@@ -43,6 +46,14 @@
   "pnpm": {
     "overrides": {
       "zxing-wasm": "link:apps/native/vendor/zxing-wasm-stub"
-    }
+    },
+    "onlyBuiltDependencies": [
+      "electron",
+      "electron-winstaller",
+      "esbuild",
+      "sharp",
+      "@parcel/watcher",
+      "unrs-resolver"
+    ]
   }
 }

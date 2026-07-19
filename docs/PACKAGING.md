@@ -1,5 +1,31 @@
 # Packaging & release notes
 
+## CI & GitHub Releases
+
+| Workflow | Trigger | Purpose |
+|----------|---------|---------|
+| [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) | push / PR | Unit tests, Playwright e2e, Electron Linux package (artifact), Expo web export |
+| [`.github/workflows/release.yml`](../.github/workflows/release.yml) | tag `v*` or manual | Publish Linux **AppImage** to a GitHub Release; optional EAS Android preview if `EXPO_TOKEN` is set |
+| [`.github/workflows/eas-build.yml`](../.github/workflows/eas-build.yml) | manual | Kick off an EAS cloud build (`development` / `preview` / `production`) |
+
+### Required secrets
+
+| Secret | Used by | How to set |
+|--------|---------|------------|
+| `EXPO_TOKEN` | `eas-build.yml`, optional job in `release.yml` | Create at [expo.dev/settings/access-tokens](https://expo.dev/settings/access-tokens), then `gh secret set EXPO_TOKEN` |
+
+`GITHUB_TOKEN` is provided automatically for release uploads.
+
+### Tag a release
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+# or: gh workflow run Release -f tag=v0.1.0 -f prerelease=true
+```
+
+---
+
 ## EAS (mobile)
 
 **Linked project**

@@ -1,44 +1,53 @@
 # Lyra — Agent Progress Report
 
-**Last updated:** 2026-07-19 (packaging closeout)  
-**Status:** Gap plan complete + EAS linked + Electron local pack succeeded  
+**Last updated:** 2026-07-19 (CI + packaging closeout)  
+**Status:** CI workflows complete · Electron AppImage built · EAS Android preview submitted  
 **Plan:** [`docs/GAP-FIX-PLAN.md`](./GAP-FIX-PLAN.md) · **Packaging:** [`docs/PACKAGING.md`](./PACKAGING.md)
 
 ---
 
-## Packaging results (this session)
+## Packaging / CI results (this session)
 
 ### EAS
 - [x] Logged in as `thommysart24`
-- [x] Created/linked project **@thommysart24/lyra**
-- [x] `projectId`: `5440becf-0777-4d91-be3b-88ad7f271d5f` written to `apps/native/app.json`
-- [x] Owner set to `thommysart24`
-- [x] Accessibility config plugin scaffold enabled in plugins list
+- [x] Project **@thommysart24/lyra** (`5440becf-0777-4d91-be3b-88ad7f271d5f`)
+- [x] Android keystore created on Expo servers
+- [x] **Preview Android build submitted** (cloud):  
+  https://expo.dev/accounts/thommysart24/projects/lyra/builds/6ae1d211-3d01-493b-8bf5-8c487a3485fa
 
 ### Electron
-- [x] Electron binary reinstalled (`v22.21.1` Chromium shell / package 37.x)
-- [x] `electron-builder` installed
-- [x] `pnpm --filter desktop pack` → **`release/linux-unpacked/lyra`** (~200 MB binary)
-- [x] Web UI copied to `resources/web-dist`
-- [x] Packaged load path uses `process.resourcesPath/web-dist`
+- [x] Local AppImage: `apps/desktop/release/Lyra-0.1.0.AppImage` (~112 MiB)
+- [x] Unpacked binary: `apps/desktop/release/linux-unpacked/lyra` (~192 MiB)
+- [x] Web UI bundled under `resources/web-dist`
 
-### Large files / Android
-- [x] Browser: stream-aware materialize up to **256 MiB** (`materializeFileBytes` / `readFileInChunks`)
-- [x] Server: disk-backed receive ≥1 MiB (existing)
-- [x] Android Accessibility: config plugin + README (service body still post-prebuild)
+### CI / GitHub
+- [x] Fixed pnpm version clash in Actions (`packageManager` only)
+- [x] CI jobs: unit, Playwright e2e, Electron Linux package (artifact), Expo web export
+- [x] Release workflow: tag `v*` → AppImage GitHub Release (+ optional EAS if `EXPO_TOKEN`)
+- [x] Manual `EAS Build` workflow (`workflow_dispatch`)
+- [ ] Repo secret `EXPO_TOKEN` — create at expo.dev access tokens, then `gh secret set EXPO_TOKEN`
 
 ### Tests
-- [x] Unit core/net green
-- [x] Integration net green
+- [x] Unit core/net green (local)
 
 ---
 
 ## How to run packaged desktop
 
 ```bash
-# From monorepo after pack:
+# AppImage
+./apps/desktop/release/Lyra-0.1.0.AppImage
+# Or unpacked:
 ./apps/desktop/release/linux-unpacked/lyra
-# Needs display; peer server starts on :53317 by default
+# Peer server defaults to :53317
+```
+
+Convenience scripts:
+
+```bash
+pnpm run pack:desktop          # web build + electron --dir
+pnpm run dist:desktop          # web build + electron installers
+pnpm run eas:android:preview   # EAS cloud preview APK (needs eas login)
 ```
 
 ---
@@ -47,16 +56,16 @@
 
 | Item | Status |
 |------|--------|
-| EAS cloud build (`eas build`) | Project linked; cloud GraphQL flaked during submit — re-run `eas build --profile preview --platform android` when API is stable. `expo-dev-client` installed for development profile. |
+| GitHub `EXPO_TOKEN` secret | Not set — required for Actions-triggered EAS |
 | Code-signed Windows/macOS installers | Needs certs |
-| Full Accessibility Service Kotlin implementation | Manifest plugin ready; Kotlin after `expo prebuild` |
+| Full Accessibility Service Kotlin | Manifest plugin ready; body after `expo prebuild` |
 | Multi‑GB pure browser transfers | Cap 256 MiB materialize; use desktop for huge files |
 
 ---
 
 ## Agent handoff
 
-1. EAS dashboard: https://expo.dev/accounts/thommysart24/projects/lyra  
-2. Electron unpack: `apps/desktop/release/linux-unpacked/`  
-3. Do not re-create EAS project — ID is already valid  
-4. Next human step: `eas build --profile development --platform android` when ready to smoke a device APK  
+1. EAS build: https://expo.dev/accounts/thommysart24/projects/lyra/builds/6ae1d211-3d01-493b-8bf5-8c487a3485fa  
+2. Electron: `apps/desktop/release/Lyra-0.1.0.AppImage`  
+3. Set `EXPO_TOKEN` for CI-driven mobile builds  
+4. Tag release when ready: `git tag v0.1.0 && git push origin v0.1.0`  
