@@ -24,9 +24,11 @@ export default defineConfig({
   webServer: process.env.LYRA_SKIP_WEBSERVER
     ? undefined
     : {
-        command: "pnpm exec vite dev --port " + port + " --strictPort",
+        command: `pnpm exec vite dev --port ${port} --strictPort --host 127.0.0.1`,
         url: baseURL,
         reuseExistingServer: !process.env.CI,
-        timeout: 120_000,
+        timeout: 180_000,
+        stdout: "pipe",
+        stderr: "pipe",
       },
 });

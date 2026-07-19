@@ -80,7 +80,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       # pnpm 10 may skip dependency lifecycle scripts until approved.
-      # Rebuild electron binary and electron-builder native helpers.
+      # Download the Electron binary; do not launch it (sandbox/SUID fails on GH runners).
       - name: Ensure Electron binary
         run: |
           ELECTRON_DIR=$(find node_modules/.pnpm -path '*/electron@*/node_modules/electron' -type d | head -1)
@@ -92,7 +92,10 @@ jobs:
             echo "Downloading Electron binary into $ELECTRON_DIR"
             (cd "$ELECTRON_DIR" && node install.js)
           fi
-          "$ELECTRON_DIR/dist/electron" --version
+          test -x "$ELECTRON_DIR/dist/electron"
+          ls -lh "$ELECTRON_DIR/dist/electron"
+          # electron-builder only needs the zip contents on disk, not a runnable sandbox
+          echo "Electron ready at $ELECTRON_DIR/dist"
 
       - name: Build web UI
         run: pnpm --filter web build
@@ -103,6 +106,7 @@ jobs:
           # Avoid interactive electron-builder prompts in CI
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
           ELECTRON_BUILDER_CACHE: ${{ runner.temp }}/electron-builder-cache
+          ELECTRON_DISABLE_SANDBOX: "1"
 
       - name: Upload desktop artifacts
         uses: actions/upload-artifact@v4
