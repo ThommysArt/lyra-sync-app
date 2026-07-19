@@ -4,3 +4,6 @@ export * from "./envelope";
 export * from "./peer-client";
 export * from "./probe";
 export * from "./crypto-util";
+export * from "./seal";
+export * from "./transfer-wire";
+export * from "./message-handlers";

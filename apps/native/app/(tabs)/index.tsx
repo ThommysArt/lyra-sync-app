@@ -28,6 +28,8 @@ export default function DevicesScreen() {
   );
   const discoveryEnabled = useLyraSelector((s) => s.settings.discoveryEnabled);
   const [manualHost, setManualHost] = useState("");
+  const [openUrl, setOpenUrl] = useState("");
+  const onlineIds = useLyraSelector((s) => s.devices.filter((d) => d.online).map((d) => d.id));
   const bg = isDark ? PAGE_BG.dark : PAGE_BG.light;
   const ink = isDark ? "#F5F7FF" : "#0B1220";
   const muted = isDark ? "rgba(255,255,255,0.55)" : "rgba(0,0,0,0.45)";
@@ -156,8 +158,7 @@ export default function DevicesScreen() {
 
           <Pressable
             onPress={() => {
-              const online = devices.filter((d) => d.online).map((d) => d.id);
-              void sendClipboard(online);
+              void sendClipboard(onlineIds);
             }}
             style={{
               alignItems: "center",
@@ -175,6 +176,47 @@ export default function DevicesScreen() {
             </Text>
             <Ionicons color={accent} name="chevron-forward" size={18} />
           </Pressable>
+
+          <View style={{ backgroundColor: card, borderRadius: 22, gap: 10, padding: 14 }}>
+            <Text style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 14 }}>
+              Open URL on devices
+            </Text>
+            <TextInput
+              autoCapitalize="none"
+              autoCorrect={false}
+              onChangeText={setOpenUrl}
+              placeholder="https://…"
+              placeholderTextColor={muted}
+              style={{
+                backgroundColor: isDark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.04)",
+                borderRadius: 14,
+                color: ink,
+                fontFamily: fonts.regular,
+                fontSize: 15,
+                paddingHorizontal: 12,
+                paddingVertical: 10,
+              }}
+              value={openUrl}
+            />
+            <Pressable
+              disabled={!openUrl.trim() || onlineIds.length === 0}
+              onPress={() => {
+                store.sendUrl(openUrl.trim(), onlineIds);
+                setOpenUrl("");
+              }}
+              style={{
+                alignItems: "center",
+                alignSelf: "flex-start",
+                backgroundColor: accent,
+                borderRadius: 999,
+                opacity: openUrl.trim() && onlineIds.length > 0 ? 1 : 0.5,
+                paddingHorizontal: 14,
+                paddingVertical: 8,
+              }}
+            >
+              <Text style={{ color: "#fff", fontFamily: fonts.semiBold, fontSize: 13 }}>Open</Text>
+            </Pressable>
+          </View>
 
           {devices.map((device) => {
             const name = device.nickname || device.name;

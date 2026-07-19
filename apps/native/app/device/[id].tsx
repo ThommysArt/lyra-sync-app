@@ -8,7 +8,7 @@ import {
 import * as Clipboard from "expo-clipboard";
 import * as DocumentPicker from "expo-document-picker";
 import { Stack, useLocalSearchParams } from "expo-router";
-import { useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { Pressable, ScrollView, Switch, Text, TextInput, View } from "react-native";
 
 import { useAppTheme } from "@/contexts/app-theme-context";
@@ -22,10 +22,13 @@ export default function DeviceDetailScreen() {
   const device = useLyraSelector((s) => s.devices.find((d) => d.id === id));
   const [path, setPath] = useState("/");
   const [nickname, setNickname] = useState(device?.nickname ?? "");
-  const entries = useMemo(
-    () => (device ? store.listRemoteFiles(device.id, path) : []),
-    [device, path, store],
-  );
+  const cacheKey = `${id}::${path}`;
+  const entries = useLyraSelector((s) => s.remoteFsCache[cacheKey] ?? []);
+
+  useEffect(() => {
+    if (!id) return;
+    void store.fetchRemoteFiles(id, path);
+  }, [id, path, store]);
   const bg = isDark ? PAGE_BG.dark : PAGE_BG.light;
   const ink = isDark ? "#F5F7FF" : "#0B1220";
   const muted = isDark ? "rgba(255,255,255,0.55)" : "rgba(0,0,0,0.45)";

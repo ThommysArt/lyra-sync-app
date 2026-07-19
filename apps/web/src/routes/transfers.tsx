@@ -1,5 +1,6 @@
 import {
   formatBytes,
+  formatEta,
   formatPercent,
   formatRelativeTime,
   formatSpeed,
@@ -166,8 +167,14 @@ function TransfersPage() {
                       <div className="flex justify-between text-xs text-muted-foreground">
                         <span>
                           {formatBytes(tx.transferredBytes)} / {formatBytes(tx.totalBytes)} ({pct}%)
+                          {tx.overWire ? " · wire" : ""}
                         </span>
-                        <span>{formatSpeed(tx.averageSpeedBps)}</span>
+                        <span>
+                          {formatSpeed(tx.currentSpeedBps ?? tx.averageSpeedBps)}
+                          {tx.status === "transferring" && tx.etaSeconds != null
+                            ? ` · ETA ${formatEta(tx.etaSeconds)}`
+                            : ""}
+                        </span>
                       </div>
                     </div>
                   )}
@@ -223,20 +230,11 @@ function TransfersPage() {
                         <X className="size-4" />
                       </Button>
                     )}
-                    {tx.direction === "sent" && tx.status === "completed" && (
+                    {(tx.status === "completed" || tx.status === "cancelled") && (
                       <Button
                         size="sm"
                         variant="outline"
-                        onClick={() =>
-                          store.startFileTransfer(
-                            [tx.deviceId],
-                            tx.files.map((f) => ({
-                              name: f.name,
-                              size: f.size,
-                              mimeType: f.mimeType,
-                            })),
-                          )
-                        }
+                        onClick={() => store.resendTransfer(tx.id)}
                       >
                         Re-send
                       </Button>

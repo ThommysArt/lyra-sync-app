@@ -162,6 +162,12 @@ export const TransferSchema = z.object({
   integrityOk: z.boolean().optional(),
   /** Resume offset across the session (sum of acknowledged file bytes) */
   resumeOffset: z.number().int().nonnegative().optional(),
+  /** Live transfer speed (bytes/sec) while transferring */
+  currentSpeedBps: z.number().nonnegative().optional(),
+  /** Estimated remaining seconds while transferring */
+  etaSeconds: z.number().nonnegative().optional(),
+  /** True when bytes actually moved over HTTP to a live peer */
+  overWire: z.boolean().optional(),
 });
 export type Transfer = z.infer<typeof TransferSchema>;
 
@@ -201,6 +207,10 @@ export type PairingPayload = z.infer<typeof PairingPayloadSchema>;
 
 export const AppSettingsSchema = z.object({
   clipboardHistoryLimit: z.number().int().min(5).max(200).default(40),
+  /**
+   * Optional time-based clipboard retention (days). 0 = count-only limit.
+   */
+  clipboardRetentionDays: z.number().int().min(0).max(365).default(0),
   autoAcceptTransfers: z.boolean().default(true),
   autoAcceptClipboard: z.boolean().default(true),
   clipboardSyncEnabled: z.boolean().default(true),

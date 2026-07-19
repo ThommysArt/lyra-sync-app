@@ -2,7 +2,7 @@
  * Lyra desktop shell (Electron).
  * Hosts the local HTTP peer server + UDP multicast discovery, and loads the web UI.
  */
-import { app, BrowserWindow, ipcMain, safeStorage } from "electron";
+import { app, BrowserWindow, ipcMain, safeStorage, shell } from "electron";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -83,23 +83,27 @@ async function startNetworking() {
     peer = await startPeerServer({
       identity,
       port: PEER_PORT,
+      // Prefer built-in handlers for clipboard / transfer / fs / pair.
+      // Only intercept for renderer notification; return void to fall through.
       onEnvelope: async (envelope) => {
-        // Forward interesting events to renderer later
         mainWindow?.webContents.send("lyra:envelope", {
           type: envelope.type,
           fromDeviceId: envelope.fromDeviceId,
         });
-        if (envelope.type === "ping") {
-          return {
-            id: `env_pong_${Date.now()}`,
-            type: "pong",
-            fromDeviceId: identity!.id,
-            toDeviceId: envelope.fromDeviceId,
-            timestamp: Date.now(),
-            payload: { ok: true },
-          };
-        }
-        return { ok: true };
+        // undefined → peer-server runs built-in message handlers
+        return undefined;
+      },
+      handlers: {
+        onOpenUrl: (url) => {
+          void shell.openExternal(url);
+          return true;
+        },
+        onClipboardPush: (item) => {
+          mainWindow?.webContents.send("lyra:clipboard-push", item);
+        },
+        onPairRequest: (payload) => {
+          mainWindow?.webContents.send("lyra:pair-request", payload);
+        },
       },
     });
 

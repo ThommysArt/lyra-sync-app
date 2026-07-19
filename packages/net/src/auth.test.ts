@@ -32,6 +32,9 @@ describe("auth challenge-response", () => {
       pairingToken: "tok_123",
       localPrivateKey: "priv_local",
       remotePublicKey: "pub_remote",
+      localFingerprint: "abc12345deadbeef",
+      remoteFingerprint: "serverfp01234567",
+      localPublicKey: "pub_aaaa",
     });
     const challenge = await createAuthChallenge({ fingerprint: "serverfp01234567" });
     const response = await createAuthResponseWithSharedSecret({
@@ -41,6 +44,25 @@ describe("auth challenge-response", () => {
     });
     const result = await verifyAuthResponse({ challenge, response, sharedSecret });
     assert.equal(result.ok, true);
+  });
+
+  it("deriveMutualAuthSecret is order-independent", async () => {
+    const { deriveMutualAuthSecret } = await import("./auth");
+    const a = await deriveMutualAuthSecret({
+      pairingToken: "tok",
+      localFingerprint: "fp_a",
+      remoteFingerprint: "fp_b",
+      localPublicKey: "pub_a",
+      remotePublicKey: "pub_b",
+    });
+    const b = await deriveMutualAuthSecret({
+      pairingToken: "tok",
+      localFingerprint: "fp_b",
+      remoteFingerprint: "fp_a",
+      localPublicKey: "pub_b",
+      remotePublicKey: "pub_a",
+    });
+    assert.equal(a, b);
   });
 
   it("rejects wrong fingerprint when expected", async () => {

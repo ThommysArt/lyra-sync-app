@@ -80,4 +80,36 @@ describe("createLyraStore", () => {
     // should toast rather than crash — devices unchanged path
     assert.equal(store.getState().settings.discoveryEnabled, false);
   });
+
+  it("dual-confirm pairing derives authSecret", async () => {
+    const store = createLyraStore({
+      storage: memoryStorage(),
+      seedDemo: false,
+      platformHint: "web",
+    });
+    await store.hydrate();
+    const submit = store.submitPairingCode("AB12CD");
+    assert.equal(submit.ok, true);
+    if (!submit.ok || !("pending" in submit)) throw new Error("expected pending");
+    assert.equal(submit.pending, true);
+    assert.equal(store.getState().devices.length, 0);
+    assert.equal(store.getState().incomingPairRequests.length, 1);
+    await store.confirmIncomingPair(submit.requestId);
+    const devices = store.getState().devices;
+    assert.equal(devices.length, 1);
+    assert.ok(devices[0]!.authSecret && devices[0]!.authSecret.length >= 16);
+  });
+
+  it("stores clipboard images in history", async () => {
+    const store = createLyraStore({
+      storage: memoryStorage(),
+      seedDemo: false,
+      platformHint: "web",
+    });
+    await store.hydrate();
+    store.pushClipboardImage("data:image/png;base64,aaa", []);
+    const item = store.getState().clipboardHistory[0]!;
+    assert.equal(item.type, "image");
+    assert.ok(item.imageData?.startsWith("data:image"));
+  });
 });

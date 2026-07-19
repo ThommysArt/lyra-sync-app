@@ -1,7 +1,7 @@
 # Lyra — Agent Progress Report
 
-**Last updated:** 2026-07-18 (P2 networking + P3 packaging)  
-**Status:** MVP UI + demo mesh; **P0–P3 foundations landed** (real peer HTTP/auth/discovery in Node/Electron; browser still demo-mesh + HTTP probe)
+**Last updated:** 2026-07-19 (spec-gap closeout)  
+**Status:** MVP UI + domain store + **real wire paths** for pairing trust, clipboard, multi-chunk transfers, open URL, and fs_list; browser/Expo still cannot host a listen socket
 
 ---
 
@@ -10,100 +10,76 @@
 Ship a usable Lyra MVP per `docs/Lyra-Product-Spec.md` with:
 
 - Web (desktop foundation) + Expo native + Electron shell
-- shadcn **base-luma** + blue theme (fully rounded)
-- Chrona-style floating tab bar on mobile
-- Shared protocol + domain store + net transport
-- Demo mesh until peers are online; real sockets in desktop/Node
+- Dual-confirm pairing with mutual `authSecret`
+- Real HTTP peer payloads when a peer has `host` + trust
+- UI parity across web and Expo web
 
 ---
 
-## Done
+## Done (2026-07-19 closeout vs SPEC-VS-IMPLEMENTATION)
 
-### Design system
-- [x] `packages/ui` → **base-luma**
-- [x] Blue brand CSS in `packages/ui/src/styles/globals.css`
-- [x] Components reinstalled + `IconPlaceholder` shim
-- [x] Expo blue theme + Manrope (`apps/native/global.css`)
-- [x] Dialog/Sheet close buttons use lucide `XIcon` directly
+### Trust
+- [x] Dual-confirm for QR scan / code entry / simulate (pending banner → confirm)
+- [x] Mutual `authSecret` via `deriveMutualAuthSecret` (order-independent)
+- [x] `authSecret` stored on `PairedDevice` after confirm
+- [x] `/lyra/message` requires Bearer session for non-public types
 
-### Domain
-- [x] `packages/protocol` — Zod schemas (+ `conflict` transfer status, `ConflictAction`, auth + resume fields)
-- [x] `packages/core` — identity, store, demo peers, formatters, live probe hooks
-- [x] Pairing code + simulate incoming; simulated transfers
-- [x] Conflict resolve: rename / overwrite / skip
-- [x] `applyPairingPayload` for QR scan handshake (demo)
-- [x] File transfer options: direction + forceConflict + resume offset + integrity
+### Transport
+- [x] App-level AES-GCM seal helpers (`packages/net/src/seal.ts`) for payload encryption
+- [x] CORS reflects request origin (allowlist option supported)
+- [x] First-contact + shared-secret auth both accepted when appropriate
 
-### Web (`apps/web`)
-- [x] Shell, Devices, Clipboard, Transfers, Settings, Device detail + remote FS
-- [x] Pairing dialog with **real QR** (`qrcode.react`)
-- [x] Incoming pair banner + **conflict banner**
-- [x] File picker (File API) on devices / transfers / remote upload
-- [x] System clipboard read/write helpers
-- [x] Drag-and-drop onto device cards + remote file explorer
-- [x] Keyboard shortcuts (spec §5.10) + Settings cheat sheet
-- [x] PWA service worker disabled in dev (less console noise)
-- [x] Vite production build OK
-- [x] **Fixed max update depth** (`useLyraSelector` snapshot cache + shallowEqual)
-- [x] happy-dom smoke: selector stability PASS
-- [x] Settings **Network** card (peer server status, Tailscale probe, integrity)
-- [x] Transfers **Demo resume** + integrity labels
-- [x] Playwright e2e smoke specs
+### Payloads (live peer with host)
+- [x] `clipboard_push` / ack over HTTP
+- [x] Multi-chunk `transfer_chunk` + offer/accept/complete (`sendFilesOverWire`)
+- [x] `open_url` + ack
+- [x] `fs_list` / response with demo tree on Node peer-server CLI
+- [x] Store routes to wire when `isLivePeer` + `authSecret`; else simulates
 
-### Native (`apps/native`)
-- [x] Floating glass tab bar (Lyra blue)
-- [x] Tabs + pair + device detail
-- [x] **Incoming pairing banner** + conflict banner (tabs layout)
-- [x] Real QR display (`react-native-qrcode-svg`)
-- [x] QR payload paste / apply scan path
-- [x] **Live camera QR scan** (`expo-camera` CameraView + barcodeTypes `qr`)
-- [x] `expo-clipboard` read/write
-- [x] `expo-document-picker` send files
-- [x] Same selector fix as web (via shared hooks)
-- [x] `eas.json` + app identity for EAS builds
-- [x] Secure-store helpers for private key migration
+### Domain / UX
+- [x] Clipboard **images** (history + push + web “Add image”)
+- [x] Mid-transfer **speed + ETA**
+- [x] Transfer **Re-send** history action
+- [x] Remote FS cache + `fetchRemoteFiles`
+- [x] Clipboard retention days setting (schema)
 
-### Networking (P2)
-- [x] Protocol: `discover_announce` / `discover_response`, `PeerEndpoint`, device `host`/`port`
-- [x] Manual peer add by host/IP + port (store + Devices UI web/native)
-- [x] Discovery refresh (HTTP probe when host set; demo mesh fallback)
-- [x] **Local HTTP peer server** (`packages/net` Node `/lyra/*`)
-- [x] **UDP multicast discovery** (Node/Electron; group `224.0.0.167:53318`)
-- [x] **Auth via fingerprints / challenge-response** on wire
-- [x] **Live Tailscale probing** (`probeTailscalePeers`, 100.x / `*.ts.net`)
-- [x] **Resumable transfers + integrity** (resume offsets, checksum verify flags)
-- [x] **Electron desktop shell** (`apps/desktop`) hosting peer server + discovery
+### UI parity (native)
+- [x] Network card (peer server / discovery / browser badge / probe)
+- [x] Verify transfer integrity toggle
+- [x] Peer listen port
+- [x] Open URL on Devices
+- [x] Demo Resume button on Transfers
+- [x] Re-send on transfer rows
 
-### Packaging / quality (P3)
-- [x] EAS build profiles; secure-store private key helpers
-- [x] Shared React hooks package `@lyra-sync-app/hooks` (DRY `useLyraSelector`)
-- [x] Unit tests (`net`, `core`) + Playwright CI (`.github/workflows/ci.yml`)
-- [ ] Optional Effect.ts for net pipelines — **deferred** (not required for MVP)
+### Tests
+- [x] Unit: net 10 + core 6
+- [x] Integration: mutual secret, auth-required clipboard, 120KB multi-chunk wire transfer, dual-confirm authSecret
 
-### Docs / tooling
-- [x] README
-- [x] This progress doc
-- [x] `apps/web/scripts/smoke-render.mjs` — happy-dom selector stability smoke
-- [x] `docs/T3-CODE-BROWSER.md`
-- [x] `docs/SPEC-VS-IMPLEMENTATION.md` — product spec vs code/UI discrepancy report (with browser verification notes + `docs/verification-artifacts/`)
+### Browser verification (T3 MCP, 2026-07-19)
+
+| Surface | Result |
+|---------|--------|
+| Web `:3001` Devices | PASS — peers, Open URL, Pair dialog dual-confirm copy |
+| Web Settings | PASS — Network, integrity, Mod+Q cheat sheet |
+| Web Transfers | PASS — Demo resume, Re-send, speed labels |
+| Web Clipboard | PASS — Add image |
+| Expo `:8081` Devices | PASS — Open URL card |
+| Expo Settings | PASS — Network card, integrity, listen port |
+| Expo Transfers | PASS — Multi/Batch/**Resume**/Send, Re-send |
+| Expo Pair | PASS — dual-confirm copy |
 
 ---
 
 ## Architecture
 
 ```
-apps/web      → TanStack Router → @lyra-sync-app/hooks → core
-apps/native   → Expo Router    → @lyra-sync-app/hooks → core
-apps/desktop  → Electron main  → @lyra-sync-app/net/node (HTTP + UDP)
-packages/core → store, identity, demo FS, probe integration
-packages/net  → auth, integrity, peer client/server, discovery
-packages/protocol → Zod (message/device schemas)
-packages/hooks → shared LyraProvider + useLyraSelector
-packages/ui   → shadcn base-luma + blue tokens
+apps/web      → TanStack Router → hooks → core (demo + HTTP probe + wire client)
+apps/native   → Expo Router    → hooks → core
+apps/desktop  → Electron main  → net/node (HTTP + UDP) + built-in handlers
+packages/core → store, identity, demo, peer-ops
+packages/net  → auth, seal, transfer-wire, message-handlers, peer-client/server
+packages/protocol → Zod (incl. transfer_chunk, open_url_ack)
 ```
-
-Browser: demo mesh + HTTP probe of known hosts.  
-Desktop/Node: real listen socket + multicast announce.
 
 ---
 
@@ -113,82 +89,31 @@ Desktop/Node: real listen socket + multicast announce.
 pnpm install
 pnpm run dev:web   # http://localhost:3001
 pnpm peer-server   # optional: Node peer on :53317
-pnpm run dev:desktop  # Electron (needs electron postinstall approved)
+pnpm run dev:desktop
 cd apps/native && CI=true pnpm exec expo start --web --port 8081 --clear
-pnpm test          # unit
-pnpm test:e2e      # Playwright (installs browser on first run)
+pnpm test
+pnpm exec tsx packages/core/scripts/integration-net.mjs
 ```
 
 ---
 
-## Left to do / follow-ups
+## Still open / known limits
 
-- [ ] Approve Electron binary install (`pnpm approve-builds`) for full desktop runs
-- [ ] Wire real multi-chunk file bytes over HTTP (protocol + resume offsets are ready)
-- [ ] Pairing handshake that derives and stores `authSecret` on both devices
-- [ ] Native UI parity for Network card / Demo resume
-- [ ] Replace placeholder EAS `projectId` with a real Expo project
-- [ ] Optional: Effect.ts pipelines
-
----
-
-## Browser verification (T3 preview, 2026-07-18 P2/P3)
-
-Web on `http://localhost:3001` via `preview_open` → `environment-port` 3001.
-
-| Flow | Result |
-|------|--------|
-| Devices shell (4 peers, manual Tailscale node, search) | PASS — no max-update-depth |
-| Settings → Network card | PASS — Peer server idle, Discovery off, Browser badge, listen port 53317 |
-| Settings → Verify transfer integrity + peer listen port | PASS |
-| Transfers → Demo resume | PASS — `movie.mp4` + “Resumable from …” |
-| Unit tests `pnpm test` | PASS (net 9 + core 4) |
-
-### Deep verification (2026-07-18, same session + later)
-
-**Automated**
-| Check | Result |
-|-------|--------|
-| `pnpm test` (net + core unit) | PASS |
-| happy-dom selector smoke | PASS |
-| Dual peer-server integration (`packages/core/scripts/integration-net.mjs`) | PASS — auth, ping/pong, store probe, resume |
-| `pnpm --filter @lyra-sync-app/core check-types` | PASS (tests excluded from tsc) |
-| Vite production `web` build | PASS |
-
-**Web + live Node peer (`pnpm peer-server` :53317)**
-| Flow | Result |
-|------|--------|
-| Add peer `127.0.0.1` → live probe | PASS — card becomes **Test Peer Server** / Linux · 127.0.0.1:53317 |
-| Pair dialog → Generate code + QR | PASS — code e.g. `BA4JQY`, fingerprint, SVG QR |
-| Transfers → Demo multi-file → Rename all | PASS — banner cleared, transfer continues |
-| Clipboard history + auto-monitor copy | PASS — “Watching while this tab is focused…” |
-| Settings Network / integrity / Tailscale controls | PASS |
-
-**Expo web (`:8081`, iPhone 12 Pro viewport)**
-| Flow | Result |
-|------|--------|
-| Devices + floating tab bar | PASS — demo peers + Add by address |
-| Pair → Tap to generate QR/code | PASS — e.g. `ZZZQDA`, SVG QR, camera explained as native-only |
-| Simulate incoming request | PASS |
-| Transfers → Multi conflict → Rename all | PASS — “3 files already exist” banner + resolve |
-| Settings identity / toggles / unpair list | PASS |
-| Clipboard history actions | PASS |
-| Add peer `127.0.0.1` | PASS — peer appears (auto-probe parity added) |
-| Max update depth / Metro errors | PASS — none; only shadow*/pointerEvents deprecation warns |
-
----
+- [ ] True asymmetric key pairs (still hash-derived public from private hex)
+- [ ] Full TLS peer servers (app-level seal helpers exist; HTTP remains default)
+- [ ] Mobile as listen server (Expo/browser cannot bind UDP/HTTP server)
+- [ ] Real OS filesystem browse on desktop (peer CLI returns demo tree; Electron hooks ready)
+- [ ] Folder picker multi-file with relative paths end-to-end
+- [ ] Production `seedDemo: false` wiring in release builds (API exists)
+- [ ] Approve Electron binary (`pnpm approve-builds`) in this environment
+- [ ] Real Expo EAS `projectId`
 
 ---
 
 ## Agent handoff notes
 
-1. Do **not** set shadcn `baseColor: blue` for CLI installs — registry 404; blue is CSS-only.
-2. Shared hooks live in `packages/hooks` — prefer that over editing app-local copies.
-3. After changing native store hooks: **restart Expo with `--clear`** if `CI=true`.
-4. Update this file when closing milestones.
-5. Keyboard shortcuts live in `apps/web/src/components/keyboard-shortcuts.tsx`.
-6. Conflict demo: Transfers → “Demo multi-file” / “Demo batch”; resume: “Demo resume”.
-7. Peer server CLI: `pnpm peer-server` (`LYRA_PORT`, `LYRA_DISCOVERY=0` to silence multicast).
-8. Live QR scan needs a physical device or simulator with a camera; Expo web keeps paste-only.
-9. Clipboard auto-monitor needs a focused/secure context; browsers may prompt for clipboard permission once.
-10. Electron ignored build scripts until approved in this environment — code is present under `apps/desktop`.
+1. Pairing is **dual-confirm**: scan/code → banner → Confirm stores `authSecret`.
+2. Wire paths need `device.host` + `device.authSecret` (demo peers stay simulated).
+3. Peer CLI: `pnpm peer-server` logs envelopes and serves demo FS listings.
+4. Integration: `pnpm exec tsx packages/core/scripts/integration-net.mjs`.
+5. Update `docs/SPEC-VS-IMPLEMENTATION.md` after major milestones.

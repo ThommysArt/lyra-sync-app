@@ -444,6 +444,7 @@ Expo native    ──► core store (demo mesh); no listen server
 |------|--------|
 | 2026-07-19 | Initial detailed code-vs-spec report (chat). |
 | 2026-07-19 | **Rev 2:** T3 MCP load verification of web `:3001`; Playwright crawl of web + Expo web; screenshots; UI parity table; saved as `docs/SPEC-VS-IMPLEMENTATION.md`. |
+| 2026-07-19 | **Rev 3 (implementation):** Dual-confirm + mutual `authSecret`; message auth gate; multi-chunk wire transfers; clipboard images; open_url / fs_list wire; native Network/integrity/Open URL/Resume parity; mid-transfer speed+ETA; integration + T3 re-verify web+Expo. See `AGENT-PROGRESS.md`. |
 
 ---
 

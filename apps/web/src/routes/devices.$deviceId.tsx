@@ -14,7 +14,7 @@ import {
   Folder,
   Upload,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 
 import { Badge } from "@lyra-sync-app/ui/components/badge";
 import { Button } from "@lyra-sync-app/ui/components/button";
@@ -40,10 +40,12 @@ function DeviceDetailPage() {
   const [path, setPath] = useState("/");
   const [selected, setSelected] = useState<string[]>([]);
 
-  const entries = useMemo(
-    () => (device ? store.listRemoteFiles(device.id, path) : []),
-    [device, path, store],
-  );
+  const cacheKey = `${deviceId}::${path}`;
+  const entries = useLyraSelector((s) => s.remoteFsCache[cacheKey] ?? []);
+
+  useEffect(() => {
+    void store.fetchRemoteFiles(deviceId, path);
+  }, [deviceId, path, store]);
 
   if (!device) {
     return (

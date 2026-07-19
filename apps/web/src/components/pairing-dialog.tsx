@@ -44,7 +44,12 @@ export function PairingDialog({
     if (result.ok) {
       setCode("");
       setError(null);
-      setOpen(false);
+      // Dual-confirm: keep dialog open only if fully paired; pending uses banner
+      if ("pending" in result && result.pending) {
+        setOpen(false);
+      } else if ("device" in result) {
+        setOpen(false);
+      }
     } else {
       setError(result.error);
     }
@@ -66,7 +71,8 @@ export function PairingDialog({
         <DialogHeader>
           <DialogTitle>Pair a device</DialogTitle>
           <DialogDescription>
-            Scan the QR code or enter a pairing code. Both devices must confirm.
+            Scan the QR code or enter a pairing code. Both devices must confirm before trust is
+            stored (auth secret is derived on accept).
           </DialogDescription>
         </DialogHeader>
 

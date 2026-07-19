@@ -1,6 +1,7 @@
 import {
   applyChunkProgress,
   canResumeTransfer,
+  deriveMutualAuthSecret,
   isLikelyTailscaleHost,
   probePeer,
   probePeers,
@@ -26,11 +27,23 @@ import {
   listDemoFiles,
 } from "./demo";
 import { createDeviceIdentity, generateId, generatePairingCode } from "./identity";
+import {
+  isLivePeer,
+  wireListRemoteFiles,
+  wireOpenUrl,
+  wirePushClipboard,
+  wireSendFiles,
+  wireSendPairRequest,
+} from "./peer-ops";
 
 export type IncomingPairingRequest = {
   id: string;
   payload: PairingPayload;
   receivedAt: number;
+  /** Where the pending pair originated */
+  source: "scan" | "code" | "wire" | "simulate";
+  /** Optional pairing code (code entry path) */
+  code?: string;
 };
 
 export type ActivePairingSession = {
@@ -68,6 +81,8 @@ export type LyraState = {
   peerServer: PeerServerStatus;
   /** Last network probe summary for UI */
   lastProbeSummary: string | null;
+  /** Cached remote FS listings keyed by `${deviceId}::${path}` */
+  remoteFsCache: Record<string, FileEntry[]>;
 };
 
 export type LyraStore = {
@@ -79,11 +94,23 @@ export type LyraStore = {
   updateSettings: (patch: Partial<AppSettings>) => void;
   startPairingSession: () => ActivePairingSession;
   cancelPairingSession: () => void;
-  submitPairingCode: (code: string) => { ok: true; device: PairedDevice } | { ok: false; error: string };
-  confirmIncomingPair: (requestId: string) => void;
+  /**
+   * Enter a pairing code from another device.
+   * Dual-confirm: queues a pending request — call confirmIncomingPair to finish.
+   */
+  submitPairingCode: (
+    code: string,
+  ) =>
+    | { ok: true; pending: true; requestId: string }
+    | { ok: true; device: PairedDevice }
+    | { ok: false; error: string };
+  /** Accept a pending dual-confirm pair (scan / code / wire / simulate). */
+  confirmIncomingPair: (requestId: string) => void | Promise<void>;
   rejectIncomingPair: (requestId: string) => void;
   /** Demo helper: simulate an incoming pair request */
   simulateIncomingPair: () => void;
+  /** Enqueue a wire-originated pair_request (desktop peer server → store). */
+  enqueuePairRequest: (payload: PairingPayload, source?: IncomingPairingRequest["source"]) => void;
   unpairDevice: (deviceId: string) => void;
   /**
    * Manually add a peer by host/IP (and optional port). Used when multicast
@@ -117,10 +144,18 @@ export type LyraStore = {
   ) => void;
   selectDevice: (deviceId: string | null) => void;
   pushClipboardText: (text: string, targetDeviceIds?: string[]) => void;
+  /** Push an image (data URL / base64) to history and online peers */
+  pushClipboardImage: (
+    imageData: string,
+    targetDeviceIds?: string[],
+    options?: { mimeType?: string },
+  ) => void;
   pinClipboardItem: (id: string, pinned?: boolean) => void;
   clearClipboardHistory: () => void;
   removeClipboardItem: (id: string) => void;
   resendClipboardItem: (id: string, targetDeviceIds: string[]) => void;
+  /** Ingest a clipboard item received over the wire */
+  receiveClipboardItem: (item: ClipboardItem) => void;
   setLocalClipboardText: (text: string) => void;
   /**
    * Called by the desktop clipboard monitor when system clipboard text changes.
@@ -132,15 +167,26 @@ export type LyraStore = {
   ) => void;
   startFileTransfer: (
     deviceIds: string[],
-    files: { name: string; size: number; mimeType?: string; checksum?: string }[],
+    files: {
+      name: string;
+      size: number;
+      mimeType?: string;
+      checksum?: string;
+      /** Optional raw bytes for real wire transfer */
+      bytes?: Uint8Array;
+    }[],
     options?: {
       direction?: "sent" | "received";
       forceConflict?: boolean;
       /** Start partially transferred (demo resume) */
       initialOffset?: number;
       verifyIntegrity?: boolean;
+      /** Force local simulation even if peer has a host */
+      forceSimulate?: boolean;
     },
   ) => void;
+  /** Re-send a completed transfer's files to the same or new devices */
+  resendTransfer: (transferId: string, targetDeviceIds?: string[]) => void;
   setTransferStatus: (id: string, status: TransferStatus) => void;
   /** Resolve a transfer waiting on rename / overwrite / skip */
   resolveTransferConflict: (id: string, action: ConflictAction) => void;
@@ -150,11 +196,19 @@ export type LyraStore = {
   simulateIncomingConflict: (options?: { multiFile?: boolean; batch?: boolean }) => void;
   clearTransferHistory: () => void;
   listRemoteFiles: (deviceId: string, path: string) => FileEntry[];
+  /** Live fs_list against a reachable peer (falls back to demo FS). */
+  fetchRemoteFiles: (deviceId: string, path: string) => Promise<FileEntry[]>;
   sendUrl: (url: string, deviceIds: string[]) => void;
-  /** Apply a pairing payload from a scanned QR (demo handshake) */
+  /**
+   * Apply a pairing payload from a scanned QR.
+   * Dual-confirm: queues pending request — does not pair until confirmIncomingPair.
+   */
   applyPairingPayload: (
     payload: PairingPayload | string,
-  ) => { ok: true; device: PairedDevice } | { ok: false; error: string };
+  ) =>
+    | { ok: true; pending: true; requestId: string; deviceName: string }
+    | { ok: true; device: PairedDevice }
+    | { ok: false; error: string };
   dismissToast: () => void;
 };
 
@@ -191,6 +245,7 @@ function createInitialState(): LyraState {
       updatedAt: Date.now(),
     },
     lastProbeSummary: null,
+    remoteFsCache: {},
   };
 }
 
@@ -228,14 +283,18 @@ function simulateTransferProgress(
   const initial = store.getState().transfers.find((t) => t.id === transferId);
   let progress =
     initial && initial.totalBytes > 0 ? initial.transferredBytes / initial.totalBytes : 0;
+  const startedAt = Date.now();
+  const startBytes = initial?.transferredBytes ?? 0;
   const tick = () => {
     const current = store.getState().transfers.find((t) => t.id === transferId);
     if (!current || current.status !== "transferring") return;
     progress += 0.12 + Math.random() * 0.15;
+    const elapsed = Math.max(0.001, (Date.now() - startedAt) / 1000);
     if (progress >= 1) {
       const verify =
         current.verifyIntegrity ?? store.getState().settings.verifyTransferIntegrity;
       const patch = applyChunkProgress(current, current.totalBytes);
+      const durationMs = Date.now() - current.createdAt;
       set((st) => ({
         ...st,
         transfers: st.transfers.map((t) =>
@@ -246,9 +305,10 @@ function simulateTransferProgress(
                 transferredBytes: t.totalBytes,
                 status: "completed" as const,
                 completedAt: Date.now(),
-                durationMs: Date.now() - t.createdAt,
-                averageSpeedBps:
-                  t.totalBytes / Math.max(0.001, (Date.now() - t.createdAt) / 1000),
+                durationMs,
+                averageSpeedBps: t.totalBytes / Math.max(0.001, durationMs / 1000),
+                currentSpeedBps: undefined,
+                etaSeconds: 0,
                 // Demo integrity: checksums match when declared; unknown → ok
                 integrityOk: verify ? true : undefined,
                 updatedAt: Date.now(),
@@ -261,6 +321,10 @@ function simulateTransferProgress(
     }
     const nextBytes = Math.floor(current.totalBytes * progress);
     const patch = applyChunkProgress(current, nextBytes);
+    const progressed = Math.max(0, nextBytes - startBytes);
+    const currentSpeedBps = progressed / elapsed;
+    const remaining = Math.max(0, current.totalBytes - nextBytes);
+    const etaSeconds = currentSpeedBps > 0 ? remaining / currentSpeedBps : 0;
     set((st) => ({
       ...st,
       transfers: st.transfers.map((t) =>
@@ -269,6 +333,8 @@ function simulateTransferProgress(
               ...t,
               ...patch,
               status: "transferring" as const,
+              currentSpeedBps,
+              etaSeconds,
             }
           : t,
       ),
@@ -276,6 +342,101 @@ function simulateTransferProgress(
     setTimeout(tick, 400);
   };
   setTimeout(tick, 300);
+}
+
+async function finalizePairDevice(
+  set: (fn: (s: LyraState) => LyraState) => void,
+  getState: () => LyraState,
+  persist: () => void,
+  input: {
+    payload: PairingPayload;
+    source: IncomingPairingRequest["source"];
+    code?: string;
+  },
+): Promise<PairedDevice | null> {
+  const s = getState();
+  if (!s.identity || !s.privateKey) return null;
+
+  const authSecret = await deriveMutualAuthSecret({
+    pairingToken: input.payload.token,
+    localFingerprint: s.identity.fingerprint,
+    remoteFingerprint: input.payload.fingerprint,
+    localPublicKey: s.identity.publicKey,
+    remotePublicKey: input.payload.publicKey || input.payload.fingerprint,
+  });
+
+  const now = Date.now();
+  const device: PairedDevice = {
+    id: input.payload.deviceId,
+    name: input.payload.name || "Paired device",
+    type: input.payload.type ?? "desktop",
+    platform: input.payload.platform ?? "unknown",
+    fingerprint: input.payload.fingerprint,
+    publicKey: input.payload.publicKey || generateId("pub"),
+    pairedAt: now,
+    lastSeenAt: now,
+    online: true,
+    connectionType: input.payload.host ? "manual" : "local",
+    autoAcceptTransfers: s.settings.autoAcceptTransfers,
+    autoAcceptClipboard: s.settings.autoAcceptClipboard,
+    showInMainList: true,
+    host: input.payload.host,
+    port: input.payload.port,
+    authSecret,
+  };
+
+  set((st) => ({
+    ...st,
+    devices: [device, ...st.devices.filter((d) => d.id !== device.id)],
+    activePairing: null,
+  }));
+  persist();
+
+  // Notify the remote host when we have an address (wire dual-confirm path)
+  if (device.host && s.identity) {
+    const peerStatus = getState().peerServer;
+    let localHost: string | undefined;
+    if (peerStatus.url) {
+      try {
+        localHost = new URL(peerStatus.url).hostname;
+      } catch {
+        localHost = undefined;
+      }
+    }
+    void wireSendPairRequest({
+      host: device.host,
+      port: device.port,
+      identity: s.identity,
+      payload: {
+        version: 1,
+        deviceId: s.identity.id,
+        name: s.identity.name,
+        type: s.identity.type,
+        platform: s.identity.platform,
+        fingerprint: s.identity.fingerprint,
+        publicKey: s.identity.publicKey,
+        token: input.payload.token,
+        host: localHost,
+        port: peerStatus.port ?? getState().settings.peerListenPort,
+        expiresAt: Date.now() + 5 * 60 * 1000,
+      },
+      code: input.code,
+    });
+  }
+
+  return device;
+}
+
+function trimClipboardHistory(
+  items: ClipboardItem[],
+  settings: AppSettings,
+): ClipboardItem[] {
+  let next = items;
+  if (settings.clipboardRetentionDays > 0) {
+    const cutoff = Date.now() - settings.clipboardRetentionDays * 24 * 60 * 60 * 1000;
+    next = next.filter((c) => c.pinned || c.createdAt >= cutoff);
+  }
+  return next.slice(0, settings.clipboardHistoryLimit);
 }
 
 function applyProbeToDevice(d: PairedDevice, result: ProbeResult, now: number): PairedDevice {
@@ -437,6 +598,14 @@ export function createLyraStore(options?: {
       const code = generatePairingCode(6);
       const token = generateId("pair");
       const expiresAt = Date.now() + 5 * 60 * 1000;
+      let host: string | undefined;
+      if (s.peerServer.url) {
+        try {
+          host = new URL(s.peerServer.url).hostname;
+        } catch {
+          host = undefined;
+        }
+      }
       const payload: PairingPayload = {
         version: 1,
         deviceId: s.identity.id,
@@ -446,6 +615,8 @@ export function createLyraStore(options?: {
         fingerprint: s.identity.fingerprint,
         publicKey: s.identity.publicKey,
         token,
+        host,
+        port: s.peerServer.port ?? s.settings.peerListenPort,
         expiresAt,
       };
       const session: ActivePairingSession = { code, token, expiresAt, payload };
@@ -461,82 +632,63 @@ export function createLyraStore(options?: {
       const normalized = code.trim().toUpperCase();
       if (normalized.length < 4) return { ok: false as const, error: "Code too short" };
 
-      // Demo pairing: any valid-format code pairs a synthetic device.
-      // If there's an active session with matching code on "another" logical peer, accept self-loop is ignored.
+      // Self-loop: entering our own displayed code
       if (s.activePairing && s.activePairing.code === normalized) {
         return { ok: false as const, error: "Enter this code on the other device" };
       }
 
-      const now = Date.now();
-      const device: PairedDevice = {
-        id: generateId("dev"),
-        name: `Paired Device ${normalized.slice(0, 3)}`,
-        type: "mobile",
-        platform: "android",
-        fingerprint: generateId("fp").replace("fp_", ""),
-        publicKey: generateId("pub"),
-        pairedAt: now,
-        lastSeenAt: now,
-        online: true,
-        connectionType: "local",
-        autoAcceptTransfers: s.settings.autoAcceptTransfers,
-        autoAcceptClipboard: s.settings.autoAcceptClipboard,
-        showInMainList: true,
-        status: {
-          deviceId: "pending",
-          batteryLevel: 88,
-          isCharging: false,
-          networkType: "wifi",
-          networkName: "Local Network",
-          freeStorageBytes: 64 * 1024 ** 3,
-          updatedAt: now,
+      // Dual-confirm: queue pending synthetic peer for user accept
+      const requestId = generateId("inpair");
+      const token = generateId("tok");
+      const request: IncomingPairingRequest = {
+        id: requestId,
+        receivedAt: Date.now(),
+        source: "code",
+        code: normalized,
+        payload: {
+          version: 1,
+          deviceId: generateId("dev"),
+          name: `Device ${normalized.slice(0, 3)}`,
+          type: "mobile",
+          platform: "android",
+          fingerprint: generateId("fp").replace("fp_", "").slice(0, 32),
+          publicKey: generateId("pub"),
+          token,
+          expiresAt: Date.now() + 5 * 60 * 1000,
         },
       };
-      device.status = { ...device.status!, deviceId: device.id };
-
       set((st) => ({
         ...st,
-        devices: [device, ...st.devices.filter((d) => d.id !== device.id)],
-        activePairing: null,
+        incomingPairRequests: [request, ...st.incomingPairRequests],
       }));
-      persist();
-      notify(set, `Paired with ${device.name}`, "success");
-      return { ok: true as const, device };
+      notify(set, `Confirm pairing with ${request.payload.name}?`, "info");
+      return { ok: true as const, pending: true as const, requestId };
     },
-    confirmIncomingPair: (requestId) => {
+    confirmIncomingPair: async (requestId) => {
       const s = getState();
       const req = s.incomingPairRequests.find((r) => r.id === requestId);
       if (!req) return;
-      const p = req.payload;
-      const now = Date.now();
-      const device: PairedDevice = {
-        id: p.deviceId,
-        name: p.name,
-        type: p.type,
-        platform: p.platform,
-        fingerprint: p.fingerprint,
-        publicKey: p.publicKey,
-        pairedAt: now,
-        lastSeenAt: now,
-        online: true,
-        connectionType: "local",
-        autoAcceptTransfers: s.settings.autoAcceptTransfers,
-        autoAcceptClipboard: s.settings.autoAcceptClipboard,
-        showInMainList: true,
-      };
+
       set((st) => ({
         ...st,
-        devices: [device, ...st.devices.filter((d) => d.id !== device.id)],
         incomingPairRequests: st.incomingPairRequests.filter((r) => r.id !== requestId),
       }));
-      persist();
-      notify(set, `Paired with ${device.name}`, "success");
+
+      const device = await finalizePairDevice(set, getState, persist, {
+        payload: req.payload,
+        source: req.source,
+        code: req.code,
+      });
+      if (device) {
+        notify(set, `Paired with ${device.name}`, "success");
+      }
     },
     rejectIncomingPair: (requestId) => {
       set((s) => ({
         ...s,
         incomingPairRequests: s.incomingPairRequests.filter((r) => r.id !== requestId),
       }));
+      notify(set, "Pairing rejected", "info");
     },
     simulateIncomingPair: () => {
       const s = getState();
@@ -544,6 +696,7 @@ export function createLyraStore(options?: {
       const request: IncomingPairingRequest = {
         id: generateId("inpair"),
         receivedAt: Date.now(),
+        source: "simulate",
         payload: {
           version: 1,
           deviceId: generateId("dev"),
@@ -560,7 +713,28 @@ export function createLyraStore(options?: {
         ...st,
         incomingPairRequests: [request, ...st.incomingPairRequests],
       }));
-      notify(set, "Incoming pairing request", "info");
+      notify(set, "Incoming pairing request — confirm to trust", "info");
+    },
+    enqueuePairRequest: (payload, source = "wire") => {
+      const s = getState();
+      if (!s.identity) return;
+      if (payload.deviceId === s.identity.id) return;
+      if (payload.expiresAt && payload.expiresAt < Date.now()) return;
+      const existing = s.incomingPairRequests.find((r) => r.payload.deviceId === payload.deviceId);
+      if (existing) return;
+      // Auto-accept only when settings allow and not a first-time dual-confirm requirement
+      // Spec: dual confirm always for pairing
+      const request: IncomingPairingRequest = {
+        id: generateId("inpair"),
+        receivedAt: Date.now(),
+        source,
+        payload,
+      };
+      set((st) => ({
+        ...st,
+        incomingPairRequests: [request, ...st.incomingPairRequests],
+      }));
+      notify(set, `Pairing request from ${payload.name}`, "info");
     },
     unpairDevice: (deviceId) => {
       set((s) => ({
@@ -848,15 +1022,87 @@ export function createLyraStore(options?: {
       set((st) => ({
         ...st,
         localClipboardText: text.trim(),
-        clipboardHistory: [item, ...st.clipboardHistory].slice(0, st.settings.clipboardHistoryLimit),
+        clipboardHistory: trimClipboardHistory([item, ...st.clipboardHistory], st.settings),
       }));
       persist();
+
+      // Real wire push to live peers with host + auth
+      const live = s.devices.filter((d) => targets.includes(d.id) && isLivePeer(d) && d.authSecret);
+      for (const device of live) {
+        void wirePushClipboard({
+          device,
+          identity: s.identity!,
+          privateKey: s.privateKey!,
+          item,
+        }).then((res) => {
+          if (!res.ok) {
+            notify(set, `Clipboard to ${device.name} failed: ${res.error}`, "error");
+          }
+        });
+      }
+
       const count = targets.length;
       notify(
         set,
-        count > 0 ? `Clipboard sent to ${count} device${count === 1 ? "" : "s"}` : "Saved to clipboard history",
+        count > 0
+          ? `Clipboard sent to ${count} device${count === 1 ? "" : "s"}${live.length ? " (wire)" : ""}`
+          : "Saved to clipboard history",
         "success",
       );
+    },
+    pushClipboardImage: (imageData, targetDeviceIds, options) => {
+      const s = getState();
+      if (!s.identity || !imageData) return;
+      const targets =
+        targetDeviceIds ??
+        s.devices.filter((d) => d.online && d.showInMainList).map((d) => d.id);
+      const item: ClipboardItem = {
+        id: generateId("clip"),
+        type: "image",
+        imageData,
+        text: options?.mimeType ? `[image ${options.mimeType}]` : "[image]",
+        sourceDeviceId: s.identity.id,
+        sourceDeviceName: s.identity.name,
+        createdAt: Date.now(),
+        pinned: false,
+      };
+      set((st) => ({
+        ...st,
+        clipboardHistory: trimClipboardHistory([item, ...st.clipboardHistory], st.settings),
+      }));
+      persist();
+      const live = s.devices.filter((d) => targets.includes(d.id) && isLivePeer(d) && d.authSecret);
+      for (const device of live) {
+        void wirePushClipboard({
+          device,
+          identity: s.identity!,
+          privateKey: s.privateKey!,
+          item,
+        });
+      }
+      notify(
+        set,
+        targets.length > 0
+          ? `Image clipboard sent to ${targets.length} device(s)`
+          : "Image saved to history",
+        "success",
+      );
+    },
+    receiveClipboardItem: (item) => {
+      const s = getState();
+      if (!s.settings.clipboardSyncEnabled && !s.settings.autoAcceptClipboard) {
+        // Still store but do not auto-write local clipboard
+      }
+      set((st) => ({
+        ...st,
+        localClipboardText: item.type === "text" ? (item.text ?? st.localClipboardText) : st.localClipboardText,
+        clipboardHistory: trimClipboardHistory(
+          [{ ...item, pinned: item.pinned ?? false }, ...st.clipboardHistory.filter((c) => c.id !== item.id)],
+          st.settings,
+        ),
+      }));
+      persist();
+      notify(set, `Clipboard from ${item.sourceDeviceName}`, "info");
     },
     pinClipboardItem: (id, pinned = true) => {
       set((s) => ({
@@ -883,8 +1129,12 @@ export function createLyraStore(options?: {
     },
     resendClipboardItem: (id, targetDeviceIds) => {
       const item = getState().clipboardHistory.find((c) => c.id === id);
-      if (!item?.text) return;
-      store.pushClipboardText(item.text, targetDeviceIds);
+      if (!item) return;
+      if (item.type === "image" && item.imageData) {
+        store.pushClipboardImage(item.imageData, targetDeviceIds);
+        return;
+      }
+      if (item.text) store.pushClipboardText(item.text, targetDeviceIds);
     },
     setLocalClipboardText: (text) => {
       set((s) => ({ ...s, localClipboardText: text }));
@@ -944,6 +1194,7 @@ export function createLyraStore(options?: {
       if (!s.identity || files.length === 0 || deviceIds.length === 0) return;
       const direction = options?.direction ?? "sent";
       const forceConflict = options?.forceConflict ?? false;
+      const forceSimulate = options?.forceSimulate ?? false;
       const totalBytes = files.reduce((acc, f) => acc + f.size, 0);
       const now = Date.now();
       const conflictNames = forceConflict ? files.map((f) => f.name) : undefined;
@@ -955,6 +1206,12 @@ export function createLyraStore(options?: {
         options?.verifyIntegrity ?? s.settings.verifyTransferIntegrity;
       const newTransfers: Transfer[] = deviceIds.map((deviceId) => {
         const device = s.devices.find((d) => d.id === deviceId);
+        const overWire =
+          !forceSimulate &&
+          direction === "sent" &&
+          !forceConflict &&
+          device != null &&
+          isLivePeer(device);
         const status: TransferStatus = forceConflict
           ? "conflict"
           : initialOffset > 0 && initialOffset < totalBytes
@@ -980,6 +1237,7 @@ export function createLyraStore(options?: {
           conflictFileName: conflictNames?.[0],
           conflictFileNames: conflictNames,
           verifyIntegrity,
+          overWire: overWire || undefined,
         };
         if (initialOffset > 0) {
           return { ...base, ...applyChunkProgress(base, initialOffset), status };
@@ -1016,10 +1274,101 @@ export function createLyraStore(options?: {
       );
 
       for (const tx of newTransfers) {
-        if (tx.status === "transferring") {
+        if (tx.status !== "transferring") continue;
+        const device = getState().devices.find((d) => d.id === tx.deviceId);
+        if (tx.overWire && device && s.identity && s.privateKey) {
+          void wireSendFiles({
+            device,
+            identity: s.identity,
+            privateKey: s.privateKey,
+            transferId: tx.id,
+            files,
+            resumeOffset: tx.resumeOffset,
+            onProgress: (p) => {
+              set((st) => ({
+                ...st,
+                transfers: st.transfers.map((t) =>
+                  t.id === tx.id
+                    ? {
+                        ...t,
+                        ...applyChunkProgress(t, p.transferredBytes),
+                        currentSpeedBps: p.currentSpeedBps,
+                        etaSeconds: p.etaSeconds,
+                        status: "transferring" as const,
+                      }
+                    : t,
+                ),
+              }));
+            },
+          }).then((res) => {
+            if (!res.ok) {
+              set((st) => ({
+                ...st,
+                transfers: st.transfers.map((t) =>
+                  t.id === tx.id
+                    ? {
+                        ...t,
+                        status: "failed" as const,
+                        error: res.error,
+                        updatedAt: Date.now(),
+                      }
+                    : t,
+                ),
+              }));
+              persist();
+              notify(set, `Transfer failed: ${res.error}`, "error");
+              return;
+            }
+            const verify =
+              tx.verifyIntegrity ?? getState().settings.verifyTransferIntegrity;
+            set((st) => ({
+              ...st,
+              transfers: st.transfers.map((t) =>
+                t.id === tx.id
+                  ? {
+                      ...t,
+                      ...applyChunkProgress(t, t.totalBytes),
+                      status: "completed" as const,
+                      completedAt: Date.now(),
+                      durationMs: Date.now() - t.createdAt,
+                      averageSpeedBps:
+                        t.totalBytes / Math.max(0.001, (Date.now() - t.createdAt) / 1000),
+                      currentSpeedBps: undefined,
+                      etaSeconds: 0,
+                      integrityOk: verify ? true : undefined,
+                      overWire: true,
+                      updatedAt: Date.now(),
+                    }
+                  : t,
+              ),
+            }));
+            persist();
+            notify(set, "Transfer complete (wire)", "success");
+          });
+        } else {
           simulateTransferProgress(store, set, tx.id);
         }
       }
+    },
+    resendTransfer: (transferId, targetDeviceIds) => {
+      const tx = getState().transfers.find((t) => t.id === transferId);
+      if (!tx || tx.files.length === 0) return;
+      const targets =
+        targetDeviceIds ??
+        (tx.deviceId ? [tx.deviceId] : getState().devices.filter((d) => d.online).map((d) => d.id));
+      if (targets.length === 0) {
+        notify(set, "No target devices for re-send", "error");
+        return;
+      }
+      store.startFileTransfer(
+        targets,
+        tx.files.map((f) => ({
+          name: f.name,
+          size: f.size,
+          mimeType: f.mimeType,
+          checksum: f.checksum,
+        })),
+      );
     },
     setTransferStatus: (id, status) => {
       const prev = getState().transfers.find((t) => t.id === id);
@@ -1233,12 +1582,81 @@ export function createLyraStore(options?: {
       }));
       persist();
     },
-    listRemoteFiles: (_deviceId, path) => listDemoFiles(path),
+    listRemoteFiles: (deviceId, path) => {
+      const key = `${deviceId}::${path}`;
+      const cached = getState().remoteFsCache[key];
+      if (cached) return cached;
+      return listDemoFiles(path);
+    },
+    fetchRemoteFiles: async (deviceId, path) => {
+      const s = getState();
+      const device = s.devices.find((d) => d.id === deviceId);
+      if (!device || !s.identity || !s.privateKey) {
+        const demo = listDemoFiles(path);
+        set((st) => ({
+          ...st,
+          remoteFsCache: { ...st.remoteFsCache, [`${deviceId}::${path}`]: demo },
+        }));
+        return demo;
+      }
+      if (isLivePeer(device) && device.authSecret) {
+        const res = await wireListRemoteFiles({
+          device,
+          identity: s.identity,
+          privateKey: s.privateKey,
+          path,
+          requestId: generateId("fs"),
+        });
+        if (res.ok) {
+          set((st) => ({
+            ...st,
+            remoteFsCache: { ...st.remoteFsCache, [`${deviceId}::${path}`]: res.entries },
+          }));
+          return res.entries;
+        }
+        notify(set, `Remote FS: ${res.error} — showing demo tree`, "info");
+      }
+      const demo = listDemoFiles(path);
+      set((st) => ({
+        ...st,
+        remoteFsCache: { ...st.remoteFsCache, [`${deviceId}::${path}`]: demo },
+      }));
+      return demo;
+    },
     sendUrl: (url, deviceIds) => {
       if (!url.trim() || deviceIds.length === 0) return;
+      const s = getState();
+      let parsed: string;
+      try {
+        parsed = new URL(url.trim()).toString();
+      } catch {
+        notify(set, "Invalid URL", "error");
+        return;
+      }
+      const live = s.devices.filter(
+        (d) => deviceIds.includes(d.id) && isLivePeer(d) && d.authSecret && s.identity && s.privateKey,
+      );
+      for (const device of live) {
+        void wireOpenUrl({
+          device,
+          identity: s.identity!,
+          privateKey: s.privateKey!,
+          url: parsed,
+        }).then((res) => {
+          if (!res.ok) notify(set, `Open URL on ${device.name}: ${res.error}`, "error");
+        });
+      }
+      // Open locally as receiver fallback for demo peers
+      if (typeof globalThis.open === "function" && live.length === 0) {
+        try {
+          globalThis.open(parsed, "_blank", "noopener,noreferrer");
+        } catch {
+          // ignore
+        }
+      }
       notify(
         set,
-        `URL sent to ${deviceIds.length} device${deviceIds.length === 1 ? "" : "s"}`,
+        `URL sent to ${deviceIds.length} device${deviceIds.length === 1 ? "" : "s"}${live.length ? " (wire)" : ""}`,
         "success",
       );
     },
@@ -1263,31 +1681,25 @@ export function createLyraStore(options?: {
         return { ok: false as const, error: "Pairing code expired" };
       }
 
-      const now = Date.now();
-      const device: PairedDevice = {
-        id: payload.deviceId,
-        name: payload.name || "Scanned device",
-        type: payload.type ?? "desktop",
-        platform: payload.platform ?? "unknown",
-        fingerprint: payload.fingerprint,
-        publicKey: payload.publicKey || generateId("pub"),
-        pairedAt: now,
-        lastSeenAt: now,
-        online: true,
-        connectionType: "local",
-        autoAcceptTransfers: s.settings.autoAcceptTransfers,
-        autoAcceptClipboard: s.settings.autoAcceptClipboard,
-        showInMainList: true,
+      // Dual-confirm: queue pending — user must accept
+      const requestId = generateId("inpair");
+      const request: IncomingPairingRequest = {
+        id: requestId,
+        receivedAt: Date.now(),
+        source: "scan",
+        payload,
       };
-
       set((st) => ({
         ...st,
-        devices: [device, ...st.devices.filter((d) => d.id !== device.id)],
-        activePairing: null,
+        incomingPairRequests: [request, ...st.incomingPairRequests.filter((r) => r.payload.deviceId !== payload.deviceId)],
       }));
-      persist();
-      notify(set, `Paired with ${device.name}`, "success");
-      return { ok: true as const, device };
+      notify(set, `Confirm pairing with ${payload.name || "device"}?`, "info");
+      return {
+        ok: true as const,
+        pending: true as const,
+        requestId,
+        deviceName: payload.name || "device",
+      };
     },
     dismissToast: () => {
       set((s) => ({ ...s, toast: null }));

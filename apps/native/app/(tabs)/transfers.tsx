@@ -1,4 +1,10 @@
-import { formatBytes, formatPercent, formatRelativeTime } from "@lyra-sync-app/core";
+import {
+  formatBytes,
+  formatEta,
+  formatPercent,
+  formatRelativeTime,
+  formatSpeed,
+} from "@lyra-sync-app/core";
 import * as DocumentPicker from "expo-document-picker";
 import { Pressable, ScrollView, Text, View } from "react-native";
 
@@ -79,6 +85,29 @@ export default function TransfersScreen() {
               >
                 <Text style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 13 }}>
                   Batch
+                </Text>
+              </Pressable>
+              <Pressable
+                onPress={() => {
+                  if (onlineIds.length === 0) return;
+                  store.startFileTransfer(
+                    [onlineIds[0]!],
+                    [
+                      { name: "movie.mp4", size: 80_000_000, mimeType: "video/mp4" },
+                      { name: "sidecar.json", size: 4_000, mimeType: "application/json" },
+                    ],
+                    { initialOffset: 32_000_000, verifyIntegrity: true, forceSimulate: true },
+                  );
+                }}
+                style={{
+                  backgroundColor: isDark ? "rgba(255,196,0,0.18)" : "rgba(255,196,0,0.25)",
+                  borderRadius: 999,
+                  paddingHorizontal: 12,
+                  paddingVertical: 8,
+                }}
+              >
+                <Text style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 13 }}>
+                  Resume
                 </Text>
               </Pressable>
               <Pressable
@@ -171,10 +200,14 @@ export default function TransfersScreen() {
                       style={{ color: muted, fontFamily: fonts.regular, fontSize: 11, marginTop: 4 }}
                     >
                       {pct}% · {formatBytes(tx.transferredBytes)}
+                      {tx.currentSpeedBps
+                        ? ` · ${formatSpeed(tx.currentSpeedBps)} · ETA ${formatEta(tx.etaSeconds)}`
+                        : ""}
+                      {tx.overWire ? " · wire" : ""}
                     </Text>
                   </View>
                 )}
-                <View style={{ flexDirection: "row", gap: 8, marginTop: 10 }}>
+                <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
                   {tx.status === "transferring" && (
                     <Chip
                       label="Pause"
@@ -185,7 +218,7 @@ export default function TransfersScreen() {
                   {tx.status === "paused" && (
                     <Chip
                       label="Resume"
-                      onPress={() => store.setTransferStatus(tx.id, "transferring")}
+                      onPress={() => store.resumeTransfer(tx.id)}
                       ink={ink}
                     />
                   )}
@@ -193,6 +226,13 @@ export default function TransfersScreen() {
                     <Chip
                       label="Cancel"
                       onPress={() => store.setTransferStatus(tx.id, "cancelled")}
+                      ink={ink}
+                    />
+                  )}
+                  {(tx.status === "completed" || tx.status === "cancelled") && (
+                    <Chip
+                      label="Re-send"
+                      onPress={() => store.resendTransfer(tx.id)}
                       ink={ink}
                     />
                   )}

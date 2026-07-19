@@ -117,22 +117,19 @@ export async function verifyAuthResponse(input: {
     return { ok: false, error: "Device id mismatch" };
   }
 
-  let expectedProof: string | null = null;
+  const candidates: string[] = [];
   if (input.sharedSecret) {
-    expectedProof = await sha256Hex(`${challenge.nonce}:${input.sharedSecret}`);
-  } else if (input.privateKeyForVerify) {
-    expectedProof = await sha256Hex(`${challenge.nonce}:${input.privateKeyForVerify}`);
-  } else {
-    // Fallback identity-binding proof (weaker): sha256(nonce:publicKey:fingerprint)
-    expectedProof = await sha256Hex(
-      `${challenge.nonce}:${response.publicKey}:${response.fingerprint}`,
-    );
+    candidates.push(await sha256Hex(`${challenge.nonce}:${input.sharedSecret}`));
   }
+  if (input.privateKeyForVerify) {
+    candidates.push(await sha256Hex(`${challenge.nonce}:${input.privateKeyForVerify}`));
+  }
+  // Identity-binding proof (weaker first-contact / migration)
+  candidates.push(
+    await sha256Hex(`${challenge.nonce}:${response.publicKey}:${response.fingerprint}`),
+  );
 
-  if (response.proof !== expectedProof) {
-    // Accept alternate client proof form used when sharedSecret unknown:
-    // clients may send privateKey-based proof when server has sharedSecret stored.
-    // Already handled above. Fail closed.
+  if (!candidates.includes(response.proof)) {
     return { ok: false, error: "Invalid proof" };
   }
 
@@ -154,12 +151,52 @@ export async function createSharedSecretProof(
   return sha256Hex(`${nonce}:${sharedSecret}`);
 }
 
-/** Derive a mutual secret after pairing (token from QR/code handshake). */
+/**
+ * Derive a **mutual** auth secret both peers can recompute after dual-confirm pairing.
+ * Order-independent: fingerprints and public keys are sorted before hashing.
+ * Token is the short-lived QR/code secret; private keys never leave the device.
+ */
+export async function deriveMutualAuthSecret(input: {
+  pairingToken: string;
+  localFingerprint: string;
+  remoteFingerprint: string;
+  localPublicKey: string;
+  remotePublicKey: string;
+}): Promise<string> {
+  const fps = [input.localFingerprint, input.remoteFingerprint].sort();
+  const pubs = [input.localPublicKey, input.remotePublicKey].sort();
+  return sha256Hex(
+    `pair-mutual:${input.pairingToken}:${fps[0]}:${fps[1]}:${pubs[0]}:${pubs[1]}`,
+  );
+}
+
+/**
+ * @deprecated Prefer {@link deriveMutualAuthSecret}. Kept for older call sites;
+ * now delegates to mutual derivation when remote fingerprint/public key are provided
+ * via the optional fields, otherwise falls back to a local-only hash (not mutual).
+ */
 export async function derivePairingSharedSecret(input: {
   pairingToken: string;
   localPrivateKey: string;
   remotePublicKey: string;
+  localFingerprint?: string;
+  remoteFingerprint?: string;
+  localPublicKey?: string;
 }): Promise<string> {
+  if (
+    input.localFingerprint &&
+    input.remoteFingerprint &&
+    input.localPublicKey
+  ) {
+    return deriveMutualAuthSecret({
+      pairingToken: input.pairingToken,
+      localFingerprint: input.localFingerprint,
+      remoteFingerprint: input.remoteFingerprint,
+      localPublicKey: input.localPublicKey,
+      remotePublicKey: input.remotePublicKey,
+    });
+  }
+  // Legacy non-mutual (tests / migration)
   return sha256Hex(
     `pair:${input.pairingToken}:${input.localPrivateKey}:${input.remotePublicKey}`,
   );

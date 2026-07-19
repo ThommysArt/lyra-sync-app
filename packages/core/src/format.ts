@@ -16,6 +16,19 @@ export function formatSpeed(bps: number | undefined): string {
   return `${formatBytes(bps)}/s`;
 }
 
+/** Format remaining seconds as a short ETA string. */
+export function formatEta(seconds: number | undefined): string {
+  if (seconds == null || !Number.isFinite(seconds) || seconds < 0) return "—";
+  if (seconds < 1) return "<1s";
+  if (seconds < 60) return `${Math.ceil(seconds)}s`;
+  const min = Math.floor(seconds / 60);
+  const sec = Math.ceil(seconds % 60);
+  if (min < 60) return sec > 0 ? `${min}m ${sec}s` : `${min}m`;
+  const hr = Math.floor(min / 60);
+  const remMin = min % 60;
+  return remMin > 0 ? `${hr}h ${remMin}m` : `${hr}h`;
+}
+
 export function formatRelativeTime(ts: number, now = Date.now()): string {
   const diff = Math.max(0, now - ts);
   const sec = Math.floor(diff / 1000);

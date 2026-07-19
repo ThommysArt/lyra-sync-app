@@ -14,11 +14,14 @@ export default function SettingsScreen() {
   const identity = useLyraSelector((s) => s.identity);
   const settings = useLyraSelector((s) => s.settings);
   const devices = useLyraSelector((s) => s.devices);
+  const peerServer = useLyraSelector((s) => s.peerServer);
+  const lastProbeSummary = useLyraSelector((s) => s.lastProbeSummary);
   const hasTopBanners = useLyraSelector(
     (s) =>
       s.incomingPairRequests.length > 0 || s.transfers.some((t) => t.status === "conflict"),
   );
   const [name, setName] = useState(identity?.name ?? "");
+  const [probeBusy, setProbeBusy] = useState(false);
   const bg = isDark ? PAGE_BG.dark : PAGE_BG.light;
   const ink = isDark ? "#F5F7FF" : "#0B1220";
   const muted = isDark ? "rgba(255,255,255,0.55)" : "rgba(0,0,0,0.45)";
@@ -69,6 +72,83 @@ export default function SettingsScreen() {
             <Text style={{ color: ink, fontFamily: fonts.medium, fontSize: 13, marginTop: 4 }}>
               {identity ? formatFingerprint(identity.fingerprint) : "—"}
             </Text>
+            <Text style={{ color: muted, fontFamily: fonts.regular, fontSize: 12, marginTop: 8 }}>
+              Platform · {identity?.platform ?? "—"} · id {identity?.id?.slice(0, 10) ?? "—"}
+            </Text>
+          </View>
+
+          <View style={{ backgroundColor: card, borderRadius: 24, padding: 16 }}>
+            <Text style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 16 }}>Network</Text>
+            <Text style={{ color: muted, fontFamily: fonts.regular, fontSize: 13, marginTop: 6 }}>
+              {peerServer.running
+                ? `Peer server on :${peerServer.port ?? "—"}`
+                : "Peer server idle"}
+              {" · "}
+              {peerServer.discoveryActive ? "Discovery on" : "Discovery off"}
+            </Text>
+            <View
+              style={{
+                alignSelf: "flex-start",
+                backgroundColor: isDark ? "rgba(122,162,255,0.18)" : "rgba(47,107,255,0.12)",
+                borderRadius: 999,
+                marginTop: 10,
+                paddingHorizontal: 10,
+                paddingVertical: 4,
+              }}
+            >
+              <Text style={{ color: accent, fontFamily: fonts.medium, fontSize: 12 }}>
+                {peerServer.running ? "Desktop / Node" : "Browser / Expo web"}
+              </Text>
+            </View>
+            <Text style={{ color: muted, fontFamily: fonts.regular, fontSize: 12, marginTop: 10 }}>
+              {peerServer.running
+                ? "Listening for peers on your LAN."
+                : "No listen socket here — probe peers via HTTP /lyra/info, or run desktop / peer-server on :" +
+                  String(settings.peerListenPort)}
+            </Text>
+            {lastProbeSummary ? (
+              <Text style={{ color: muted, fontFamily: fonts.regular, fontSize: 12, marginTop: 8 }}>
+                {lastProbeSummary}
+              </Text>
+            ) : null}
+            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 12 }}>
+              <Pressable
+                disabled={probeBusy}
+                onPress={() => {
+                  setProbeBusy(true);
+                  void Promise.resolve(store.refreshDiscovery()).finally(() => setProbeBusy(false));
+                }}
+                style={{
+                  backgroundColor: isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)",
+                  borderRadius: 999,
+                  opacity: probeBusy ? 0.6 : 1,
+                  paddingHorizontal: 12,
+                  paddingVertical: 8,
+                }}
+              >
+                <Text style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 13 }}>
+                  Refresh discovery
+                </Text>
+              </Pressable>
+              <Pressable
+                disabled={probeBusy || !settings.tailscaleEnabled}
+                onPress={() => {
+                  setProbeBusy(true);
+                  void store.probeTailscalePeers().finally(() => setProbeBusy(false));
+                }}
+                style={{
+                  backgroundColor: isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)",
+                  borderRadius: 999,
+                  opacity: probeBusy || !settings.tailscaleEnabled ? 0.45 : 1,
+                  paddingHorizontal: 12,
+                  paddingVertical: 8,
+                }}
+              >
+                <Text style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 13 }}>
+                  Probe Tailscale
+                </Text>
+              </Pressable>
+            </View>
           </View>
 
           <View style={{ backgroundColor: card, borderRadius: 24, overflow: "hidden" }}>
@@ -120,7 +200,42 @@ export default function SettingsScreen() {
               onValueChange={(v) => store.updateSettings({ tailscaleEnabled: v })}
               ink={ink}
               accent={accent}
+            />
+            <Row
+              label="Verify transfer integrity"
+              value={settings.verifyTransferIntegrity}
+              onValueChange={(v) => store.updateSettings({ verifyTransferIntegrity: v })}
+              ink={ink}
+              accent={accent}
               last
+            />
+          </View>
+
+          <View style={{ backgroundColor: card, borderRadius: 24, padding: 16 }}>
+            <Text style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 16 }}>
+              Peer listen port
+            </Text>
+            <Text style={{ color: muted, fontFamily: fonts.regular, fontSize: 12, marginTop: 4 }}>
+              Preferred port for desktop / Node peer server
+            </Text>
+            <TextInput
+              keyboardType="number-pad"
+              onChangeText={(t) => {
+                const n = Number.parseInt(t, 10);
+                if (Number.isFinite(n) && n > 0) {
+                  store.updateSettings({ peerListenPort: n });
+                }
+              }}
+              style={{
+                borderBottomColor: isDark ? "rgba(255,255,255,0.1)" : "rgba(0,0,0,0.08)",
+                borderBottomWidth: 1,
+                color: ink,
+                fontFamily: fonts.semiBold,
+                fontSize: 16,
+                marginTop: 8,
+                paddingVertical: 8,
+              }}
+              value={String(settings.peerListenPort)}
             />
           </View>
 
@@ -146,6 +261,8 @@ export default function SettingsScreen() {
                   </Text>
                   <Text style={{ color: muted, fontFamily: fonts.regular, fontSize: 12 }}>
                     {d.online ? "Online" : "Offline"}
+                    {d.authSecret ? " · trusted" : ""}
+                    {d.host ? ` · ${d.host}` : ""}
                   </Text>
                 </View>
                 <Pressable onPress={() => store.unpairDevice(d.id)}>

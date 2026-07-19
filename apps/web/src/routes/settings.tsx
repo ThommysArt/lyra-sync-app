@@ -251,6 +251,7 @@ function SettingsPage() {
             ["Mod+Shift+C", "Open clipboard history"],
             ["Mod+Shift+T", "Open transfers"],
             ["Mod+Shift+P", "Pause / resume active transfers"],
+            ["Mod+Q", "Quit (desktop shell only)"],
           ].map(([keys, desc]) => (
             <div key={keys} className="flex items-center justify-between gap-3">
               <span className="text-muted-foreground">{desc}</span>

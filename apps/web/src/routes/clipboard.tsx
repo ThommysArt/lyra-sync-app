@@ -121,6 +121,28 @@ function ClipboardPage() {
             >
               Save to history
             </Button>
+            <label className="inline-flex h-9 cursor-pointer items-center justify-center gap-2 rounded-full border border-border bg-background px-3 text-sm font-medium hover:bg-muted">
+              Add image
+              <input
+                type="file"
+                accept="image/*"
+                className="sr-only"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  e.target.value = "";
+                  if (!file) return;
+                  const reader = new FileReader();
+                  reader.onload = () => {
+                    const data = typeof reader.result === "string" ? reader.result : "";
+                    if (!data) return;
+                    store.pushClipboardImage(data, onlineDevices.map((d) => d.id), {
+                      mimeType: file.type,
+                    });
+                  };
+                  reader.readAsDataURL(file);
+                }}
+              />
+            </label>
           </div>
         </CardContent>
       </Card>
@@ -133,12 +155,22 @@ function ClipboardPage() {
             <Card key={item.id} className="rounded-3xl">
               <CardContent className="flex flex-col gap-3 p-4 sm:flex-row sm:items-start">
                 <div className="min-w-0 flex-1">
+                  {item.type === "image" && item.imageData ? (
+                    <img
+                      src={item.imageData}
+                      alt="Clipboard image"
+                      className="mb-2 max-h-40 rounded-2xl border border-border/60 object-contain"
+                    />
+                  ) : null}
                   <p className="whitespace-pre-wrap break-words text-sm">
-                    {item.text || (item.type === "image" ? "[Image]" : "—")}
+                    {item.type === "image"
+                      ? item.text || "Image"
+                      : item.text || "—"}
                   </p>
                   <p className="mt-2 text-xs text-muted-foreground">
                     {item.sourceDeviceName} · {formatRelativeTime(item.createdAt)}
                     {item.pinned ? " · Pinned" : ""}
+                    {item.type === "image" ? " · Image" : ""}
                   </p>
                 </div>
                 <div className="flex shrink-0 gap-1">

@@ -31,10 +31,12 @@ export const MessageTypeSchema = z.enum([
   "transfer_cancel",
   "transfer_pause",
   "transfer_resume",
+  "transfer_chunk",
   "transfer_chunk_ack",
   "fs_list",
   "fs_list_response",
   "open_url",
+  "open_url_ack",
   "ping",
   "pong",
 ]);
@@ -73,11 +75,21 @@ export const DiscoverAnnouncePayloadSchema = z.object({
 });
 export type DiscoverAnnouncePayload = z.infer<typeof DiscoverAnnouncePayloadSchema>;
 
-export const PairRequestPayloadSchema = PairingPayloadSchema;
+export const PairRequestPayloadSchema = PairingPayloadSchema.extend({
+  /** Optional code so the host can match an active pairing session */
+  code: z.string().optional(),
+});
+export type PairRequestPayload = z.infer<typeof PairRequestPayloadSchema>;
+
 export const PairConfirmPayloadSchema = z.object({
   identity: DeviceIdentitySchema,
   token: z.string(),
+  /** Confirmer public key (redundant with identity, kept for clarity) */
+  publicKey: z.string().optional(),
+  host: z.string().optional(),
+  port: z.number().int().positive().optional(),
 });
+export type PairConfirmPayload = z.infer<typeof PairConfirmPayloadSchema>;
 
 export const ClipboardPushPayloadSchema = ClipboardItemSchema.omit({
   pinned: true,
@@ -135,6 +147,20 @@ export const TransferResumePayloadSchema = z.object({
 });
 export type TransferResumePayload = z.infer<typeof TransferResumePayloadSchema>;
 
+export const TransferChunkPayloadSchema = z.object({
+  transferId: z.string().min(1),
+  fileIndex: z.number().int().nonnegative().default(0),
+  /** Absolute byte offset within the session (sum of prior files + offset in current) */
+  offset: z.number().int().nonnegative(),
+  /** Base64-encoded chunk body */
+  dataBase64: z.string(),
+  /** True when this is the last chunk of the full transfer session */
+  eof: z.boolean().optional(),
+  /** Optional running checksum of full file when eof for that file */
+  checksum: z.string().optional(),
+});
+export type TransferChunkPayload = z.infer<typeof TransferChunkPayloadSchema>;
+
 export const TransferChunkAckPayloadSchema = z.object({
   transferId: z.string().min(1),
   offset: z.number().int().nonnegative(),
@@ -159,3 +185,11 @@ export const OpenUrlPayloadSchema = z.object({
   url: z.string().url(),
   title: z.string().optional(),
 });
+export type OpenUrlPayload = z.infer<typeof OpenUrlPayloadSchema>;
+
+export const OpenUrlAckPayloadSchema = z.object({
+  url: z.string(),
+  opened: z.boolean(),
+  error: z.string().optional(),
+});
+export type OpenUrlAckPayload = z.infer<typeof OpenUrlAckPayloadSchema>;

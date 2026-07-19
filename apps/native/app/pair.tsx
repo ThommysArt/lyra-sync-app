@@ -35,7 +35,13 @@ export default function PairScreen() {
       if (!result.ok) {
         return { ok: false as const, error: result.error };
       }
-      return { ok: true as const, deviceName: result.device.name };
+      if ("pending" in result && result.pending) {
+        return { ok: true as const, deviceName: result.deviceName };
+      }
+      if ("device" in result) {
+        return { ok: true as const, deviceName: result.device.name };
+      }
+      return { ok: true as const, deviceName: "device" };
     },
     [store],
   );

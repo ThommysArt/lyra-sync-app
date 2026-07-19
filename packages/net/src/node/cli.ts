@@ -51,9 +51,45 @@ async function main() {
   const peer = await startPeerServer({
     identity,
     port,
+    // Fall through to built-in handlers (transfer chunks, clipboard, fs, pair)
     onEnvelope: async (envelope) => {
       console.log(`[envelope] ${envelope.type} from ${envelope.fromDeviceId}`);
-      return { ok: true };
+      return undefined;
+    },
+    handlers: {
+      onFsList: async (path) => {
+        // Minimal demo tree when no real FS binding is configured
+        if (path === "/" || path === "") {
+          return [
+            { name: "Documents", path: "/Documents", isDirectory: true },
+            { name: "Downloads", path: "/Downloads", isDirectory: true },
+            { name: "readme.txt", path: "/readme.txt", isDirectory: false, size: 128 },
+          ];
+        }
+        return [
+          {
+            name: "sample.txt",
+            path: `${path.replace(/\/$/, "")}/sample.txt`,
+            isDirectory: false,
+            size: 64,
+          },
+        ];
+      },
+      onOpenUrl: (url) => {
+        console.log(`[open_url] ${url}`);
+        return true;
+      },
+      onClipboardPush: (item) => {
+        console.log(`[clipboard] ${item.type} from ${item.sourceDeviceName}`);
+      },
+      onPairRequest: (payload) => {
+        console.log(`[pair_request] from ${payload.name} (${payload.deviceId})`);
+      },
+      onTransferComplete: (state) => {
+        console.log(
+          `[transfer_complete] ${state.transferId} · ${state.receivedBytes} bytes · ${state.files.length} file(s)`,
+        );
+      },
     },
   });
 

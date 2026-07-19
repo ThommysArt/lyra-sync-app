@@ -240,3 +240,168 @@ export function buildDiscoverAnnounce(
     protocolVersion: LYRA_PROTOCOL_VERSION,
   });
 }
+
+/** Push clipboard item to a peer (requires session). */
+export async function pushClipboardToPeer(input: {
+  endpoint: PeerUrl;
+  sessionToken: string;
+  fromDeviceId: string;
+  toDeviceId: string;
+  item: {
+    id: string;
+    type: "text" | "image";
+    text?: string;
+    imageData?: string;
+    sourceDeviceId: string;
+    sourceDeviceName: string;
+    createdAt: number;
+  };
+  signal?: AbortSignal;
+}): Promise<{ ok: true } | { ok: false; error: string }> {
+  const envelope = createEnvelope({
+    type: "clipboard_push",
+    fromDeviceId: input.fromDeviceId,
+    toDeviceId: input.toDeviceId,
+    payload: input.item,
+  });
+  const res = await sendEnvelope(input.endpoint, envelope, {
+    sessionToken: input.sessionToken,
+    signal: input.signal,
+  });
+  if (!res.ok) return { ok: false, error: res.error };
+  return { ok: true };
+}
+
+/** Ask peer to open a URL. */
+export async function openUrlOnPeer(input: {
+  endpoint: PeerUrl;
+  sessionToken: string;
+  fromDeviceId: string;
+  toDeviceId: string;
+  url: string;
+  title?: string;
+  signal?: AbortSignal;
+}): Promise<{ ok: true; opened?: boolean } | { ok: false; error: string }> {
+  const envelope = createEnvelope({
+    type: "open_url",
+    fromDeviceId: input.fromDeviceId,
+    toDeviceId: input.toDeviceId,
+    payload: { url: input.url, title: input.title },
+  });
+  const res = await sendEnvelope(input.endpoint, envelope, {
+    sessionToken: input.sessionToken,
+    signal: input.signal,
+  });
+  if (!res.ok) return { ok: false, error: res.error };
+  const payload = res.envelope?.payload as { opened?: boolean } | undefined;
+  return { ok: true, opened: payload?.opened };
+}
+
+/** List remote filesystem via peer. */
+export async function listRemoteFs(input: {
+  endpoint: PeerUrl;
+  sessionToken: string;
+  fromDeviceId: string;
+  toDeviceId: string;
+  path: string;
+  requestId: string;
+  signal?: AbortSignal;
+}): Promise<
+  | { ok: true; path: string; entries: import("@lyra-sync-app/protocol").FileEntry[]; error?: string }
+  | { ok: false; error: string }
+> {
+  const envelope = createEnvelope({
+    type: "fs_list",
+    fromDeviceId: input.fromDeviceId,
+    toDeviceId: input.toDeviceId,
+    payload: { path: input.path, requestId: input.requestId },
+  });
+  const res = await sendEnvelope(input.endpoint, envelope, {
+    sessionToken: input.sessionToken,
+    signal: input.signal,
+  });
+  if (!res.ok) return { ok: false, error: res.error };
+  if (res.envelope?.type === "fs_list_response") {
+    const p = res.envelope.payload as {
+      path: string;
+      entries: import("@lyra-sync-app/protocol").FileEntry[];
+      error?: string;
+    };
+    return { ok: true, path: p.path, entries: p.entries ?? [], error: p.error };
+  }
+  return { ok: false, error: "No fs_list_response" };
+}
+
+/** Send pair_request to a reachable host (after local dual-confirm). */
+export async function sendPairRequest(input: {
+  endpoint: PeerUrl;
+  fromIdentity: DeviceIdentity;
+  token: string;
+  code?: string;
+  host?: string;
+  port?: number;
+  sessionToken?: string;
+  signal?: AbortSignal;
+}): Promise<{ ok: true; envelope?: Envelope } | { ok: false; error: string }> {
+  const envelope = createEnvelope({
+    type: "pair_request",
+    fromDeviceId: input.fromIdentity.id,
+    payload: {
+      version: 1 as const,
+      deviceId: input.fromIdentity.id,
+      name: input.fromIdentity.name,
+      type: input.fromIdentity.type,
+      platform: input.fromIdentity.platform,
+      fingerprint: input.fromIdentity.fingerprint,
+      publicKey: input.fromIdentity.publicKey,
+      token: input.token,
+      host: input.host,
+      port: input.port,
+      expiresAt: Date.now() + 5 * 60 * 1000,
+      code: input.code,
+    },
+  });
+  return sendEnvelope(input.endpoint, envelope, {
+    sessionToken: input.sessionToken,
+    signal: input.signal,
+  });
+}
+
+/** Cache of session tokens per peer endpoint key. */
+const sessionCache = new Map<string, { token: string; expiresAt: number }>();
+
+export function peerSessionCacheKey(endpoint: PeerUrl, deviceId: string): string {
+  return `${peerBaseUrl(endpoint)}::${deviceId}`;
+}
+
+export async function getOrCreatePeerSession(input: {
+  endpoint: PeerUrl;
+  identity: DeviceIdentity;
+  privateKey: string;
+  sharedSecret?: string;
+  peerDeviceId?: string;
+  signal?: AbortSignal;
+}): Promise<{ ok: true; sessionToken: string } | { ok: false; error: string }> {
+  const key = peerSessionCacheKey(input.endpoint, input.peerDeviceId ?? "unknown");
+  const cached = sessionCache.get(key);
+  if (cached && cached.expiresAt > Date.now() + 30_000) {
+    return { ok: true, sessionToken: cached.token };
+  }
+  const auth = await authenticateWithPeer({
+    endpoint: input.endpoint,
+    identity: input.identity,
+    privateKey: input.privateKey,
+    sharedSecret: input.sharedSecret,
+    signal: input.signal,
+  });
+  if (!auth.ok) return auth;
+  sessionCache.set(key, {
+    token: auth.sessionToken,
+    expiresAt: Date.now() + 50 * 60_000,
+  });
+  return { ok: true, sessionToken: auth.sessionToken };
+}
+
+export function clearPeerSessionCache(): void {
+  sessionCache.clear();
+}
