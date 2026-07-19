@@ -14,7 +14,6 @@
     "test:unit": "pnpm exec tsx scripts/smoke-render.mjs"
   },
   "dependencies": {
-    "@expo-google-fonts/dm-sans": "^0.4.2",
     "@hookform/resolvers": "^5.4.0",
     "@lyra-sync-app/core": "workspace:*",
     "@lyra-sync-app/env": "workspace:*",
