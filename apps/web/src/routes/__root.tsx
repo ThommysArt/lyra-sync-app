@@ -1,6 +1,5 @@
 import { Toaster } from "@lyra-sync-app/ui/components/sonner";
 import { HeadContent, Outlet, createRootRouteWithContext } from "@tanstack/react-router";
-import { TanStackRouterDevtools } from "@tanstack/react-router-devtools";
 
 import { AppShell } from "@/components/app-shell";
 import { ThemeProvider } from "@/components/theme-provider";
@@ -43,7 +42,6 @@ function RootComponent() {
           <Toaster richColors position="bottom-right" />
         </LyraProvider>
       </ThemeProvider>
-      {import.meta.env.DEV ? <TanStackRouterDevtools position="bottom-left" /> : null}
     </>
   );
 }

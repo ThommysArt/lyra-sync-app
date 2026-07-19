@@ -106,12 +106,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 <div className="flex size-7 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground shadow-sm">
                   <HardDrive className="size-3.5" />
                 </div>
-                <div className="min-w-0 leading-tight">
-                  <p className="truncate text-sm font-semibold tracking-tight">Lyra</p>
-                  <p className="truncate text-[11px] text-muted-foreground">
-                    {onlineCount} online
-                  </p>
-                </div>
+                <p className="truncate text-sm font-semibold tracking-tight">Lyra</p>
               </div>
             </div>
           </div>
@@ -120,12 +115,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <div className="flex size-7 items-center justify-center rounded-md bg-primary text-primary-foreground shadow-sm">
               <HardDrive className="size-3.5" />
             </div>
-            <div className="min-w-0 leading-tight">
-              <p className="truncate text-sm font-semibold tracking-tight">Lyra</p>
-              <p className="truncate text-[11px] text-muted-foreground">
-                {onlineCount} online · private network
-              </p>
-            </div>
+            <p className="truncate text-sm font-semibold tracking-tight">Lyra</p>
           </div>
         )}
 
@@ -160,6 +150,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <div className="rounded-lg border border-border/70 bg-card/60 px-2.5 py-2">
             <p className="text-[11px] text-muted-foreground">This device</p>
             <p className="truncate text-sm font-medium">{identity?.name ?? "—"}</p>
+            <p className="mt-1 truncate text-[11px] text-muted-foreground">
+              {onlineCount} online · private network
+            </p>
           </div>
           <Button
             variant="ghost"
