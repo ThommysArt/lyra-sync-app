@@ -26,7 +26,42 @@ git push origin v0.1.0
 
 ---
 
-## EAS (mobile)
+## Mobile (Expo / Android / iOS)
+
+### Local builds (no EAS cloud)
+
+Requires Android SDK (`ANDROID_HOME`) for Android; Xcode for iOS.
+
+| Command | What it does |
+|---------|----------------|
+| `pnpm run prebuild:android` | Generate/update `apps/native/android` |
+| `pnpm run run:android` | Debug build + install on emulator/device |
+| `pnpm run run:android:release` | Release variant via `expo run:android` |
+| `pnpm run build:android` | `prebuild` + `./gradlew assembleRelease` → APK |
+| `pnpm run build:android:debug` | Debug APK |
+| `pnpm run build:android:bundle` | Release AAB (`bundleRelease`) |
+| `pnpm run install:android` | `adb install` the release APK |
+| `pnpm --filter native ios` | iOS debug (macOS + Xcode) |
+| `pnpm --filter native build:ios` | Local iOS Release via `xcodebuild` |
+
+```bash
+# Typical local Android APK loop
+pnpm run build:android
+pnpm run install:android
+# APK path:
+#   apps/native/android/app/build/outputs/apk/release/app-release.apk
+```
+
+From `apps/native` directly:
+
+```bash
+pnpm android                 # expo run:android (debug)
+pnpm android:release
+pnpm build:android           # assembleRelease
+pnpm install:android
+```
+
+### EAS cloud builds
 
 **Linked project**
 
@@ -38,12 +73,15 @@ git push origin v0.1.0
 | Config | `apps/native/app.json` → `extra.eas.projectId` |
 
 ```bash
-cd apps/native
-eas build --profile development --platform android
-eas build --profile preview --platform android
+# From repo root
+pnpm run eas:android:preview
+pnpm run eas:android:dev
+pnpm run eas:android:production
+
+# Or from apps/native
+pnpm eas:android:preview
+pnpm eas:ios:preview
 eas build --profile production --platform android
-# or iOS after Apple credentials are configured
-eas build --profile development --platform ios
 ```
 
 Clipboard Accessibility plugin (manifest scaffold):
