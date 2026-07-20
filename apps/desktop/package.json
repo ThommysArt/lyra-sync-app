@@ -23,6 +23,7 @@
     },
     "files": [
       "dist-electron/**/*",
+      "resources/icon.png",
       "package.json"
     ],
     "extraResources": [
@@ -35,14 +36,17 @@
     "linux": {
       "target": ["AppImage", "dir"],
       "category": "Network",
-      "executableName": "lyra"
+      "executableName": "lyra",
+      "icon": "resources/icon.png"
     },
     "mac": {
       "target": ["dmg", "dir"],
-      "category": "public.app-category.utilities"
+      "category": "public.app-category.utilities",
+      "icon": "resources/icon.png"
     },
     "win": {
-      "target": ["nsis", "dir"]
+      "target": ["nsis", "dir"],
+      "icon": "resources/icon.png"
     }
   },
   "dependencies": {

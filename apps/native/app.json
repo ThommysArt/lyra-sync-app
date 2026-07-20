@@ -5,7 +5,8 @@
     "orientation": "default",
     "version": "1.0.0",
     "web": {
-      "bundler": "metro"
+      "bundler": "metro",
+      "favicon": "./assets/images/favicon.png"
     },
     "name": "Lyra",
     "slug": "lyra",
@@ -27,7 +28,8 @@
       "package": "app.lyra.sync",
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/android-icon-foreground.png",
-        "backgroundImage": "./assets/images/android-icon-background.png"
+        "backgroundImage": "./assets/images/android-icon-background.png",
+        "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
       "usesCleartextTraffic": true,
       "permissions": [

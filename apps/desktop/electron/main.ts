@@ -414,6 +414,9 @@ function createWindow() {
   // Fully custom chrome (T3-style):
   // - macOS: keep the frame for traffic lights, hide the title bar (hiddenInset)
   // - Win/Linux: frameless; renderer draws min/max/close and drag regions
+  const iconPath = path.join(app.getAppPath(), "resources", "icon.png");
+  const icon = existsSync(iconPath) ? iconPath : undefined;
+
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
@@ -425,6 +428,7 @@ function createWindow() {
     autoHideMenuBar: true,
     transparent: false,
     hasShadow: true,
+    ...(icon ? { icon } : {}),
     ...(isMac
       ? {
           frame: true,

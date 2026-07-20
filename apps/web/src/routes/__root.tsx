@@ -20,7 +20,7 @@ export const Route = createRootRouteWithContext<RouterAppContext>()({
           "Privacy-first clipboard sync, file transfer, and remote browse across your devices.",
       },
     ],
-    links: [{ rel: "icon", href: "/favicon.ico" }],
+    links: [{ rel: "icon", href: "./favicon.ico", sizes: "48x48" }],
   }),
 });
 

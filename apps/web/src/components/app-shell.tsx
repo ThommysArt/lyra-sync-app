@@ -1,7 +1,6 @@
 import { Link, useRouterState } from "@tanstack/react-router";
 import {
   ClipboardList,
-  HardDrive,
   History,
   LayoutGrid,
   Moon,
@@ -15,12 +14,27 @@ import { Button } from "@lyra-sync-app/ui/components/button";
 import { cn } from "@/lib/utils";
 import { getDesktopApi, isDesktopShell } from "@/lib/desktop-bridge";
 import { useLyraSelector } from "@/lib/lyra";
+import logoMarkUrl from "@/assets/logo-mark.png";
 import { ClipboardMonitor } from "@/components/clipboard-monitor";
 import { ConflictBanner } from "@/components/conflict-banner";
 import { IncomingPairBanner } from "@/components/incoming-pair-banner";
 import { KeyboardShortcuts } from "@/components/keyboard-shortcuts";
 import { ToastListener } from "@/components/toast-listener";
 import { WindowControls } from "@/components/window-controls";
+
+/** Brand mark used in shell chrome (sidebar + mobile header). */
+function BrandMark({ className }: { className?: string }) {
+  return (
+    <img
+      src={logoMarkUrl}
+      alt=""
+      width={28}
+      height={28}
+      className={cn("size-7 shrink-0 object-contain dark:invert", className)}
+      draggable={false}
+    />
+  );
+}
 
 const nav = [
   { to: "/", label: "Devices", icon: LayoutGrid, title: "Devices" },
@@ -103,18 +117,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 className="flex min-w-0 flex-1 items-center gap-2"
                 style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
               >
-                <div className="flex size-7 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground shadow-sm">
-                  <HardDrive className="size-3.5" />
-                </div>
+                <BrandMark />
                 <p className="truncate text-sm font-semibold tracking-tight">Lyra</p>
               </div>
             </div>
           </div>
         ) : (
           <div className="mb-3 flex items-center gap-2 px-2 py-1">
-            <div className="flex size-7 items-center justify-center rounded-md bg-primary text-primary-foreground shadow-sm">
-              <HardDrive className="size-3.5" />
-            </div>
+            <BrandMark />
             <p className="truncate text-sm font-semibold tracking-tight">Lyra</p>
           </div>
         )}
@@ -201,9 +211,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
         <header className="flex items-center justify-between gap-3 border-b border-border px-3 py-2 md:hidden">
           <div className="flex items-center gap-2">
-            <div className="flex size-7 items-center justify-center rounded-md bg-primary text-primary-foreground">
-              <HardDrive className="size-3.5" />
-            </div>
+            <BrandMark />
             <span className="text-sm font-semibold">{pageTitle}</span>
           </div>
           <div className="flex items-center gap-0.5">
