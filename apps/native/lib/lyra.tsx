@@ -1,6 +1,6 @@
 import { LyraProvider as BaseLyraProvider, useLyraSelector, useLyraState, useLyraStore } from "@lyra-sync-app/hooks";
 import type { ReactNode } from "react";
-import { useCallback, useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, View } from "react-native";
 import * as Network from "expo-network";
 
@@ -16,9 +16,22 @@ export { useLyraSelector, useLyraState, useLyraStore };
 export function LyraProvider({ children }: { children: ReactNode }) {
   const { isDark } = useAppTheme();
   const storage = useMemo(() => createSecureLyraStorage(), []);
+  const [storageReady, setStorageReady] = useState(false);
 
   useEffect(() => {
-    void migratePrivateKeyToSecureStore(storage);
+    let cancelled = false;
+    void (async () => {
+      try {
+        if (storage.hydrate) await storage.hydrate();
+        await migratePrivateKeyToSecureStore(storage);
+      } catch (err) {
+        console.warn("[lyra] storage hydrate failed", err);
+      }
+      if (!cancelled) setStorageReady(true);
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [storage]);
 
   /** Seed /24 LAN scan for pairing-code lookup when possible */
@@ -32,6 +45,23 @@ export function LyraProvider({ children }: { children: ReactNode }) {
       });
   }, []);
 
+  const fallback = (
+    <View
+      style={{
+        alignItems: "center",
+        backgroundColor: isDark ? PAGE_BG.dark : PAGE_BG.light,
+        flex: 1,
+        justifyContent: "center",
+      }}
+    >
+      <ActivityIndicator color={ACCENT} size="large" />
+    </View>
+  );
+
+  if (!storageReady) {
+    return fallback;
+  }
+
   return (
     <BaseLyraProvider
       storage={storage}
@@ -42,18 +72,7 @@ export function LyraProvider({ children }: { children: ReactNode }) {
       }
       platformHint="native"
       onStoreReady={onStoreReady}
-      fallback={
-        <View
-          style={{
-            alignItems: "center",
-            backgroundColor: isDark ? PAGE_BG.dark : PAGE_BG.light,
-            flex: 1,
-            justifyContent: "center",
-          }}
-        >
-          <ActivityIndicator color={ACCENT} size="large" />
-        </View>
-      }
+      fallback={fallback}
     >
       {children}
     </BaseLyraProvider>

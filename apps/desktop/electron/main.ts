@@ -8,11 +8,14 @@ import {
   dialog,
   ipcMain,
   Menu,
+  nativeImage,
   safeStorage,
   shell,
+  type NativeImage,
 } from "electron";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -23,6 +26,18 @@ if (
 ) {
   app.commandLine.appendSwitch("no-sandbox");
   app.commandLine.appendSwitch("disable-setuid-sandbox");
+}
+
+// package.json name is the monorepo filter ("desktop"); show "Lyra" in the OS
+// taskbar / dock / about menu instead.
+app.setName("Lyra");
+if (process.platform === "win32") {
+  app.setAppUserModelId("app.lyra.desktop");
+}
+// Chromium on Linux looks up Icon= from the .desktop file named by CHROME_DESKTOP
+// (must match StartupWMClass / our lyra.desktop entry).
+if (process.platform === "linux") {
+  process.env.CHROME_DESKTOP = "lyra.desktop";
 }
 
 import { createDeviceIdentity, hashPairingCode } from "@lyra-sync-app/core";
@@ -368,6 +383,100 @@ function resolvePackagedWebIndex(): string | null {
   return null;
 }
 
+/** Prefer unpackaged icon path — Linux/Windows taskbars often fail on asar icons. */
+function resolveAppIconPath(): string | undefined {
+  const candidates = [
+    path.join(process.resourcesPath, "icon.png"),
+    path.join(app.getAppPath(), "resources", "icon.png"),
+    path.join(__dirname, "..", "resources", "icon.png"),
+    path.join(__dirname, "..", "..", "resources", "icon.png"),
+  ];
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+  return undefined;
+}
+
+/**
+ * Load the rounded app icon. Chromium may replace the window icon with the
+ * page favicon after load — re-apply via applyWindowIcon() when that happens.
+ */
+function loadAppIconImage(): NativeImage | undefined {
+  const iconPath = resolveAppIconPath();
+  if (!iconPath) return undefined;
+  const image = nativeImage.createFromPath(iconPath);
+  if (image.isEmpty()) {
+    console.warn("[lyra] app icon failed to load:", iconPath);
+    return undefined;
+  }
+  return image;
+}
+
+function applyWindowIcon(win: BrowserWindow, image: NativeImage | undefined) {
+  if (!image || image.isEmpty()) return;
+  win.setIcon(image);
+  if (process.platform === "darwin" && app.dock) {
+    app.dock.setIcon(image);
+  }
+}
+
+/**
+ * GNOME/KDE ignore BrowserWindow icons for dock tiles when a .desktop file
+ * matches StartupWMClass. Gearlever/AppImage installs often ship a stale square
+ * icon — refresh XDG icon theme + desktop entry so the dock shows rounded Lyra.
+ */
+function installLinuxDesktopIntegration(iconPath: string | undefined) {
+  if (process.platform !== "linux" || !iconPath || !existsSync(iconPath)) return;
+
+  try {
+    const home = os.homedir();
+    const iconDir = path.join(home, ".local", "share", "icons", "hicolor", "512x512", "apps");
+    const appDir = path.join(home, ".local", "share", "applications");
+    mkdirSync(iconDir, { recursive: true });
+    mkdirSync(appDir, { recursive: true });
+
+    const destIcon = path.join(iconDir, "lyra.png");
+    copyFileSync(iconPath, destIcon);
+
+    // Gearlever stores a flat path icon — overwrite so WM_CLASS=Lyra picks rounded art.
+    const gearleverIcon = path.join(home, "AppImages", ".icons", "lyra");
+    try {
+      mkdirSync(path.dirname(gearleverIcon), { recursive: true });
+      copyFileSync(iconPath, gearleverIcon);
+    } catch {
+      // optional path
+    }
+
+    const execPath = app.isPackaged
+      ? process.env.APPIMAGE || process.execPath
+      : process.execPath;
+    // Prefer existing Gearlever AppImage if present for the launcher entry.
+    const appImageGuess = path.join(home, "AppImages", "lyra.appimage");
+    const launchExec = existsSync(appImageGuess)
+      ? `env DESKTOPINTEGRATION=1 "${appImageGuess}" --no-sandbox %U`
+      : app.isPackaged
+        ? `"${execPath}" %U`
+        : `"${process.execPath}" "${app.getAppPath()}" %U`;
+
+    const desktop = `[Desktop Entry]
+Type=Application
+Name=Lyra
+Comment=Privacy-first device network — clipboard, files, and remote browse
+Icon=lyra
+Exec=${launchExec}
+Terminal=false
+Categories=Network;
+StartupWMClass=Lyra
+StartupNotify=true
+`;
+    writeFileSync(path.join(appDir, "lyra.desktop"), desktop, "utf8");
+    process.env.CHROME_DESKTOP = "lyra.desktop";
+    console.log("[lyra] installed Linux desktop icon →", destIcon);
+  } catch (err) {
+    console.warn("[lyra] Linux desktop integration failed", err);
+  }
+}
+
 function installApplicationMenu() {
   // T3-style: no classic File/Edit/View chrome. Keep a minimal macOS app menu only.
   if (process.platform === "darwin") {
@@ -414,8 +523,7 @@ function createWindow() {
   // Fully custom chrome (T3-style):
   // - macOS: keep the frame for traffic lights, hide the title bar (hiddenInset)
   // - Win/Linux: frameless; renderer draws min/max/close and drag regions
-  const iconPath = path.join(app.getAppPath(), "resources", "icon.png");
-  const icon = existsSync(iconPath) ? iconPath : undefined;
+  const appIcon = loadAppIconImage();
 
   mainWindow = new BrowserWindow({
     width: 1200,
@@ -428,7 +536,7 @@ function createWindow() {
     autoHideMenuBar: true,
     transparent: false,
     hasShadow: true,
-    ...(icon ? { icon } : {}),
+    ...(appIcon ? { icon: appIcon } : {}),
     ...(isMac
       ? {
           frame: true,
@@ -448,9 +556,18 @@ function createWindow() {
 
   // Keep a short title if any WM still surfaces it
   mainWindow.setTitle("Lyra");
+  applyWindowIcon(mainWindow, appIcon);
   mainWindow.webContents.on("page-title-updated", (e) => {
     e.preventDefault();
     mainWindow?.setTitle("Lyra");
+  });
+  // Dev loads the Vite UI — Chromium swaps the taskbar icon to the page favicon
+  // (square logo.png). Force our rounded app icon back on every favicon update.
+  mainWindow.webContents.on("page-favicon-updated", () => {
+    if (mainWindow) applyWindowIcon(mainWindow, appIcon);
+  });
+  mainWindow.webContents.on("did-finish-load", () => {
+    if (mainWindow) applyWindowIcon(mainWindow, appIcon);
   });
 
   const broadcastWindowState = () => {
@@ -497,6 +614,7 @@ function createWindow() {
   } else {
     // Packaged: web UI is copied to resources/web-dist via electron-builder extraResources.
     // index.html must use relative asset paths (vite base: "./").
+    // Hash "#" anchors the SPA at Devices (/) — see apps/web/src/main.tsx hash history.
     const indexHtml = resolvePackagedWebIndex();
     if (!indexHtml) {
       console.error("[lyra] packaged web UI not found under resources/web-dist");
@@ -507,7 +625,7 @@ function createWindow() {
       );
     } else {
       console.log("[lyra] loading packaged UI", indexHtml);
-      void mainWindow.loadFile(indexHtml);
+      void mainWindow.loadFile(indexHtml, { hash: "/" });
     }
   }
 
@@ -550,6 +668,15 @@ app.whenReady().then(async () => {
       `[lyra] multi-instance mode instance=${instanceId || "default"} port=${PEER_PORT} name=${process.env.LYRA_NAME ?? "Lyra Desktop"}`,
     );
   }
+
+  // Dock icon early (macOS); Linux XDG + window icon re-apply after create/load.
+  const iconPath = resolveAppIconPath();
+  const dockIcon = loadAppIconImage();
+  if (dockIcon && process.platform === "darwin" && app.dock) {
+    app.dock.setIcon(dockIcon);
+  }
+  installLinuxDesktopIntegration(iconPath);
+
   installApplicationMenu();
 
   ipcMain.handle("lyra:get-peer-status", () => ({

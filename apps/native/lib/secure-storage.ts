@@ -1,21 +1,80 @@
 /**
  * Persist sensitive Lyra state. Prefer expo-secure-store for the private key;
- * bulk UI state stays in a larger store (AsyncStorage / localStorage).
+ * bulk UI state uses AsyncStorage on native and localStorage on web.
  */
 import type { StorageLike } from "@lyra-sync-app/core";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as SecureStore from "expo-secure-store";
+import { Platform } from "react-native";
 
 const PRIVATE_KEY_ITEM = "lyra.privateKey";
 const STATE_PREFIX = "lyra.v1.";
+
+/**
+ * In-memory cache backed by AsyncStorage.
+ * Core store expects sync getItem/setItem; we hydrate the cache before use
+ * and write-through async.
+ */
+function createAsyncStorageBulk(): StorageLike & { hydrate: () => Promise<void> } {
+  const cache = new Map<string, string>();
+  let ready = false;
+
+  return {
+    hydrate: async () => {
+      try {
+        const keys = await AsyncStorage.getAllKeys();
+        const lyraKeys = keys.filter((k) => k.startsWith(STATE_PREFIX) || k === "lyra.v1.state");
+        if (lyraKeys.length === 0) {
+          // Also pull any non-prefixed lyra keys used historically
+          const all = await AsyncStorage.multiGet(keys.filter((k) => k.startsWith("lyra.")));
+          for (const [k, v] of all) {
+            if (k && v != null) cache.set(k, v);
+          }
+        } else {
+          const pairs = await AsyncStorage.multiGet(lyraKeys);
+          for (const [k, v] of pairs) {
+            if (k && v != null) cache.set(k, v);
+          }
+        }
+        // Ensure primary state key is loaded even if prefix filter missed
+        const state = await AsyncStorage.getItem("lyra.v1.state");
+        if (state != null) cache.set("lyra.v1.state", state);
+        const key = await AsyncStorage.getItem("lyra.v1.state.key");
+        if (key != null) cache.set("lyra.v1.state.key", key);
+      } catch {
+        // keep empty cache
+      }
+      ready = true;
+    },
+    getItem: (k) => {
+      void ready;
+      return cache.get(k) ?? null;
+    },
+    setItem: (k, v) => {
+      cache.set(k, v);
+      void AsyncStorage.setItem(k, v).catch(() => {
+        // ignore quota / native errors
+      });
+    },
+    removeItem: (k) => {
+      cache.delete(k);
+      void AsyncStorage.removeItem(k).catch(() => {
+        // ignore
+      });
+    },
+  };
+}
 
 function memoryFallback(): StorageLike & {
   getPrivateKey: () => Promise<string | null>;
   setPrivateKey: (value: string) => Promise<void>;
   deletePrivateKey: () => Promise<void>;
+  hydrate?: () => Promise<void>;
 } {
   const map = new Map<string, string>();
   let privateKey: string | null = null;
   return {
+    hydrate: async () => undefined,
     getItem: (k) => map.get(k) ?? null,
     setItem: (k, v) => {
       map.set(k, v);
@@ -37,50 +96,34 @@ export type SecureLyraStorage = StorageLike & {
   getPrivateKey: () => Promise<string | null>;
   setPrivateKey: (value: string) => Promise<void>;
   deletePrivateKey: () => Promise<void>;
+  /** Load bulk cache from disk (native AsyncStorage). */
+  hydrate?: () => Promise<void>;
 };
 
-/** Combined storage: SecureStore for private key, localStorage (or memory) for the rest. */
+/** Combined storage: SecureStore for private key, AsyncStorage/localStorage for the rest. */
 export function createSecureLyraStorage(): SecureLyraStorage {
   const canUseWebLocal =
-    typeof localStorage !== "undefined" && typeof localStorage.getItem === "function";
+    Platform.OS === "web" &&
+    typeof localStorage !== "undefined" &&
+    typeof localStorage.getItem === "function";
 
-  const bulk: StorageLike = canUseWebLocal
-    ? localStorage
-    : (() => {
-        const map = new Map<string, string>();
-        return {
-          getItem: (k: string) => map.get(k) ?? null,
-          setItem: (k: string, v: string) => {
-            map.set(k, v);
-          },
-          removeItem: (k: string) => {
-            map.delete(k);
-          },
-        };
-      })();
-
-  // SecureStore is unavailable on some web targets — fall back gracefully
-  const secureAvailable =
-    typeof SecureStore?.getItemAsync === "function" &&
-    // Expo web may polyfill no-ops; still fine
-    true;
-
-  if (!secureAvailable) {
-    const mem = memoryFallback();
-    return {
-      getItem: (k) => bulk.getItem(k),
-      setItem: (k, v) => bulk.setItem(k, v),
-      removeItem: (k) => bulk.removeItem?.(k),
-      getPrivateKey: mem.getPrivateKey,
-      setPrivateKey: mem.setPrivateKey,
-      deletePrivateKey: mem.deletePrivateKey,
-    };
-  }
+  const bulk: StorageLike & { hydrate?: () => Promise<void> } = canUseWebLocal
+    ? {
+        getItem: (k) => localStorage.getItem(k),
+        setItem: (k, v) => {
+          localStorage.setItem(k, v);
+        },
+        removeItem: (k) => {
+          localStorage.removeItem(k);
+        },
+      }
+    : createAsyncStorageBulk();
 
   return {
     getItem: (k) => bulk.getItem(k),
     setItem: (k, v) => bulk.setItem(k, v),
     removeItem: (k) => bulk.removeItem?.(k),
+    hydrate: bulk.hydrate,
     getPrivateKey: async () => {
       try {
         return await SecureStore.getItemAsync(PRIVATE_KEY_ITEM);
@@ -111,6 +154,7 @@ export async function migratePrivateKeyToSecureStore(
   stateKey = "lyra.v1.state",
 ): Promise<void> {
   try {
+    if (storage.hydrate) await storage.hydrate();
     const raw = storage.getItem(stateKey);
     if (!raw) return;
     const parsed = JSON.parse(raw) as { privateKey?: string | null };
@@ -123,4 +167,5 @@ export async function migratePrivateKeyToSecureStore(
     // ignore corrupt
   }
   void STATE_PREFIX;
+  void memoryFallback;
 }

@@ -20,6 +20,7 @@
     "@lyra-sync-app/env": "workspace:*",
     "@lyra-sync-app/hooks": "workspace:*",
     "@lyra-sync-app/protocol": "workspace:*",
+    "@react-native-async-storage/async-storage": "^3.1.1",
     "dotenv": "catalog:",
     "expo": "~57.0.1",
     "expo-blur": "~57.0.0",

@@ -74,6 +74,8 @@ async function main() {
     ...process.env,
     LYRA_WEB_URL: process.env.LYRA_WEB_URL ?? "http://localhost:3001",
     ELECTRON_DISABLE_SECURITY_WARNINGS: "true",
+    // GNOME/KDE: resolve Icon= from ~/.local/share/applications/lyra.desktop
+    CHROME_DESKTOP: "lyra.desktop",
   };
   delete env.ELECTRON_RUN_AS_NODE;
   if (noSandbox) {

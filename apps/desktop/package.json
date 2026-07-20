@@ -24,9 +24,14 @@
     "files": [
       "dist-electron/**/*",
       "resources/icon.png",
+      "resources/icons/**/*",
       "package.json"
     ],
     "extraResources": [
+      {
+        "from": "resources/icon.png",
+        "to": "icon.png"
+      },
       {
         "from": "../web/dist",
         "to": "web-dist",
@@ -37,7 +42,12 @@
       "target": ["AppImage", "dir"],
       "category": "Network",
       "executableName": "lyra",
-      "icon": "resources/icon.png"
+      "icon": "resources/icons",
+      "desktop": {
+        "Name": "Lyra",
+        "Comment": "Privacy-first device network — clipboard, files, and remote browse.",
+        "StartupWMClass": "Lyra"
+      }
     },
     "mac": {
       "target": ["dmg", "dir"],

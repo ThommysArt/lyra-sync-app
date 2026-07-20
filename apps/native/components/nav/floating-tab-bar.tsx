@@ -180,15 +180,30 @@ export function FloatingTabBar({
         style={[styles.chrome, { paddingBottom: bottomPad }]}
       >
         <View style={[styles.shell, isDark ? styles.shellDark : styles.shellLight]}>
-          <BlurView
-            blurMethod={
-              Platform.OS === "android" ? "dimezisBlurViewSdk31Plus" : undefined
-            }
-            blurReductionFactor={isDark ? 2 : 4}
-            intensity={isDark ? 90 : 48}
-            style={StyleSheet.absoluteFill}
-            tint={isDark ? "dark" : "systemUltraThinMaterialLight"}
-          />
+          {/*
+            Android blur is experimental and has crashed some devices when forced.
+            Prefer translucent fill on Android; keep real blur on iOS.
+          */}
+          {Platform.OS === "ios" ? (
+            <BlurView
+              blurReductionFactor={isDark ? 2 : 4}
+              intensity={isDark ? 90 : 48}
+              style={StyleSheet.absoluteFill}
+              tint={isDark ? "dark" : "systemUltraThinMaterialLight"}
+            />
+          ) : (
+            <View
+              pointerEvents="none"
+              style={[
+                StyleSheet.absoluteFill,
+                {
+                  backgroundColor: isDark
+                    ? "rgba(20, 24, 34, 0.92)"
+                    : "rgba(255, 255, 255, 0.94)",
+                },
+              ]}
+            />
+          )}
           <View
             pointerEvents="none"
             style={[styles.innerGlow, !isDark && styles.innerGlowLight]}

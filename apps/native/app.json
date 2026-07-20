@@ -14,7 +14,16 @@
     "splash": {
       "image": "./assets/images/splash-icon.png",
       "resizeMode": "contain",
-      "backgroundColor": "#0B0F17"
+      "backgroundColor": "#0B0F17",
+      "dark": {
+        "image": "./assets/images/splash-icon.png",
+        "resizeMode": "contain",
+        "backgroundColor": "#0B0F17"
+      }
+    },
+    "androidStatusBar": {
+      "backgroundColor": "#0B0F17",
+      "barStyle": "light-content"
     },
     "ios": {
       "supportsTablet": true,
@@ -42,7 +51,13 @@
     },
     "plugins": [
       "expo-font",
-      "expo-secure-store",
+      [
+        "expo-secure-store",
+        {
+          "configureAndroidBackup": true,
+          "faceIDPermission": "Allow Lyra to use Face ID to protect device secrets."
+        }
+      ],
       "expo-document-picker",
       [
         "expo-camera",
@@ -52,11 +67,11 @@
           "barcodeScannerEnabled": true
         }
       ],
+      "expo-splash-screen",
       "./plugins/with-clipboard-accessibility"
     ],
     "experiments": {
-      "typedRoutes": true,
-      "reactCompiler": true
+      "typedRoutes": true
     },
     "extra": {
       "eas": {

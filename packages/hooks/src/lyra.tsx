@@ -56,9 +56,16 @@ export function LyraProvider({
 
   useEffect(() => {
     let cancelled = false;
-    void store.hydrate().then(() => {
-      if (!cancelled) setReady(true);
-    });
+    void store
+      .hydrate()
+      .then(() => {
+        if (!cancelled) setReady(true);
+      })
+      .catch((err) => {
+        // Never leave the shell stuck on the splash forever if hydrate throws.
+        console.error("[lyra] store.hydrate failed", err);
+        if (!cancelled) setReady(true);
+      });
     return () => {
       cancelled = true;
     };
