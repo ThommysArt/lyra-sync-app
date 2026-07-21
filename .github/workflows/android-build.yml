@@ -28,7 +28,8 @@ env:
   EXPO_NO_TELEMETRY: "1"
   # Device ABIs only — skip x86 emulators to cut CI time/size
   ORG_GRADLE_PROJECT_reactNativeArchitectures: armeabi-v7a,arm64-v8a
-
+  # Applied to Gradle client + worker JVMs (D8/R8). Expo default Metaspace 512m OOMs.
+  JAVA_TOOL_OPTIONS: "-Xmx6g -XX:MaxMetaspaceSize=2g -XX:ReservedCodeCacheSize=512m"
 jobs:
   apk:
     name: Android ${{ github.event.inputs.profile || 'preview' }} APK
@@ -95,14 +96,40 @@ jobs:
           EXPO_PUBLIC_LYRA_ENV: ${{ steps.profile.outputs.lyra_env }}
           EXPO_PUBLIC_SERVER_URL: https://lyra.app
 
+      # prebuild overwrites gradle.properties — re-apply CI memory after it.
+      - name: Raise Gradle memory for CI
+        working-directory: apps/native/android
+        run: |
+          # Replace default Expo jvmargs (often 2g / 512m Metaspace → OOM on D8 merge)
+          if grep -q '^org.gradle.jvmargs=' gradle.properties; then
+            sed -i 's/^org.gradle.jvmargs=.*/org.gradle.jvmargs=-Xmx6g -XX:MaxMetaspaceSize=2g -XX:ReservedCodeCacheSize=512m -Dfile.encoding=UTF-8/' gradle.properties
+          else
+            echo 'org.gradle.jvmargs=-Xmx6g -XX:MaxMetaspaceSize=2g -XX:ReservedCodeCacheSize=512m -Dfile.encoding=UTF-8' >> gradle.properties
+          fi
+          {
+            echo 'org.gradle.workers.max=2'
+            echo 'org.gradle.parallel=false'
+            echo 'org.gradle.daemon=false'
+            echo 'kotlin.daemon.jvmargs=-Xmx2g -XX:MaxMetaspaceSize=1g'
+          } >> gradle.properties
+          echo "--- gradle.properties (memory) ---"
+          grep -E 'jvmargs|workers|parallel|daemon' gradle.properties || true
+
       - name: Build APK
         working-directory: apps/native/android
         run: |
           chmod +x gradlew
-          ./gradlew ${{ steps.profile.outputs.gradle_task }} --no-daemon
+          # Stop any leftover daemon; build single-threaded enough to avoid Metaspace blowups
+          ./gradlew --stop || true
+          ./gradlew ${{ steps.profile.outputs.gradle_task }} \
+            --no-daemon \
+            --max-workers=2 \
+            -Dorg.gradle.jvmargs="-Xmx6g -XX:MaxMetaspaceSize=2g -XX:ReservedCodeCacheSize=512m"
         env:
           EXPO_PUBLIC_LYRA_ENV: ${{ steps.profile.outputs.lyra_env }}
           EXPO_PUBLIC_SERVER_URL: https://lyra.app
+          JAVA_TOOL_OPTIONS: "-Xmx6g -XX:MaxMetaspaceSize=2g"
+
       - name: List APKs
         run: find apps/native/android/app/build/outputs/apk -name '*.apk' -ls
 
