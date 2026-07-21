@@ -5,17 +5,24 @@
 | Workflow | Trigger | Purpose |
 |----------|---------|---------|
 | [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) | push / PR | Unit tests, Playwright e2e, Electron Linux package (artifact), Expo web export |
-| [`.github/workflows/release.yml`](../.github/workflows/release.yml) | tag `v*` or manual | Publish Linux **AppImage** to a GitHub Release; optional EAS Android preview if `EXPO_TOKEN` is set |
-| [`.github/workflows/eas-build.yml`](../.github/workflows/eas-build.yml) | manual | Kick off an EAS cloud build (`development` / `preview` / `production`) |
+| [`.github/workflows/android-build.yml`](../.github/workflows/android-build.yml) | manual (`dev` / `preview`) or tag `v*` | **Android APK on GitHub Actions** (no EAS) → Actions artifact |
+| [`.github/workflows/release.yml`](../.github/workflows/release.yml) | tag `v*` or manual | Publish Linux **AppImage** to a GitHub Release |
+| [`.github/workflows/eas-build.yml`](../.github/workflows/eas-build.yml) | manual | Optional EAS cloud build (needs paid EAS + `EXPO_TOKEN`) |
 
-### Required secrets
+### Android APK via GitHub Actions (recommended without EAS)
 
-| Secret | Used by | How to set |
-|--------|---------|------------|
-| `EXPO_TOKEN` | `eas-build.yml`, optional job in `release.yml` | Create at [expo.dev/settings/access-tokens](https://expo.dev/settings/access-tokens), then `gh secret set EXPO_TOKEN` |
+```bash
+# Trigger from CLI (needs gh auth)
+pnpm run ci:android:preview
+pnpm run ci:android:dev
 
-`GITHUB_TOKEN` is provided automatically for release uploads.
+# Or: GitHub → Actions → "Android Build" → Run workflow → profile preview|dev
+```
 
+Download the APK from the workflow run **Artifacts** (`lyra-android-preview` or `lyra-android-dev`).  
+Release builds use the debug keystore checked into the Expo android project (fine for sideloading / internal testing).
+
+No extra secrets required beyond default `GITHUB_TOKEN`.
 ### Tag a release
 
 ```bash
@@ -26,71 +33,34 @@ git push origin v0.1.0
 
 ---
 
-## Mobile (Expo / Android / iOS)
+## Mobile (Android)
 
-### Local builds (no EAS cloud)
+Requires Android SDK (`ANDROID_HOME`). Profiles: **dev** (debug) and **preview** (release APK).
 
-Requires Android SDK (`ANDROID_HOME`) for Android; Xcode for iOS.
+### Local (uses existing `apps/native/android`)
 
-| Command | What it does |
-|---------|----------------|
-| `pnpm run prebuild:android` | Generate/update `apps/native/android` |
-| `pnpm run run:android` | Debug build + install on emulator/device |
-| `pnpm run run:android:release` | Release variant via `expo run:android` |
-| `pnpm run build:android` | `prebuild` + `./gradlew assembleRelease` → APK |
-| `pnpm run build:android:debug` | Debug APK |
-| `pnpm run build:android:bundle` | Release AAB (`bundleRelease`) |
-| `pnpm run install:android` | `adb install` the release APK |
-| `pnpm --filter native ios` | iOS debug (macOS + Xcode) |
-| `pnpm --filter native build:ios` | Local iOS Release via `xcodebuild` |
+| Command | Output |
+|---------|--------|
+| `pnpm run build:dev` | Debug APK (`assembleDebug`) |
+| `pnpm run build:preview` | Release APK (`assembleRelease`) |
+| `pnpm run install:dev` | `adb install` debug APK |
+| `pnpm run install:preview` | `adb install` release APK |
 
 ```bash
-# Typical local Android APK loop
-pnpm run build:android
-pnpm run install:android
-# APK path:
-#   apps/native/android/app/build/outputs/apk/release/app-release.apk
+pnpm run build:preview
+pnpm run install:preview
+# apps/native/android/app/build/outputs/apk/release/app-release.apk
 ```
+### EAS cloud (optional)
 
-From `apps/native` directly:
+Only if you still use Expo Application Services:
 
 ```bash
-pnpm android                 # expo run:android (debug)
-pnpm android:release
-pnpm build:android           # assembleRelease
-pnpm install:android
+pnpm run eas:dev
+pnpm run eas:preview
 ```
 
-### EAS cloud builds
-
-**Linked project**
-
-| Field | Value |
-|-------|--------|
-| Account | `thommysart24` |
-| Project | [@thommysart24/lyra](https://expo.dev/accounts/thommysart24/projects/lyra) |
-| Project ID | `5440becf-0777-4d91-be3b-88ad7f271d5f` |
-| Config | `apps/native/app.json` → `extra.eas.projectId` |
-
-```bash
-# From repo root
-pnpm run eas:android:preview
-pnpm run eas:android:dev
-pnpm run eas:android:production
-
-# Or from apps/native
-pnpm eas:android:preview
-pnpm eas:ios:preview
-eas build --profile production --platform android
-```
-
-Clipboard Accessibility plugin (manifest scaffold):
-
-```json
-"./plugins/with-clipboard-accessibility"
-```
-
-See `apps/native/plugins/README.md` for Kotlin service work remaining after `expo prebuild`.
+Clipboard Accessibility plugin: `./plugins/with-clipboard-accessibility` — see `apps/native/plugins/README.md`.
 
 ---
 

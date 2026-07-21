@@ -42,7 +42,9 @@
 ```bash
 pnpm run pack:desktop
 pnpm run dist:desktop
-pnpm run eas:android:preview   # needs eas login; GraphQL flakes: retry / EAS_SKIP_AUTO_FINGERPRINT=1
+pnpm run build:dev             # local debug APK (needs ANDROID_HOME)
+pnpm run build:preview         # local release APK
+pnpm run ci:android:preview    # GitHub Actions APK artifact (no EAS)
 ```
 
 ---
