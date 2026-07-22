@@ -127,10 +127,27 @@ function SettingsPage() {
           <Separator />
           <SettingRow
             label="Tailscale support"
-            description="Also probe known peers over Tailscale / MagicDNS."
+            description="Also probe known peers over Tailscale / MagicDNS. Enables Add by Tailscale IP on Devices."
             checked={settings.tailscaleEnabled}
             onCheckedChange={(v) => store.updateSettings({ tailscaleEnabled: v })}
           />
+          <Separator />
+          <div className="space-y-2">
+            <div>
+              <p className="text-sm font-medium">Scrcpy path (Android mirror)</p>
+              <p className="text-xs text-muted-foreground">
+                Optional path to the scrcpy binary (Sefirah-style). Empty = use PATH.
+              </p>
+            </div>
+            <Input
+              value={settings.scrcpyPath ?? ""}
+              onChange={(e) =>
+                store.updateSettings({ scrcpyPath: e.target.value.trim() || undefined })
+              }
+              placeholder="/usr/bin/scrcpy or leave empty"
+              className="rounded-md font-mono text-xs"
+            />
+          </div>
           <Separator />
           <SettingRow
             label="Verify transfer integrity"
@@ -320,7 +337,22 @@ function SettingsPage() {
                     const api = getDesktopApi();
                     if (api?.scanTailscale) {
                       const res = await api.scanTailscale();
-                      if (res.ok) store.ingestTailscalePeers(res.peers);
+                      if (res.ok) {
+                        store.ingestTailscalePeers(res.peers);
+                        store.setTailscaleStatus({
+                          ok: true,
+                          backendState: res.backendState,
+                          selfHost: res.self?.host,
+                          selfIp: res.self?.tailscaleIp,
+                          updatedAt: Date.now(),
+                        });
+                      } else {
+                        store.setTailscaleStatus({
+                          ok: false,
+                          error: res.error,
+                          updatedAt: Date.now(),
+                        });
+                      }
                     }
                     await store.probeTailscalePeers();
                   } finally {
@@ -329,13 +361,15 @@ function SettingsPage() {
                 })();
               }}
             >
-              Probe Tailscale peers
+              Scan & probe Tailscale
             </Button>
           </div>
           <p className="text-xs text-muted-foreground">
             Real sockets run in the Electron desktop shell or{" "}
             <code className="rounded bg-muted px-1">pnpm peer-server</code>. The browser UI probes
             known hosts via HTTP <code className="rounded bg-muted px-1">/lyra/info</code>.
+            Add Tailscale device IPs on the Devices page (
+            <code className="rounded bg-muted px-1">100.x</code> / MagicDNS).
           </p>
           <p className="text-xs text-muted-foreground">
             Post-pairing payloads use app-level AES-GCM when a shared auth secret exists. Mobile /

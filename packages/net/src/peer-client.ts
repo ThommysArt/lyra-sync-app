@@ -384,6 +384,115 @@ export async function openUrlOnPeer(input: {
   return { ok: true, opened: payload?.opened };
 }
 
+/** Request screen share from a peer (viewer → source). */
+export async function requestScreenShare(input: {
+  endpoint: PeerUrl;
+  sessionToken: string;
+  fromDeviceId: string;
+  toDeviceId: string;
+  sessionId: string;
+  maxEdge?: number;
+  fps?: number;
+  quality?: number;
+  signal?: AbortSignal;
+  sealSecret?: string;
+}): Promise<
+  | {
+      ok: true;
+      accept: import("@lyra-sync-app/protocol").ScreenShareAcceptPayload;
+    }
+  | { ok: false; error: string }
+> {
+  const envelope = createEnvelope({
+    type: "screen_share_request",
+    fromDeviceId: input.fromDeviceId,
+    toDeviceId: input.toDeviceId,
+    payload: {
+      sessionId: input.sessionId,
+      maxEdge: input.maxEdge ?? 720,
+      fps: input.fps ?? 12,
+      quality: input.quality ?? 0.72,
+    },
+  });
+  const res = await sendEnvelope(input.endpoint, envelope, {
+    sessionToken: input.sessionToken,
+    signal: input.signal,
+    sealSecret: input.sealSecret,
+  });
+  if (!res.ok) return { ok: false, error: res.error };
+  const env = res.envelope;
+  if (!env) return { ok: false, error: "No response" };
+  if (env.type === "screen_share_reject") {
+    const reason =
+      (env.payload as { reason?: string } | undefined)?.reason ?? "rejected";
+    return { ok: false, error: reason };
+  }
+  if (env.type !== "screen_share_accept") {
+    return { ok: false, error: `Unexpected response: ${env.type}` };
+  }
+  return {
+    ok: true,
+    accept: env.payload as import("@lyra-sync-app/protocol").ScreenShareAcceptPayload,
+  };
+}
+
+export async function stopScreenShare(input: {
+  endpoint: PeerUrl;
+  sessionToken: string;
+  fromDeviceId: string;
+  toDeviceId: string;
+  sessionId: string;
+  reason?: string;
+  signal?: AbortSignal;
+  sealSecret?: string;
+}): Promise<{ ok: true } | { ok: false; error: string }> {
+  const envelope = createEnvelope({
+    type: "screen_share_stop",
+    fromDeviceId: input.fromDeviceId,
+    toDeviceId: input.toDeviceId,
+    payload: { sessionId: input.sessionId, reason: input.reason },
+  });
+  const res = await sendEnvelope(input.endpoint, envelope, {
+    sessionToken: input.sessionToken,
+    signal: input.signal,
+    sealSecret: input.sealSecret,
+  });
+  if (!res.ok) return { ok: false, error: res.error };
+  return { ok: true };
+}
+
+export async function sendScreenFrame(input: {
+  endpoint: PeerUrl;
+  sessionToken: string;
+  fromDeviceId: string;
+  toDeviceId: string;
+  frame: {
+    sessionId: string;
+    seq: number;
+    width: number;
+    height: number;
+    mimeType: "image/jpeg" | "image/webp" | "image/png";
+    dataBase64: string;
+    capturedAt: number;
+  };
+  signal?: AbortSignal;
+  sealSecret?: string;
+}): Promise<{ ok: true } | { ok: false; error: string }> {
+  const envelope = createEnvelope({
+    type: "screen_frame",
+    fromDeviceId: input.fromDeviceId,
+    toDeviceId: input.toDeviceId,
+    payload: input.frame,
+  });
+  const res = await sendEnvelope(input.endpoint, envelope, {
+    sessionToken: input.sessionToken,
+    signal: input.signal,
+    sealSecret: input.sealSecret,
+  });
+  if (!res.ok) return { ok: false, error: res.error };
+  return { ok: true };
+}
+
 /** List remote filesystem via peer. */
 export async function listRemoteFs(input: {
   endpoint: PeerUrl;

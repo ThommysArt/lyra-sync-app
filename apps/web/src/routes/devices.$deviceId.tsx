@@ -23,7 +23,9 @@ import { Input } from "@lyra-sync-app/ui/components/input";
 import { Label } from "@lyra-sync-app/ui/components/label";
 import { Separator } from "@lyra-sync-app/ui/components/separator";
 import { Switch } from "@lyra-sync-app/ui/components/switch";
+import { DeviceAddressesCard } from "@/components/device-addresses";
 import { DropZone } from "@/components/drop-zone";
+import { ScreenMirrorPanel } from "@/components/screen-mirror";
 import { readSystemClipboard } from "@/lib/clipboard";
 import { pickFiles } from "@/lib/file-picker";
 import { useLyraSelector, useLyraStore } from "@/lib/lyra";
@@ -36,6 +38,7 @@ function DeviceDetailPage() {
   const { deviceId } = Route.useParams();
   const store = useLyraStore();
   const device = useLyraSelector((s) => s.devices.find((d) => d.id === deviceId));
+  const screenSession = useLyraSelector((s) => s.screenSessions[deviceId]);
   const [nickname, setNickname] = useState(device?.nickname ?? "");
   const [path, setPath] = useState("/");
   const [selected, setSelected] = useState<string[]>([]);
@@ -164,8 +167,13 @@ function DeviceDetailPage() {
               <p className="font-mono">{formatFingerprint(device.fingerprint)}</p>
               {device.host ? (
                 <p className="mt-1 text-muted-foreground">
-                  {device.host}:{device.port ?? 53317}
+                  LAN {device.host}:{device.port ?? 53317}
                   {device.authSecret ? " · trusted" : " · untrusted"}
+                </p>
+              ) : null}
+              {device.tailscaleHost ? (
+                <p className="mt-1 text-muted-foreground">
+                  Tailscale {device.tailscaleHost}
                 </p>
               ) : null}
             </div>
@@ -331,6 +339,15 @@ function DeviceDetailPage() {
             </CardContent>
           </Card>
         </DropZone>
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-5">
+        <div className="lg:col-span-2">
+          <DeviceAddressesCard device={device} />
+        </div>
+        <div className="lg:col-span-3">
+          <ScreenMirrorPanel device={device} session={screenSession} />
+        </div>
       </div>
     </div>
   );

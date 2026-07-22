@@ -1,8 +1,25 @@
 # Lyra — Agent Progress Report
 
-**Last updated:** 2026-07-19 (CI green + packaging + EAS resubmit)  
-**Status:** GitHub CI green · Linux AppImage released · EAS Android preview re-queued  
+**Last updated:** 2026-07-22 (screen mirror + Tailscale addresses)  
+**Status:** Screen mirror (demo bezel + scrcpy path) · Tailscale IP first-class UI · unit/e2e green  
 **Plan:** [`docs/GAP-FIX-PLAN.md`](./GAP-FIX-PLAN.md) · **Packaging:** [`docs/PACKAGING.md`](./PACKAGING.md)
+
+---
+
+## 2026-07-22 — Screen mirror + Tailscale
+
+### Screen sharing (Sefirah-inspired / Xcode-style bezel)
+- Protocol: `screen_share_request|accept|reject|stop` + `screen_frame`
+- Core store: `startScreenMirror` / `stopScreenMirror` / `ingestScreenFrame`
+- High-quality demo frames inside phone/desktop chrome (`DeviceFrame`, `ScreenMirrorPanel`)
+- Desktop: optional `scrcpy` spawn via IPC (`lyra:start-scrcpy`) using ADB serial or Tailscale `host:5555`
+- Web + native device detail: mirror controls + live frame preview
+
+### Tailscale
+- Dedicated **Add by Tailscale IP** card on Devices (`100.x` / MagicDNS)
+- Per-device **Connection addresses** (LAN + Tailscale + prefer path + ADB serial)
+- `tailscalePeerHints` + `updateDeviceAddress` + `Scan Tailscale`
+- Verified local tailnet present (`100.114…` / `pixel-6 100.83…`)
 
 ---
 

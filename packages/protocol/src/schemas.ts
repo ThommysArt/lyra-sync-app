@@ -72,14 +72,46 @@ export const PairedDeviceSchema = z.object({
   host: z.string().optional(),
   port: z.number().int().positive().optional(),
   /**
+   * Optional alternate Tailscale / MagicDNS address (100.x or *.ts.net).
+   * Used when LAN host is stale or devices are only reachable over Tailscale.
+   */
+  tailscaleHost: z.string().optional(),
+  /** Preferred connection path when both LAN and Tailscale are set. */
+  preferredAddress: z.enum(["auto", "lan", "tailscale"]).optional(),
+  /**
    * Pairing-derived shared secret for wire auth (never leave device storage).
    * Omitted for demo-seeded peers until a real handshake runs.
    */
   authSecret: z.string().optional(),
   /** Last successful probe latency in ms */
   lastProbeLatencyMs: z.number().nonnegative().optional(),
+  /**
+   * Optional ADB serial / host:port for scrcpy (Sefirah-style Android mirror).
+   * Example: `100.83.145.32:5555` over Tailscale.
+   */
+  adbSerial: z.string().optional(),
 });
 export type PairedDevice = z.infer<typeof PairedDeviceSchema>;
+
+/** Active or recent screen-mirror session (viewer or source). */
+export const ScreenSessionSchema = z.object({
+  sessionId: z.string(),
+  deviceId: z.string(),
+  role: z.enum(["viewer", "source"]),
+  status: z.enum(["requesting", "active", "stopping", "error", "ended"]),
+  mode: z.enum(["demo", "p2p", "scrcpy", "unavailable"]),
+  width: z.number().int().positive().optional(),
+  height: z.number().int().positive().optional(),
+  fps: z.number().nonnegative().optional(),
+  /** Latest frame as data URL for UI rendering. */
+  lastFrameDataUrl: z.string().optional(),
+  lastFrameAt: z.number().int().nonnegative().optional(),
+  frameCount: z.number().int().nonnegative().default(0),
+  error: z.string().optional(),
+  startedAt: z.number().int().nonnegative(),
+  updatedAt: z.number().int().nonnegative(),
+});
+export type ScreenSession = z.infer<typeof ScreenSessionSchema>;
 
 /** Well-known peer listen endpoint (P2 transport). */
 export const PeerEndpointSchema = z.object({
@@ -222,6 +254,17 @@ export const AppSettingsSchema = z.object({
   theme: z.enum(["system", "light", "dark"]).default("system"),
   discoveryEnabled: z.boolean().default(true),
   tailscaleEnabled: z.boolean().default(false),
+  /**
+   * Path to scrcpy binary for high-quality Android mirroring (Sefirah-style).
+   * Empty = auto-detect `scrcpy` on PATH.
+   */
+  scrcpyPath: z.string().optional(),
+  /** Extra scrcpy CLI args (advanced). */
+  scrcpyExtraArgs: z.string().optional(),
+  /** Soft max FPS for in-app P2P screen share. */
+  screenShareFps: z.number().int().min(1).max(30).default(12),
+  /** Max long-edge for P2P screen frames. */
+  screenShareMaxEdge: z.number().int().min(360).max(1920).default(720),
   /** Verify SHA-256 after transfers complete (desktop/native peer path) */
   verifyTransferIntegrity: z.boolean().default(true),
   /** Preferred local peer listen port (Electron / Node peer server) */

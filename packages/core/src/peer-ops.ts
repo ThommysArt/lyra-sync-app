@@ -4,35 +4,62 @@
 import {
   authenticateWithPeer,
   getOrCreatePeerSession,
+  isLikelyTailscaleHost,
   listRemoteFs,
   openUrlOnPeer,
   pushClipboardToPeer,
   randomBytesOfSize,
+  requestScreenShare,
   sendFilesOverWire,
   sendPairRequest,
+  sendScreenFrame,
+  stopScreenShare,
   type PeerUrl,
   type WireTransferProgress,
 } from "@lyra-sync-app/net";
+
+export { isLikelyTailscaleHost };
 import type {
   ClipboardItem,
   DeviceIdentity,
   FileEntry,
   PairedDevice,
   PairingPayload,
+  ScreenShareAcceptPayload,
 } from "@lyra-sync-app/protocol";
 import { LYRA_DEFAULT_PORT } from "@lyra-sync-app/protocol";
 
-export function deviceEndpoint(device: Pick<PairedDevice, "host" | "port">): PeerUrl | null {
-  if (!device.host) return null;
+/** Pick LAN vs Tailscale host based on preferredAddress / availability. */
+export function resolveDeviceHost(
+  device: Pick<PairedDevice, "host" | "tailscaleHost" | "preferredAddress">,
+): string | null {
+  const pref = device.preferredAddress ?? "auto";
+  const lan = device.host?.trim() || null;
+  const ts = device.tailscaleHost?.trim() || null;
+  if (pref === "tailscale") return ts || lan;
+  if (pref === "lan") return lan || ts;
+  // auto: prefer Tailscale when the only host is TS-shaped, else LAN first
+  if (lan && ts) {
+    if (isLikelyTailscaleHost(lan) && !isLikelyTailscaleHost(ts)) return lan;
+    return lan;
+  }
+  return lan || ts;
+}
+
+export function deviceEndpoint(
+  device: Pick<PairedDevice, "host" | "port" | "tailscaleHost" | "preferredAddress">,
+): PeerUrl | null {
+  const host = resolveDeviceHost(device);
+  if (!host) return null;
   return {
-    host: device.host,
+    host,
     port: device.port ?? LYRA_DEFAULT_PORT,
     protocol: "http",
   };
 }
 
 export function isLivePeer(device: PairedDevice): boolean {
-  return Boolean(device.host) && !device.id.startsWith("demo_");
+  return Boolean(resolveDeviceHost(device)) && !device.id.startsWith("demo_");
 }
 
 export async function ensureSession(input: {
@@ -174,7 +201,7 @@ export async function wireUnpairNotify(input: {
   identity: DeviceIdentity;
   privateKey: string;
 }): Promise<{ ok: true } | { ok: false; error: string }> {
-  if (!input.device.host || !input.device.authSecret) {
+  if (!resolveDeviceHost(input.device) || !input.device.authSecret) {
     return { ok: false, error: "No live trusted peer" };
   }
   const session = await ensureSession(input);
@@ -196,6 +223,79 @@ export async function wireUnpairNotify(input: {
   });
   if (!res.ok) return { ok: false, error: res.error };
   return { ok: true };
+}
+
+export async function wireRequestScreenShare(input: {
+  device: PairedDevice;
+  identity: DeviceIdentity;
+  privateKey: string;
+  sessionId: string;
+  maxEdge?: number;
+  fps?: number;
+  quality?: number;
+}): Promise<
+  | { ok: true; accept: ScreenShareAcceptPayload }
+  | { ok: false; error: string }
+> {
+  const session = await ensureSession(input);
+  if (!session.ok) return session;
+  return requestScreenShare({
+    endpoint: session.endpoint,
+    sessionToken: session.sessionToken,
+    fromDeviceId: input.identity.id,
+    toDeviceId: input.device.id,
+    sessionId: input.sessionId,
+    maxEdge: input.maxEdge,
+    fps: input.fps,
+    quality: input.quality,
+    sealSecret: input.device.authSecret,
+  });
+}
+
+export async function wireStopScreenShare(input: {
+  device: PairedDevice;
+  identity: DeviceIdentity;
+  privateKey: string;
+  sessionId: string;
+  reason?: string;
+}): Promise<{ ok: true } | { ok: false; error: string }> {
+  const session = await ensureSession(input);
+  if (!session.ok) return session;
+  return stopScreenShare({
+    endpoint: session.endpoint,
+    sessionToken: session.sessionToken,
+    fromDeviceId: input.identity.id,
+    toDeviceId: input.device.id,
+    sessionId: input.sessionId,
+    reason: input.reason,
+    sealSecret: input.device.authSecret,
+  });
+}
+
+export async function wireSendScreenFrame(input: {
+  device: PairedDevice;
+  identity: DeviceIdentity;
+  privateKey: string;
+  frame: {
+    sessionId: string;
+    seq: number;
+    width: number;
+    height: number;
+    mimeType: "image/jpeg" | "image/webp" | "image/png";
+    dataBase64: string;
+    capturedAt: number;
+  };
+}): Promise<{ ok: true } | { ok: false; error: string }> {
+  const session = await ensureSession(input);
+  if (!session.ok) return session;
+  return sendScreenFrame({
+    endpoint: session.endpoint,
+    sessionToken: session.sessionToken,
+    fromDeviceId: input.identity.id,
+    toDeviceId: input.device.id,
+    frame: input.frame,
+    sealSecret: input.device.authSecret,
+  });
 }
 
 /** Download remote file in chunks (desktop peer with real FS). */

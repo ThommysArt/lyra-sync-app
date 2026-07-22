@@ -55,6 +55,12 @@ function DevicesPage() {
   const [manualName, setManualName] = useState("");
   const [manualError, setManualError] = useState<string | null>(null);
   const [trustBusy, setTrustBusy] = useState<string | null>(null);
+  const [tsHost, setTsHost] = useState("");
+  const [tsName, setTsName] = useState("");
+  const [tsBusy, setTsBusy] = useState(false);
+  const tailscaleEnabled = useLyraSelector((s) => s.settings.tailscaleEnabled);
+  const tailscaleHints = useLyraSelector((s) => s.tailscalePeerHints);
+  const tailscaleStatus = useLyraSelector((s) => s.tailscaleStatus);
 
   const filtered = devices.filter((d) => {
     const name = (d.nickname || d.name).toLowerCase();
@@ -98,6 +104,25 @@ function DevicesPage() {
     void store.probePeerAddress({ host, port });
   };
 
+  const addTailscale = () => {
+    const host = tsHost.trim();
+    if (!host) return;
+    const result = store.addManualPeer({
+      host,
+      port: 53317,
+      name: tsName || undefined,
+      asTailscale: true,
+    });
+    if (!result.ok) {
+      setManualError(result.error);
+      return;
+    }
+    setTsHost("");
+    setTsName("");
+    setManualError(null);
+    void store.probePeerAddress({ host, port: 53317 });
+  };
+
   return (
     <div className="mx-auto max-w-5xl space-y-4 p-4 md:px-5 md:py-4">
       <div className="flex flex-wrap items-end justify-between gap-4">
@@ -138,19 +163,19 @@ function DevicesPage() {
             <p className="text-sm font-medium">Find device by address</p>
             <p className="text-xs text-muted-foreground">
               Adds a <strong>nearby</strong> peer (not trusted yet). Use Pair to establish trust.
-              Default port 53317.
+              Default port 53317. For Tailscale use the dedicated section below.
             </p>
           </div>
           <div className="grid gap-3 sm:grid-cols-[1fr_7rem_1fr_auto]">
             <div className="space-y-1.5">
               <Label htmlFor="manual-host" className="text-xs">
-                Host / IP
+                LAN host / IP
               </Label>
               <Input
                 id="manual-host"
                 value={manualHost}
                 onChange={(e) => setManualHost(e.target.value)}
-                placeholder="192.168.1.42 or laptop.tailnet"
+                placeholder="192.168.1.42"
                 className="rounded-md"
               />
             </div>
@@ -186,6 +211,143 @@ function DevicesPage() {
             </div>
           </div>
           {manualError ? <p className="text-xs text-destructive">{manualError}</p> : null}
+        </CardContent>
+      </Card>
+
+      <Card className="rounded-xl border-primary/20">
+        <CardContent className="space-y-3 p-4">
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div>
+              <p className="text-sm font-medium">Add by Tailscale IP</p>
+              <p className="text-xs text-muted-foreground">
+                Multicast does not work reliably over Tailscale. Paste a{" "}
+                <code className="rounded bg-muted px-1">100.x</code> address or MagicDNS name
+                (e.g. <code className="rounded bg-muted px-1">pixel-6</code>
+                ). Enable Tailscale in Settings for probe + scan.
+              </p>
+            </div>
+            {tailscaleStatus?.selfIp ? (
+              <Badge variant="outline" className="font-mono text-[11px]">
+                This node {tailscaleStatus.selfIp}
+              </Badge>
+            ) : null}
+          </div>
+          <div className="grid gap-3 sm:grid-cols-[1fr_1fr_auto_auto]">
+            <div className="space-y-1.5">
+              <Label htmlFor="ts-host" className="text-xs">
+                Tailscale IP / MagicDNS
+              </Label>
+              <Input
+                id="ts-host"
+                value={tsHost}
+                onChange={(e) => setTsHost(e.target.value)}
+                placeholder="100.83.145.32"
+                className="rounded-md font-mono"
+                disabled={!tailscaleEnabled}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="ts-name" className="text-xs">
+                Nickname (optional)
+              </Label>
+              <Input
+                id="ts-name"
+                value={tsName}
+                onChange={(e) => setTsName(e.target.value)}
+                placeholder="Pixel 6"
+                className="rounded-md"
+                disabled={!tailscaleEnabled}
+              />
+            </div>
+            <div className="flex items-end">
+              <Button
+                disabled={!tailscaleEnabled || !tsHost.trim()}
+                onClick={addTailscale}
+                className="w-full sm:w-auto"
+              >
+                <Plus className="size-4" />
+                Add Tailscale peer
+              </Button>
+            </div>
+            <div className="flex items-end">
+              <Button
+                variant="outline"
+                disabled={!tailscaleEnabled || tsBusy}
+                onClick={() => {
+                  setTsBusy(true);
+                  void (async () => {
+                    try {
+                      const { getDesktopApi } = await import("@/lib/desktop-bridge");
+                      const api = getDesktopApi();
+                      if (api?.scanTailscale) {
+                        const res = await api.scanTailscale();
+                        if (res.ok) {
+                          store.ingestTailscalePeers(res.peers);
+                          store.setTailscaleStatus({
+                            ok: true,
+                            backendState: res.backendState,
+                            selfHost: res.self?.host,
+                            selfIp: res.self?.tailscaleIp,
+                            updatedAt: Date.now(),
+                          });
+                        } else {
+                          store.setTailscaleStatus({
+                            ok: false,
+                            error: res.error,
+                            updatedAt: Date.now(),
+                          });
+                        }
+                      }
+                      await store.probeTailscalePeers();
+                    } finally {
+                      setTsBusy(false);
+                    }
+                  })();
+                }}
+              >
+                <Radar className="size-4" />
+                Scan Tailscale
+              </Button>
+            </div>
+          </div>
+          {!tailscaleEnabled ? (
+            <p className="text-xs text-amber-600">
+              Tailscale support is off — enable it in Settings to add and probe 100.x peers.
+            </p>
+          ) : null}
+          {tailscaleHints.length > 0 ? (
+            <div className="space-y-1.5">
+              <p className="text-xs font-medium text-muted-foreground">Discovered on your tailnet</p>
+              <ul className="divide-y divide-border/60 overflow-hidden rounded-lg border border-border/70">
+                {tailscaleHints.slice(0, 12).map((h) => (
+                  <li
+                    key={`${h.host}:${h.port ?? 53317}`}
+                    className="flex items-center justify-between gap-2 px-3 py-2 text-sm"
+                  >
+                    <div className="min-w-0">
+                      <p className="truncate font-medium">{h.name || h.host}</p>
+                      <p className="truncate font-mono text-xs text-muted-foreground">{h.host}</p>
+                    </div>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        const result = store.addManualPeer({
+                          host: h.host,
+                          port: h.port ?? 53317,
+                          name: h.name,
+                          asTailscale: true,
+                        });
+                        if (result.ok) void store.probePeerAddress({ host: h.host, port: h.port });
+                      }}
+                    >
+                      Add
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
         </CardContent>
       </Card>
 

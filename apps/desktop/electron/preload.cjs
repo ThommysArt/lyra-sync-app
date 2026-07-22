@@ -21,6 +21,8 @@ contextBridge.exposeInMainWorld("lyraDesktop", {
   revokeDevice: (deviceId) => ipcRenderer.invoke("lyra:revoke-device", deviceId),
   quit: () => ipcRenderer.invoke("lyra:quit"),
   scanTailscale: () => ipcRenderer.invoke("lyra:scan-tailscale"),
+  startScrcpy: (opts) => ipcRenderer.invoke("lyra:start-scrcpy", opts),
+  stopScrcpy: (deviceId) => ipcRenderer.invoke("lyra:stop-scrcpy", deviceId),
   // Custom window chrome (frameless shell)
   windowMinimize: () => ipcRenderer.invoke("lyra:window-minimize"),
   windowMaximizeToggle: () => ipcRenderer.invoke("lyra:window-maximize-toggle"),

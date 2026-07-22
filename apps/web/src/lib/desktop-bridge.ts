@@ -79,9 +79,22 @@ export type LyraDesktopApi = {
   revokeDevice?: (deviceId: string) => Promise<{ revokedSessions: number }>;
   quit?: () => Promise<void>;
   scanTailscale?: () => Promise<
-    | { ok: true; peers: { host: string; port?: number; name?: string }[]; backendState?: string }
+    | {
+        ok: true;
+        peers: { host: string; port?: number; name?: string }[];
+        backendState?: string;
+        self?: { host?: string; tailscaleIp?: string };
+      }
     | { ok: false; error: string; peers: [] }
   >;
+  /** Launch scrcpy for an Android device (Sefirah-style). */
+  startScrcpy?: (opts: {
+    deviceId: string;
+    serial?: string;
+    scrcpyPath?: string;
+    extraArgs?: string;
+  }) => Promise<{ ok: boolean; error?: string; pid?: number }>;
+  stopScrcpy?: (deviceId: string) => Promise<{ ok: boolean }>;
   windowMinimize?: () => Promise<void>;
   windowMaximizeToggle?: () => Promise<{ maximized: boolean }>;
   windowClose?: () => Promise<void>;

@@ -11,7 +11,7 @@
   },
   "scripts": {
     "check-types": "tsc --noEmit",
-    "test": "tsx --test src/store.test.ts"
+    "test": "tsx --test src/store.test.ts src/screen-frames.test.ts"
   },
   "dependencies": {
     "@lyra-sync-app/net": "workspace:*",

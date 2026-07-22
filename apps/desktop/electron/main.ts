@@ -53,6 +53,8 @@ import {
 } from "@lyra-sync-app/net/node";
 import type { DeviceIdentity } from "@lyra-sync-app/protocol";
 import { LYRA_DEFAULT_PORT } from "@lyra-sync-app/protocol";
+import { spawn, type ChildProcess } from "node:child_process";
+import { accessSync, constants as fsConstants } from "node:fs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -92,6 +94,30 @@ let pairingOffer: { codeHash: string; token: string; expiresAt: number } | null 
 
 /** User-selected download directory (empty = system Downloads) */
 let downloadDirectory: string | null = null;
+
+/** Active scrcpy processes keyed by Lyra device id (Sefirah-style). */
+const scrcpyProcesses = new Map<string, ChildProcess>();
+
+function resolveScrcpyBinary(preferred?: string): string | null {
+  const candidates = [
+    preferred,
+    process.env.LYRA_SCRCPY_PATH,
+    "scrcpy",
+    "/usr/bin/scrcpy",
+    "/usr/local/bin/scrcpy",
+    path.join(os.homedir(), "bin/scrcpy"),
+  ].filter(Boolean) as string[];
+  for (const c of candidates) {
+    if (c === "scrcpy") return c; // rely on PATH
+    try {
+      accessSync(c, fsConstants.X_OK);
+      return c;
+    } catch {
+      // try next
+    }
+  }
+  return "scrcpy";
+}
 
 function resolveDownloadDir(): string {
   if (downloadDirectory && existsSync(downloadDirectory)) return downloadDirectory;
@@ -261,6 +287,22 @@ async function startNetworking() {
         onFsRead: (fsPath, offset, maxBytes) => readOsFileChunk(fsPath, offset, maxBytes),
         onFsDelete: (fsPath) => deleteOsPath(fsPath),
         onFsRename: (fsPath, newName) => renameOsPath(fsPath, newName),
+        // Soft screen share: accept and let the viewer fall back to demo if frames
+        // are not pushed (full desktop capture can be wired later via desktopCapturer).
+        onScreenShareRequest: (request) => ({
+          sessionId: request.sessionId,
+          width: request.maxEdge ?? 720,
+          height: Math.round((request.maxEdge ?? 720) * (16 / 9)),
+          fps: request.fps ?? 12,
+          mode: "p2p" as const,
+          mimeType: "image/jpeg" as const,
+        }),
+        onScreenFrame: (frame) => {
+          mainWindow?.webContents.send("lyra:screen-frame", frame);
+        },
+        onScreenShareStop: (sessionId) => {
+          mainWindow?.webContents.send("lyra:screen-share-stop", { sessionId });
+        },
         onTransferComplete: async (state) => {
           const destDir = resolveDownloadDir();
           try {
@@ -902,7 +944,114 @@ app.whenReady().then(async () => {
     if (!ts.ok) return { ok: false as const, error: ts.error, peers: [] };
     const peers = tailscalePeersToProbeTargets(ts.peers, peer?.port ?? PEER_PORT);
     mainWindow?.webContents.send("lyra:tailscale-peers", peers);
-    return { ok: true as const, peers, backendState: ts.backendState };
+    return {
+      ok: true as const,
+      peers,
+      backendState: ts.backendState,
+      self: ts.self
+        ? { host: ts.self.host, tailscaleIp: ts.self.tailscaleIp }
+        : undefined,
+    };
+  });
+
+  ipcMain.handle(
+    "lyra:start-scrcpy",
+    async (
+      _e,
+      opts: {
+        deviceId: string;
+        serial?: string;
+        scrcpyPath?: string;
+        extraArgs?: string;
+      },
+    ) => {
+      const deviceId = opts?.deviceId;
+      if (!deviceId) return { ok: false as const, error: "deviceId required" };
+
+      // Stop previous process for this device
+      const prev = scrcpyProcesses.get(deviceId);
+      if (prev && !prev.killed) {
+        try {
+          prev.kill("SIGTERM");
+        } catch {
+          // ignore
+        }
+        scrcpyProcesses.delete(deviceId);
+      }
+
+      const bin = resolveScrcpyBinary(opts.scrcpyPath);
+      if (!bin) {
+        return {
+          ok: false as const,
+          error: "scrcpy not found — install scrcpy or set path in Settings",
+        };
+      }
+
+      const args: string[] = [];
+      if (opts.serial) {
+        // Wireless / Tailscale: --tcpip=HOST:PORT or -s SERIAL
+        if (opts.serial.includes(".") || opts.serial.includes(":")) {
+          args.push(`--tcpip=${opts.serial}`);
+        } else {
+          args.push("-s", opts.serial);
+        }
+      }
+      // Prefer a clean window title and slightly higher quality defaults
+      args.push("--window-title=Lyra Mirror", "--max-size=1024", "--video-bit-rate=8M");
+      if (opts.extraArgs?.trim()) {
+        args.push(...opts.extraArgs.trim().split(/\s+/).filter(Boolean));
+      }
+
+      try {
+        const child = spawn(bin, args, {
+          detached: false,
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        scrcpyProcesses.set(deviceId, child);
+        let stderr = "";
+        child.stderr?.on("data", (chunk: Buffer) => {
+          stderr += chunk.toString("utf8");
+          if (stderr.length > 4000) stderr = stderr.slice(-2000);
+        });
+        child.on("exit", (code) => {
+          scrcpyProcesses.delete(deviceId);
+          mainWindow?.webContents.send("lyra:scrcpy-exit", {
+            deviceId,
+            code,
+            stderr: stderr.slice(0, 500),
+          });
+        });
+        // Give it a moment to fail fast if binary missing
+        await new Promise((r) => setTimeout(r, 400));
+        if (child.exitCode != null && child.exitCode !== 0) {
+          scrcpyProcesses.delete(deviceId);
+          return {
+            ok: false as const,
+            error: stderr.trim() || `scrcpy exited with code ${child.exitCode}`,
+          };
+        }
+        console.log("[lyra] scrcpy started", bin, args.join(" "), "pid", child.pid);
+        return { ok: true as const, pid: child.pid };
+      } catch (e) {
+        return {
+          ok: false as const,
+          error: e instanceof Error ? e.message : "Failed to start scrcpy",
+        };
+      }
+    },
+  );
+
+  ipcMain.handle("lyra:stop-scrcpy", (_e, deviceId: string) => {
+    const child = scrcpyProcesses.get(deviceId);
+    if (child && !child.killed) {
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        // ignore
+      }
+    }
+    scrcpyProcesses.delete(deviceId);
+    return { ok: true as const };
   });
 
   /** LocalSend-style: fire UDP multicast announce burst (user Refresh discovery). */

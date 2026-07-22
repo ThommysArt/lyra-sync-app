@@ -142,8 +142,10 @@ export default function DevicesScreen() {
             </Text>
             <TextInput
               onChangeText={setManualHost}
-              placeholder="IP or hostname"
+              placeholder="LAN IP or Tailscale 100.x"
               placeholderTextColor={muted}
+              autoCapitalize="none"
+              autoCorrect={false}
               style={{
                 backgroundColor: isDark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.04)",
                 borderRadius: 14,
@@ -155,31 +157,59 @@ export default function DevicesScreen() {
               }}
               value={manualHost}
             />
-            <Pressable
-              disabled={!manualHost.trim()}
-              onPress={() => {
-                const host = manualHost.trim();
-                const result = store.addManualPeer({ host });
-                if (result.ok) {
-                  setManualHost("");
-                  // Live HTTP probe when a peer server is reachable (same as web)
-                  void store.probePeerAddress({ host });
-                }
-              }}
-              style={{
-                alignItems: "center",
-                alignSelf: "flex-start",
-                backgroundColor: accent,
-                borderRadius: 8,
-                opacity: manualHost.trim() ? 1 : 0.5,
-                paddingHorizontal: 14,
-                paddingVertical: 8,
-              }}
-            >
-              <Text style={{ color: "#fff", fontFamily: fonts.semiBold, fontSize: 13 }}>
-                Find peer
-              </Text>
-            </Pressable>
+            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+              <Pressable
+                disabled={!manualHost.trim()}
+                onPress={() => {
+                  const host = manualHost.trim();
+                  const result = store.addManualPeer({ host });
+                  if (result.ok) {
+                    setManualHost("");
+                    void store.probePeerAddress({ host });
+                  }
+                }}
+                style={{
+                  alignItems: "center",
+                  alignSelf: "flex-start",
+                  backgroundColor: accent,
+                  borderRadius: 8,
+                  opacity: manualHost.trim() ? 1 : 0.5,
+                  paddingHorizontal: 14,
+                  paddingVertical: 8,
+                }}
+              >
+                <Text style={{ color: "#fff", fontFamily: fonts.semiBold, fontSize: 13 }}>
+                  Find peer
+                </Text>
+              </Pressable>
+              <Pressable
+                disabled={!manualHost.trim()}
+                onPress={() => {
+                  const host = manualHost.trim();
+                  const result = store.addManualPeer({ host, asTailscale: true });
+                  if (result.ok) {
+                    setManualHost("");
+                    void store.probePeerAddress({ host });
+                  }
+                }}
+                style={{
+                  alignItems: "center",
+                  alignSelf: "flex-start",
+                  backgroundColor: isDark ? "rgba(122,162,255,0.2)" : "rgba(47,107,255,0.12)",
+                  borderRadius: 8,
+                  opacity: manualHost.trim() ? 1 : 0.5,
+                  paddingHorizontal: 14,
+                  paddingVertical: 8,
+                }}
+              >
+                <Text style={{ color: accent, fontFamily: fonts.semiBold, fontSize: 13 }}>
+                  Add as Tailscale
+                </Text>
+              </Pressable>
+            </View>
+            <Text style={{ color: muted, fontFamily: fonts.regular, fontSize: 11 }}>
+              Tip: paste a Tailscale IP like 100.83.145.32 when LAN discovery cannot see the device.
+            </Text>
           </View>
 
           {nearby.length > 0 ? (
