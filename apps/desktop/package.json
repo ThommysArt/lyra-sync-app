@@ -1,23 +1,32 @@
 {
   "name": "desktop",
-  "version": "0.2.0",
+  "version": "0.2.3",
   "private": true,
   "description": "Lyra desktop shell — local peer network for clipboard and files",
   "author": "Lyra",
   "type": "module",
   "main": "dist-electron/main.js",
   "scripts": {
-    "dev": "tsx scripts/dev.ts",
+    "dev": "LYRA_VARIANT=development tsx scripts/dev.ts",
+    "dev:preview": "LYRA_VARIANT=preview tsx scripts/dev.ts",
+    "dev:prod": "LYRA_VARIANT=production tsx scripts/dev.ts",
     "build:electron": "tsx scripts/build-electron.ts",
     "build": "pnpm run build:electron",
     "start": "electron .",
-    "pack": "pnpm run build:electron && electron-builder --dir",
-    "dist": "pnpm run build:electron && electron-builder",
+    "pack": "LYRA_VARIANT=${LYRA_VARIANT:-development} tsx scripts/package.ts --dir",
+    "pack:dev": "LYRA_VARIANT=development tsx scripts/package.ts --dir",
+    "pack:preview": "LYRA_VARIANT=preview tsx scripts/package.ts --dir",
+    "pack:prod": "LYRA_VARIANT=production tsx scripts/package.ts --dir",
+    "dist": "LYRA_VARIANT=${LYRA_VARIANT:-production} tsx scripts/package.ts",
+    "dist:dev": "LYRA_VARIANT=development tsx scripts/package.ts",
+    "dist:preview": "LYRA_VARIANT=preview tsx scripts/package.ts",
+    "dist:prod": "LYRA_VARIANT=production tsx scripts/package.ts",
     "check-types": "tsc --noEmit"
   },
   "build": {
     "appId": "app.lyra.desktop",
     "productName": "Lyra",
+    "artifactName": "Lyra-${version}-prod.${ext}",
     "directories": {
       "output": "release"
     },

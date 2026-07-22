@@ -49,6 +49,7 @@ import {
   wireStopScreenShare,
   wireTrustHandshake,
   wireUnpairNotify,
+  wireVerifyPairTrust,
 } from "./peer-ops";
 import {
   base64ToDataUrl,
@@ -219,6 +220,7 @@ export type LyraStore = {
   /**
    * Manually add a peer by host/IP (and optional port). Used when multicast
    * discovery cannot see the device (different subnet, Tailscale, etc.).
+   * Host may include `:port` (e.g. `100.x.x.x:53319`).
    */
   addManualPeer: (input: {
     host: string;
@@ -227,6 +229,11 @@ export type LyraStore = {
     /** When true / auto-detected, mark connectionType as tailscale. */
     asTailscale?: boolean;
   }) => { ok: true; device: PairedDevice } | { ok: false; error: string };
+  /**
+   * Re-verify paired peers still trust us (detect remote unpair).
+   * Skips unreachable peers. Called on startup and discovery refresh.
+   */
+  recheckPairedTrust: () => Promise<{ revoked: number; checked: number }>;
   /**
    * Update reachability addresses for a known device (LAN + optional Tailscale IP).
    */
@@ -714,6 +721,44 @@ function trimClipboardHistory(
     next = next.filter((c) => c.pinned || c.createdAt >= cutoff);
   }
   return next.slice(0, settings.clipboardHistoryLimit);
+}
+
+/**
+ * Parse "host", "host:port", or "[ipv6]:port" into parts.
+ * Does not treat bare IPv6 as host:port (no brackets + multiple colons).
+ */
+export function parseHostPortInput(
+  raw: string,
+  defaultPort: number = LYRA_DEFAULT_PORT,
+): { host: string; port: number } | { error: string } {
+  const trimmed = raw.trim();
+  if (!trimmed) return { error: "Host or IP is required" };
+
+  // [ipv6]:port
+  const bracket = /^\[([^\]]+)\](?::(\d+))?$/.exec(trimmed);
+  if (bracket) {
+    const host = bracket[1]!;
+    const port = bracket[2] ? Number(bracket[2]) : defaultPort;
+    if (!Number.isFinite(port) || port <= 0 || port > 65535) {
+      return { error: "Invalid port" };
+    }
+    return { host, port };
+  }
+
+  // host:port where host has no colons (IPv4 / hostname)
+  const colon = trimmed.lastIndexOf(":");
+  if (colon > 0 && !trimmed.includes("://")) {
+    const maybePort = trimmed.slice(colon + 1);
+    if (/^\d{1,5}$/.test(maybePort)) {
+      const port = Number(maybePort);
+      if (port > 0 && port <= 65535) {
+        return { host: trimmed.slice(0, colon), port };
+      }
+      return { error: "Invalid port" };
+    }
+  }
+
+  return { host: trimmed, port: defaultPort };
 }
 
 function applyProbeToDevice(d: PairedDevice, result: ProbeResult, now: number): PairedDevice {
@@ -1382,29 +1427,84 @@ export function createLyraStore(options?: {
           privateKey: s.privateKey,
         });
       }
+      // Drop cached auth sessions so we do not reuse stale tokens
+      if (device) {
+        void import("@lyra-sync-app/net").then(({ clearPeerSessionFor, clearPeerSessionCache }) => {
+          const ep = {
+            host: resolveDeviceHost(device) || device.host || "127.0.0.1",
+            port: device.port ?? LYRA_DEFAULT_PORT,
+          };
+          try {
+            clearPeerSessionFor(ep, device.id);
+          } catch {
+            clearPeerSessionCache();
+          }
+        });
+      }
       set((st) => ({
         ...st,
         devices: st.devices.filter((d) => d.id !== deviceId),
         selectedDeviceId: st.selectedDeviceId === deviceId ? null : st.selectedDeviceId,
       }));
       persist();
-      notify(set, "Device unpaired", "info");
+      if (!opts?.silent) {
+        notify(set, "Device unpaired", "info");
+      }
+    },
+    recheckPairedTrust: async () => {
+      const s = getState();
+      if (!s.identity || !s.privateKey) return { revoked: 0, checked: 0 };
+      const paired = s.devices.filter((d) => d.authSecret && isLivePeer(d));
+      let revoked = 0;
+      let checked = 0;
+      for (const device of paired) {
+        checked++;
+        try {
+          const res = await wireVerifyPairTrust({
+            device,
+            identity: s.identity!,
+            privateKey: s.privateKey!,
+          });
+          if (!res.ok) {
+            // Unreachable — keep local pair
+            continue;
+          }
+          if (!res.stillTrusted) {
+            revoked++;
+            const name = device.nickname || device.name;
+            store.unpairDevice(device.id, { silent: true });
+            notify(
+              set,
+              `${name} is no longer paired (removed on the other device)`,
+              "info",
+            );
+          }
+        } catch {
+          // ignore individual failures
+        }
+      }
+      return { revoked, checked };
     },
     addManualPeer: (input) => {
       const s = getState();
       if (!s.identity) return { ok: false as const, error: "Not ready" };
-      const host = input.host.trim();
-      if (!host) return { ok: false as const, error: "Host or IP is required" };
+      const defaultPort =
+        input.port && input.port > 0
+          ? input.port
+          : (s.settings.peerListenPort ?? LYRA_DEFAULT_PORT);
+      const parsed = parseHostPortInput(input.host, defaultPort);
+      if ("error" in parsed) return { ok: false as const, error: parsed.error };
+      const { host, port } = parsed;
 
       // Basic host validation: hostname, IPv4, or IPv6-ish
       if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]*$/.test(host) && !host.includes(":")) {
         return { ok: false as const, error: "Invalid host" };
       }
 
-      const port = input.port && input.port > 0 ? input.port : 53317;
       const existing = s.devices.find(
         (d) =>
-          (d.host === host || d.tailscaleHost === host) && (d.port ?? 53317) === port,
+          (d.host === host || d.tailscaleHost === host) &&
+          (d.port ?? LYRA_DEFAULT_PORT) === port,
       );
       if (existing) {
         return { ok: false as const, error: "A peer with that address already exists" };
@@ -1452,8 +1552,8 @@ export function createLyraStore(options?: {
       notify(
         set,
         isTs
-          ? `Tailscale peer saved (${host}) — Pair to trust ${name}`
-          : `Nearby peer saved — tap Pair to trust ${name}`,
+          ? `Tailscale peer saved (${host}:${port}) — Pair to trust ${name}`
+          : `Nearby peer saved (${host}:${port}) — tap Pair to trust ${name}`,
         "info",
       );
       return { ok: true as const, device };
@@ -1901,6 +2001,12 @@ export function createLyraStore(options?: {
       }
 
       persist();
+      // Re-check mutual trust for paired peers (detect remote unpair)
+      try {
+        await store.recheckPairedTrust();
+      } catch {
+        // best-effort
+      }
       const online = getState().devices.filter((d) => d.online).length;
       const nearby = getState().devices.filter((d) => !d.authSecret).length;
       set((st) => ({
@@ -1975,35 +2081,111 @@ export function createLyraStore(options?: {
       if (candidates.length === 0 && hintTargets.length === 0) {
         notify(
           set,
-          "No Tailscale peers — add a 100.x / *.ts.net address, or Scan Tailscale in Settings",
+          "No Tailscale peers — add a 100.x / *.ts.net address, or Scan Tailscale",
           "info",
         );
         return [];
       }
-      const probeList = [
+      const basePort = s.settings.peerListenPort ?? LYRA_DEFAULT_PORT;
+      // Prefer stored port, then common fallbacks (EADDRINUSE port steal on multi-instance)
+      const portFallbacks = (preferred?: number) => {
+        const set = new Set<number>([
+          preferred && preferred > 0 ? preferred : basePort,
+          basePort,
+          basePort + 2,
+          basePort + 4,
+          basePort + 10,
+          LYRA_DEFAULT_PORT,
+        ]);
+        return [...set];
+      };
+
+      type Target = { host: string; ports: number[]; deviceId: string | null };
+      const probeList: Target[] = [
         ...candidates.map((d) => ({
           host: d.tailscaleHost || resolveDeviceHost(d) || d.host!,
-          port: d.port ?? s.settings.peerListenPort,
-          deviceId: d.id,
+          ports: portFallbacks(d.port),
+          deviceId: d.id as string | null,
         })),
         ...hintTargets.map((h) => ({
           host: h.host,
-          port: h.port ?? s.settings.peerListenPort,
+          ports: portFallbacks(h.port),
           deviceId: null as string | null,
         })),
       ];
-      const results = await probePeers(
-        probeList.map((t) => ({ host: t.host, port: t.port })),
-        { timeoutMs: 3000, preferTailscale: true },
-      );
+
+      const results: ProbeResult[] = [];
       const now = Date.now();
+      for (const target of probeList) {
+        let best: ProbeResult | null = null;
+        for (const port of target.ports) {
+          const r = await probePeer(
+            { host: target.host, port },
+            { timeoutMs: 1800, preferTailscale: true },
+          );
+          if (r.ok) {
+            best = r;
+            break;
+          }
+          best = r;
+        }
+        results.push(best!);
+        // Promote working port onto the device / hint
+        if (best?.ok) {
+          if (target.deviceId) {
+            set((st) => ({
+              ...st,
+              devices: st.devices.map((d) =>
+                d.id === target.deviceId
+                  ? applyProbeToDevice(
+                      {
+                        ...d,
+                        port: best!.port,
+                        tailscaleHost: d.tailscaleHost || target.host,
+                      },
+                      best!,
+                      now,
+                    )
+                  : d,
+              ),
+            }));
+          } else {
+            // Auto-add reachable Tailscale peers as nearby
+            const exists = getState().devices.some(
+              (d) =>
+                (d.host === best!.host || d.tailscaleHost === best!.host) &&
+                (d.port ?? LYRA_DEFAULT_PORT) === best!.port,
+            );
+            if (!exists) {
+              store.addManualPeer({
+                host: best.host,
+                port: best.port,
+                name: best.name,
+                asTailscale: true,
+              });
+              // Re-apply online/identity from probe
+              set((st) => ({
+                ...st,
+                devices: st.devices.map((d) =>
+                  d.host === best!.host && (d.port ?? LYRA_DEFAULT_PORT) === best!.port
+                    ? applyProbeToDevice(d, best!, now)
+                    : d,
+                ),
+              }));
+            }
+          }
+        } else if (target.deviceId) {
+          set((st) => ({
+            ...st,
+            devices: st.devices.map((d) =>
+              d.id === target.deviceId ? applyProbeToDevice(d, best!, now) : d,
+            ),
+          }));
+        }
+      }
+
       set((st) => ({
         ...st,
-        devices: st.devices.map((d) => {
-          const idx = probeList.findIndex((t) => t.deviceId === d.id);
-          if (idx < 0) return d;
-          return applyProbeToDevice(d, results[idx]!, now);
-        }),
         lastProbeSummary: `Tailscale probe · ${results.filter((r) => r.ok).length}/${results.length} up`,
       }));
       persist();
@@ -2257,52 +2439,83 @@ export function createLyraStore(options?: {
       if (!device || !s.identity || !s.privateKey) {
         return { ok: false as const, error: "Device not ready" };
       }
-      if (!device.host) return { ok: false as const, error: "Device has no host" };
+      if (!resolveDeviceHost(device)) {
+        return { ok: false as const, error: "Device has no host" };
+      }
       if (device.authSecret) {
         notify(set, "Already trusted", "info");
         return { ok: true as const };
       }
       const token = generateId("tok");
+      const localHost = localLanHostFromState(s) ?? s.localLanHint ?? undefined;
+      const localPort = s.peerServer.port ?? s.settings.peerListenPort;
+      notify(set, `Waiting for ${device.name} to accept pairing…`, "info");
       const res = await wireTrustHandshake({
         device,
         identity: s.identity,
         privateKey: s.privateKey,
         pairingToken: token,
+        localHost: localHost ?? undefined,
+        localPort: localPort ?? undefined,
       });
       if (!res.ok) {
         notify(set, `Trust failed: ${res.error}`, "error");
         return res;
       }
-      // Refresh identity from live peer
-      const probe = await probePeer({
-        host: device.host,
-        port: device.port ?? s.settings.peerListenPort,
-      });
+      const remote = res.remote;
+      const reachHost = res.host || resolveDeviceHost(device) || device.host;
+      const reachPort = res.port ?? device.port ?? s.settings.peerListenPort ?? LYRA_DEFAULT_PORT;
+      const isTs =
+        Boolean(device.tailscaleHost) ||
+        device.connectionType === "tailscale" ||
+        (reachHost ? isLikelyTailscaleHost(reachHost) : false);
       set((st) => ({
         ...st,
-        devices: st.devices.map((d) =>
-          d.id === deviceId
-            ? {
-                ...d,
-                authSecret: res.authSecret,
-                fingerprint: probe.ok ? probe.fingerprint : d.fingerprint,
-                name: probe.ok && !d.nickname ? probe.name : d.name,
-                platform: probe.ok
-                  ? (probe.platform as PairedDevice["platform"])
-                  : d.platform,
-                online: probe.ok ? true : d.online,
-                lastSeenAt: Date.now(),
-                showInMainList: true,
-              }
-            : d,
-        ),
+        devices: st.devices
+          .filter((d) => {
+            // Drop duplicate nearby entries that match the real remote id
+            if (d.id === deviceId) return true;
+            if (d.id === remote.id) return false;
+            if (d.fingerprint === remote.fingerprint) return false;
+            return true;
+          })
+          .map((d) =>
+            d.id === deviceId
+              ? {
+                  ...d,
+                  // Promote manual_* id to the peer's real identity id
+                  id: remote.id,
+                  authSecret: res.authSecret,
+                  fingerprint: remote.fingerprint || d.fingerprint,
+                  publicKey: remote.publicKey || d.publicKey,
+                  name: d.nickname ? d.name : remote.name || d.name,
+                  type: remote.type || d.type,
+                  platform: (remote.platform as PairedDevice["platform"]) || d.platform,
+                  host: isTs && device.tailscaleHost ? device.host || reachHost : reachHost,
+                  port: reachPort,
+                  tailscaleHost:
+                    device.tailscaleHost ||
+                    (isTs && reachHost ? reachHost : d.tailscaleHost),
+                  preferredAddress: isTs ? "tailscale" : d.preferredAddress ?? "auto",
+                  connectionType: isTs
+                    ? device.host && device.tailscaleHost
+                      ? "both"
+                      : "tailscale"
+                    : d.connectionType === "manual"
+                      ? "local"
+                      : d.connectionType,
+                  online: true,
+                  lastSeenAt: Date.now(),
+                  showInMainList: true,
+                  status: d.status
+                    ? { ...d.status, deviceId: remote.id }
+                    : d.status,
+                }
+              : d,
+          ),
       }));
       persist();
-      notify(
-        set,
-        `Trusted ${device.name} locally — confirm on the other device if prompted`,
-        "success",
-      );
+      notify(set, `Paired with ${remote.name || device.name}`, "success");
       return { ok: true as const };
     },
     applyRemoteStatus: (deviceId, status) => {

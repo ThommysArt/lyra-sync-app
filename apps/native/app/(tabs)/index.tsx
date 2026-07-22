@@ -8,7 +8,14 @@ import * as Clipboard from "expo-clipboard";
 import * as DocumentPicker from "expo-document-picker";
 import { router } from "expo-router";
 import { useState } from "react";
-import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
+import {
+  Modal,
+  Pressable,
+  ScrollView,
+  Text,
+  TextInput,
+  View,
+} from "react-native";
 
 import { ScreenHeader, useTabBottomPadding } from "@/components/ui/screen-header";
 import { useAppTheme } from "@/contexts/app-theme-context";
@@ -34,9 +41,17 @@ export default function DevicesScreen() {
       .sort((a, b) => Number(b.online) - Number(a.online)),
   );
   const discoveryEnabled = useLyraSelector((s) => s.settings.discoveryEnabled);
-  const [manualHost, setManualHost] = useState("");
+  const tailscaleEnabled = useLyraSelector((s) => s.settings.tailscaleEnabled);
+  const tailscaleHints = useLyraSelector((s) => s.tailscalePeerHints);
   const [openUrl, setOpenUrl] = useState("");
   const [trustBusy, setTrustBusy] = useState<string | null>(null);
+  const [scanBusy, setScanBusy] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [manualHost, setManualHost] = useState("");
+  const [manualPort, setManualPort] = useState("53317");
+  const [manualName, setManualName] = useState("");
+  const [manualAsTs, setManualAsTs] = useState(true);
+  const [manualError, setManualError] = useState<string | null>(null);
   const onlineIds = useLyraSelector((s) =>
     s.devices.filter((d) => d.online && (d.authSecret || d.id.startsWith("demo_"))).map((d) => d.id),
   );
@@ -91,6 +106,44 @@ export default function DevicesScreen() {
     }
   };
 
+  const scanTailscale = async () => {
+    if (!tailscaleEnabled) return;
+    setScanBusy(true);
+    try {
+      // Mobile cannot run `tailscale status` locally; probe known + hint peers
+      // and refresh discovery so LAN/Tailscale hosts with Lyra respond.
+      await store.refreshDiscovery();
+      await store.probeTailscalePeers();
+    } finally {
+      setScanBusy(false);
+    }
+  };
+
+  const submitDetails = () => {
+    const host = manualHost.trim();
+    const port = Number(manualPort) || 53317;
+    if (!host) {
+      setManualError("Host or IP is required");
+      return;
+    }
+    const result = store.addManualPeer({
+      host,
+      port,
+      name: manualName.trim() || undefined,
+      asTailscale: manualAsTs,
+    });
+    if (!result.ok) {
+      setManualError(result.error);
+      return;
+    }
+    setManualError(null);
+    setManualHost("");
+    setManualName("");
+    setManualPort("53317");
+    setDetailsOpen(false);
+    void store.probePeerAddress({ host: result.device.host!, port: result.device.port });
+  };
+
   return (
     <View style={{ backgroundColor: bg, flex: 1 }}>
       <ScrollView contentContainerStyle={{ paddingBottom: bottomPad }}>
@@ -102,7 +155,7 @@ export default function DevicesScreen() {
             <View style={{ flexDirection: "row", gap: 8 }}>
               <Pressable
                 disabled={!discoveryEnabled}
-                onPress={() => store.refreshDiscovery()}
+                onPress={() => void store.refreshDiscovery()}
                 style={{
                   alignItems: "center",
                   backgroundColor: isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)",
@@ -133,84 +186,157 @@ export default function DevicesScreen() {
         />
 
         <View style={{ gap: 12, paddingHorizontal: 16 }}>
+          {/* Tailscale: scan-first */}
           <View style={{ backgroundColor: card, borderRadius: 12, gap: 10, padding: 14 }}>
             <Text style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 14 }}>
-              Find by address (nearby)
+              Tailscale
             </Text>
             <Text style={{ color: muted, fontFamily: fonts.regular, fontSize: 12 }}>
-              Does not pair yet — use Pair on the nearby card, or the link button for QR/code.
+              Multicast does not cross tailnets. Scan for peers that already have a Lyra address,
+              or enter host + port manually.
             </Text>
-            <TextInput
-              onChangeText={setManualHost}
-              placeholder="LAN IP or Tailscale 100.x"
-              placeholderTextColor={muted}
-              autoCapitalize="none"
-              autoCorrect={false}
-              style={{
-                backgroundColor: isDark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.04)",
-                borderRadius: 14,
-                color: ink,
-                fontFamily: fonts.regular,
-                fontSize: 15,
-                paddingHorizontal: 12,
-                paddingVertical: 10,
-              }}
-              value={manualHost}
-            />
             <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
               <Pressable
-                disabled={!manualHost.trim()}
-                onPress={() => {
-                  const host = manualHost.trim();
-                  const result = store.addManualPeer({ host });
-                  if (result.ok) {
-                    setManualHost("");
-                    void store.probePeerAddress({ host });
-                  }
-                }}
+                disabled={!tailscaleEnabled || scanBusy}
+                onPress={() => void scanTailscale()}
                 style={{
                   alignItems: "center",
-                  alignSelf: "flex-start",
                   backgroundColor: accent,
                   borderRadius: 8,
-                  opacity: manualHost.trim() ? 1 : 0.5,
+                  flexDirection: "row",
+                  gap: 6,
+                  opacity: !tailscaleEnabled || scanBusy ? 0.5 : 1,
                   paddingHorizontal: 14,
-                  paddingVertical: 8,
+                  paddingVertical: 10,
                 }}
               >
+                <Ionicons color="#fff" name="radar-outline" size={16} />
                 <Text style={{ color: "#fff", fontFamily: fonts.semiBold, fontSize: 13 }}>
-                  Find peer
+                  {scanBusy ? "Scanning…" : "Scan Tailscale"}
                 </Text>
               </Pressable>
               <Pressable
-                disabled={!manualHost.trim()}
                 onPress={() => {
-                  const host = manualHost.trim();
-                  const result = store.addManualPeer({ host, asTailscale: true });
-                  if (result.ok) {
-                    setManualHost("");
-                    void store.probePeerAddress({ host });
-                  }
+                  setManualAsTs(true);
+                  setManualError(null);
+                  setDetailsOpen(true);
                 }}
                 style={{
                   alignItems: "center",
-                  alignSelf: "flex-start",
-                  backgroundColor: isDark ? "rgba(122,162,255,0.2)" : "rgba(47,107,255,0.12)",
+                  backgroundColor: isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)",
                   borderRadius: 8,
-                  opacity: manualHost.trim() ? 1 : 0.5,
+                  flexDirection: "row",
+                  gap: 6,
                   paddingHorizontal: 14,
-                  paddingVertical: 8,
+                  paddingVertical: 10,
                 }}
               >
-                <Text style={{ color: accent, fontFamily: fonts.semiBold, fontSize: 13 }}>
-                  Add as Tailscale
+                <Ionicons color={ink} name="create-outline" size={16} />
+                <Text style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 13 }}>
+                  Enter details
                 </Text>
               </Pressable>
             </View>
-            <Text style={{ color: muted, fontFamily: fonts.regular, fontSize: 11 }}>
-              Tip: paste a Tailscale IP like 100.83.145.32 when LAN discovery cannot see the device.
-            </Text>
+            {!tailscaleEnabled ? (
+              <Text style={{ color: "#d97706", fontFamily: fonts.regular, fontSize: 11 }}>
+                Enable Tailscale in Settings to scan and probe 100.x peers.
+              </Text>
+            ) : null}
+            {tailscaleHints.length > 0 ? (
+              <View style={{ gap: 6, marginTop: 4 }}>
+                <Text style={{ color: muted, fontFamily: fonts.semiBold, fontSize: 12 }}>
+                  Discovered on your tailnet
+                </Text>
+                {tailscaleHints.slice(0, 8).map((h) => (
+                  <View
+                    key={`${h.host}:${h.port ?? 53317}`}
+                    style={{
+                      alignItems: "center",
+                      borderColor: isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)",
+                      borderRadius: 10,
+                      borderWidth: 1,
+                      flexDirection: "row",
+                      justifyContent: "space-between",
+                      paddingHorizontal: 12,
+                      paddingVertical: 10,
+                    }}
+                  >
+                    <View style={{ flex: 1, minWidth: 0 }}>
+                      <Text
+                        numberOfLines={1}
+                        style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 13 }}
+                      >
+                        {h.name || h.host}
+                      </Text>
+                      <Text
+                        numberOfLines={1}
+                        style={{ color: muted, fontFamily: fonts.regular, fontSize: 11 }}
+                      >
+                        {h.host}:{h.port ?? 53317}
+                      </Text>
+                    </View>
+                    <Pressable
+                      onPress={() => {
+                        const result = store.addManualPeer({
+                          host: h.host,
+                          port: h.port ?? 53317,
+                          name: h.name,
+                          asTailscale: true,
+                        });
+                        if (result.ok) {
+                          void store.probePeerAddress({
+                            host: h.host,
+                            port: h.port ?? 53317,
+                          });
+                        }
+                      }}
+                      style={{
+                        backgroundColor: isDark
+                          ? "rgba(122,162,255,0.2)"
+                          : "rgba(47,107,255,0.12)",
+                        borderRadius: 8,
+                        paddingHorizontal: 12,
+                        paddingVertical: 6,
+                      }}
+                    >
+                      <Text style={{ color: accent, fontFamily: fonts.semiBold, fontSize: 12 }}>
+                        Add
+                      </Text>
+                    </Pressable>
+                  </View>
+                ))}
+              </View>
+            ) : null}
           </View>
+
+          {/* LAN find (secondary) */}
+          <Pressable
+            onPress={() => {
+              setManualAsTs(false);
+              setManualError(null);
+              setDetailsOpen(true);
+            }}
+            style={{
+              alignItems: "center",
+              backgroundColor: isDark ? "rgba(255,255,255,0.04)" : "rgba(0,0,0,0.03)",
+              borderRadius: 12,
+              flexDirection: "row",
+              gap: 10,
+              paddingHorizontal: 14,
+              paddingVertical: 12,
+            }}
+          >
+            <Ionicons color={muted} name="add-circle-outline" size={20} />
+            <View style={{ flex: 1 }}>
+              <Text style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 13 }}>
+                Add peer by address
+              </Text>
+              <Text style={{ color: muted, fontFamily: fonts.regular, fontSize: 11 }}>
+                LAN IP or host · port · optional nickname
+              </Text>
+            </View>
+            <Ionicons color={muted} name="chevron-forward" size={18} />
+          </Pressable>
 
           {nearby.length > 0 ? (
             <View style={{ gap: 8 }}>
@@ -449,6 +575,150 @@ export default function DevicesScreen() {
           })}
         </View>
       </ScrollView>
+
+      <Modal
+        animationType="slide"
+        transparent
+        visible={detailsOpen}
+        onRequestClose={() => setDetailsOpen(false)}
+      >
+        <Pressable
+          onPress={() => setDetailsOpen(false)}
+          style={{
+            backgroundColor: "rgba(0,0,0,0.45)",
+            flex: 1,
+            justifyContent: "flex-end",
+          }}
+        >
+          <Pressable
+            onPress={(e) => e.stopPropagation()}
+            style={{
+              backgroundColor: card,
+              borderTopLeftRadius: 16,
+              borderTopRightRadius: 16,
+              gap: 12,
+              padding: 20,
+              paddingBottom: 32,
+            }}
+          >
+            <Text style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 17 }}>
+              {manualAsTs ? "Add Tailscale peer" : "Add peer by address"}
+            </Text>
+            <Text style={{ color: muted, fontFamily: fonts.regular, fontSize: 12 }}>
+              Host may include port (e.g. 100.83.145.32:53319). Not trusted until you Pair.
+            </Text>
+            <TextInput
+              autoCapitalize="none"
+              autoCorrect={false}
+              onChangeText={setManualHost}
+              placeholder={manualAsTs ? "100.x.x.x or MagicDNS" : "192.168.1.42"}
+              placeholderTextColor={muted}
+              style={{
+                backgroundColor: isDark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.04)",
+                borderRadius: 12,
+                color: ink,
+                fontFamily: fonts.regular,
+                fontSize: 15,
+                paddingHorizontal: 12,
+                paddingVertical: 10,
+              }}
+              value={manualHost}
+            />
+            <View style={{ flexDirection: "row", gap: 10 }}>
+              <TextInput
+                autoCapitalize="none"
+                autoCorrect={false}
+                keyboardType="number-pad"
+                onChangeText={setManualPort}
+                placeholder="Port"
+                placeholderTextColor={muted}
+                style={{
+                  backgroundColor: isDark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.04)",
+                  borderRadius: 12,
+                  color: ink,
+                  flex: 1,
+                  fontFamily: fonts.regular,
+                  fontSize: 15,
+                  paddingHorizontal: 12,
+                  paddingVertical: 10,
+                }}
+                value={manualPort}
+              />
+              <TextInput
+                autoCapitalize="none"
+                autoCorrect={false}
+                onChangeText={setManualName}
+                placeholder="Nickname (optional)"
+                placeholderTextColor={muted}
+                style={{
+                  backgroundColor: isDark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.04)",
+                  borderRadius: 12,
+                  color: ink,
+                  flex: 2,
+                  fontFamily: fonts.regular,
+                  fontSize: 15,
+                  paddingHorizontal: 12,
+                  paddingVertical: 10,
+                }}
+                value={manualName}
+              />
+            </View>
+            <Pressable
+              onPress={() => setManualAsTs((v) => !v)}
+              style={{ alignItems: "center", flexDirection: "row", gap: 8 }}
+            >
+              <View
+                style={{
+                  alignItems: "center",
+                  backgroundColor: manualAsTs ? accent : isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)",
+                  borderRadius: 6,
+                  height: 22,
+                  justifyContent: "center",
+                  width: 22,
+                }}
+              >
+                {manualAsTs ? <Ionicons color="#fff" name="checkmark" size={14} /> : null}
+              </View>
+              <Text style={{ color: ink, fontFamily: fonts.medium, fontSize: 13 }}>
+                Mark as Tailscale address
+              </Text>
+            </Pressable>
+            {manualError ? (
+              <Text style={{ color: "#ef4444", fontFamily: fonts.regular, fontSize: 12 }}>
+                {manualError}
+              </Text>
+            ) : null}
+            <View style={{ flexDirection: "row", gap: 10, marginTop: 4 }}>
+              <Pressable
+                onPress={() => setDetailsOpen(false)}
+                style={{
+                  alignItems: "center",
+                  backgroundColor: isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)",
+                  borderRadius: 10,
+                  flex: 1,
+                  paddingVertical: 12,
+                }}
+              >
+                <Text style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 14 }}>Cancel</Text>
+              </Pressable>
+              <Pressable
+                onPress={submitDetails}
+                style={{
+                  alignItems: "center",
+                  backgroundColor: accent,
+                  borderRadius: 10,
+                  flex: 1,
+                  paddingVertical: 12,
+                }}
+              >
+                <Text style={{ color: "#fff", fontFamily: fonts.semiBold, fontSize: 14 }}>
+                  Add peer
+                </Text>
+              </Pressable>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </View>
   );
 }

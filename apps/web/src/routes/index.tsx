@@ -1,10 +1,18 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { Link2, Plus, Radar, Send, ShieldCheck } from "lucide-react";
+import { Link2, PencilLine, Plus, Radar, Send, ShieldCheck } from "lucide-react";
 import { useState } from "react";
 
 import { Badge } from "@lyra-sync-app/ui/components/badge";
 import { Button } from "@lyra-sync-app/ui/components/button";
 import { Card, CardContent } from "@lyra-sync-app/ui/components/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@lyra-sync-app/ui/components/dialog";
 import { Input } from "@lyra-sync-app/ui/components/input";
 import { Label } from "@lyra-sync-app/ui/components/label";
 import { DeviceCard } from "@/components/device-card";
@@ -49,14 +57,14 @@ function DevicesPage() {
   const discoveryEnabled = useLyraSelector((s) => s.settings.discoveryEnabled);
   const [query, setQuery] = useState("");
   const [pairOpen, setPairOpen] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const [url, setUrl] = useState("");
   const [manualHost, setManualHost] = useState("");
   const [manualPort, setManualPort] = useState("53317");
   const [manualName, setManualName] = useState("");
+  const [manualAsTs, setManualAsTs] = useState(true);
   const [manualError, setManualError] = useState<string | null>(null);
   const [trustBusy, setTrustBusy] = useState<string | null>(null);
-  const [tsHost, setTsHost] = useState("");
-  const [tsName, setTsName] = useState("");
   const [tsBusy, setTsBusy] = useState(false);
   const tailscaleEnabled = useLyraSelector((s) => s.settings.tailscaleEnabled);
   const tailscaleHints = useLyraSelector((s) => s.tailscalePeerHints);
@@ -84,13 +92,24 @@ function DevicesPage() {
     store.startFileTransfer([deviceId], prepared);
   };
 
-  const addManual = () => {
+  const openDetails = (asTailscale: boolean) => {
+    setManualAsTs(asTailscale);
+    setManualError(null);
+    setDetailsOpen(true);
+  };
+
+  const submitDetails = () => {
     const host = manualHost.trim();
     const port = Number(manualPort) || 53317;
+    if (!host) {
+      setManualError("Host or IP is required");
+      return;
+    }
     const result = store.addManualPeer({
       host,
       port,
-      name: manualName || undefined,
+      name: manualName.trim() || undefined,
+      asTailscale: manualAsTs,
     });
     if (!result.ok) {
       setManualError(result.error);
@@ -100,27 +119,43 @@ function DevicesPage() {
     setManualHost("");
     setManualName("");
     setManualPort("53317");
-    // Live HTTP probe when a peer server is reachable
-    void store.probePeerAddress({ host, port });
+    setDetailsOpen(false);
+    void store.probePeerAddress({
+      host: result.device.host!,
+      port: result.device.port,
+    });
   };
 
-  const addTailscale = () => {
-    const host = tsHost.trim();
-    if (!host) return;
-    const result = store.addManualPeer({
-      host,
-      port: 53317,
-      name: tsName || undefined,
-      asTailscale: true,
-    });
-    if (!result.ok) {
-      setManualError(result.error);
-      return;
-    }
-    setTsHost("");
-    setTsName("");
-    setManualError(null);
-    void store.probePeerAddress({ host, port: 53317 });
+  const scanTailscale = () => {
+    setTsBusy(true);
+    void (async () => {
+      try {
+        const { getDesktopApi } = await import("@/lib/desktop-bridge");
+        const api = getDesktopApi();
+        if (api?.scanTailscale) {
+          const res = await api.scanTailscale();
+          if (res.ok) {
+            store.ingestTailscalePeers(res.peers);
+            store.setTailscaleStatus({
+              ok: true,
+              backendState: res.backendState,
+              selfHost: res.self?.host,
+              selfIp: res.self?.tailscaleIp,
+              updatedAt: Date.now(),
+            });
+          } else {
+            store.setTailscaleStatus({
+              ok: false,
+              error: res.error,
+              updatedAt: Date.now(),
+            });
+          }
+        }
+        await store.probeTailscalePeers();
+      } finally {
+        setTsBusy(false);
+      }
+    })();
   };
 
   return (
@@ -157,73 +192,14 @@ function DevicesPage() {
         </div>
       </div>
 
-      <Card className="rounded-xl">
-        <CardContent className="space-y-3 p-4">
-          <div>
-            <p className="text-sm font-medium">Find device by address</p>
-            <p className="text-xs text-muted-foreground">
-              Adds a <strong>nearby</strong> peer (not trusted yet). Use Pair to establish trust.
-              Default port 53317. For Tailscale use the dedicated section below.
-            </p>
-          </div>
-          <div className="grid gap-3 sm:grid-cols-[1fr_7rem_1fr_auto]">
-            <div className="space-y-1.5">
-              <Label htmlFor="manual-host" className="text-xs">
-                LAN host / IP
-              </Label>
-              <Input
-                id="manual-host"
-                value={manualHost}
-                onChange={(e) => setManualHost(e.target.value)}
-                placeholder="192.168.1.42"
-                className="rounded-md"
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="manual-port" className="text-xs">
-                Port
-              </Label>
-              <Input
-                id="manual-port"
-                value={manualPort}
-                onChange={(e) => setManualPort(e.target.value)}
-                className="rounded-md"
-                inputMode="numeric"
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="manual-name" className="text-xs">
-                Nickname (optional)
-              </Label>
-              <Input
-                id="manual-name"
-                value={manualName}
-                onChange={(e) => setManualName(e.target.value)}
-                placeholder="Office laptop"
-                className="rounded-md"
-              />
-            </div>
-            <div className="flex items-end">
-              <Button disabled={!manualHost.trim()} onClick={addManual} className="w-full sm:w-auto">
-                <Plus className="size-4" />
-                Add peer
-              </Button>
-            </div>
-          </div>
-          {manualError ? <p className="text-xs text-destructive">{manualError}</p> : null}
-        </CardContent>
-      </Card>
-
       <Card className="rounded-xl border-primary/20">
         <CardContent className="space-y-3 p-4">
           <div className="flex flex-wrap items-start justify-between gap-2">
             <div>
-              <p className="text-sm font-medium">Add by Tailscale IP</p>
+              <p className="text-sm font-medium">Tailscale</p>
               <p className="text-xs text-muted-foreground">
-                Multicast does not work reliably over Tailscale. Paste a{" "}
-                <code className="rounded bg-muted px-1">100.x</code> address or MagicDNS name
-                (e.g. <code className="rounded bg-muted px-1">pixel-6</code>
-                ). Enable Tailscale in Settings for probe + scan.
+                Multicast does not cross tailnets. Scan for devices on your tailnet, or enter host
+                and port manually. Peers stay <strong>nearby</strong> until you Pair.
               </p>
             </div>
             {tailscaleStatus?.selfIp ? (
@@ -232,87 +208,23 @@ function DevicesPage() {
               </Badge>
             ) : null}
           </div>
-          <div className="grid gap-3 sm:grid-cols-[1fr_1fr_auto_auto]">
-            <div className="space-y-1.5">
-              <Label htmlFor="ts-host" className="text-xs">
-                Tailscale IP / MagicDNS
-              </Label>
-              <Input
-                id="ts-host"
-                value={tsHost}
-                onChange={(e) => setTsHost(e.target.value)}
-                placeholder="100.83.145.32"
-                className="rounded-md font-mono"
-                disabled={!tailscaleEnabled}
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="ts-name" className="text-xs">
-                Nickname (optional)
-              </Label>
-              <Input
-                id="ts-name"
-                value={tsName}
-                onChange={(e) => setTsName(e.target.value)}
-                placeholder="Pixel 6"
-                className="rounded-md"
-                disabled={!tailscaleEnabled}
-              />
-            </div>
-            <div className="flex items-end">
-              <Button
-                disabled={!tailscaleEnabled || !tsHost.trim()}
-                onClick={addTailscale}
-                className="w-full sm:w-auto"
-              >
-                <Plus className="size-4" />
-                Add Tailscale peer
-              </Button>
-            </div>
-            <div className="flex items-end">
-              <Button
-                variant="outline"
-                disabled={!tailscaleEnabled || tsBusy}
-                onClick={() => {
-                  setTsBusy(true);
-                  void (async () => {
-                    try {
-                      const { getDesktopApi } = await import("@/lib/desktop-bridge");
-                      const api = getDesktopApi();
-                      if (api?.scanTailscale) {
-                        const res = await api.scanTailscale();
-                        if (res.ok) {
-                          store.ingestTailscalePeers(res.peers);
-                          store.setTailscaleStatus({
-                            ok: true,
-                            backendState: res.backendState,
-                            selfHost: res.self?.host,
-                            selfIp: res.self?.tailscaleIp,
-                            updatedAt: Date.now(),
-                          });
-                        } else {
-                          store.setTailscaleStatus({
-                            ok: false,
-                            error: res.error,
-                            updatedAt: Date.now(),
-                          });
-                        }
-                      }
-                      await store.probeTailscalePeers();
-                    } finally {
-                      setTsBusy(false);
-                    }
-                  })();
-                }}
-              >
-                <Radar className="size-4" />
-                Scan Tailscale
-              </Button>
-            </div>
+          <div className="flex flex-wrap gap-2">
+            <Button disabled={!tailscaleEnabled || tsBusy} onClick={scanTailscale}>
+              <Radar className="size-4" />
+              {tsBusy ? "Scanning…" : "Scan Tailscale"}
+            </Button>
+            <Button variant="outline" onClick={() => openDetails(true)}>
+              <PencilLine className="size-4" />
+              Enter details
+            </Button>
+            <Button variant="ghost" onClick={() => openDetails(false)}>
+              <Plus className="size-4" />
+              Add LAN peer
+            </Button>
           </div>
           {!tailscaleEnabled ? (
             <p className="text-xs text-amber-600">
-              Tailscale support is off — enable it in Settings to add and probe 100.x peers.
+              Tailscale support is off — enable it in Settings to scan and probe 100.x peers.
             </p>
           ) : null}
           {tailscaleHints.length > 0 ? (
@@ -326,7 +238,9 @@ function DevicesPage() {
                   >
                     <div className="min-w-0">
                       <p className="truncate font-medium">{h.name || h.host}</p>
-                      <p className="truncate font-mono text-xs text-muted-foreground">{h.host}</p>
+                      <p className="truncate font-mono text-xs text-muted-foreground">
+                        {h.host}:{h.port ?? 53317}
+                      </p>
                     </div>
                     <Button
                       size="sm"
@@ -338,7 +252,12 @@ function DevicesPage() {
                           name: h.name,
                           asTailscale: true,
                         });
-                        if (result.ok) void store.probePeerAddress({ host: h.host, port: h.port });
+                        if (result.ok) {
+                          void store.probePeerAddress({
+                            host: h.host,
+                            port: h.port ?? 53317,
+                          });
+                        }
                       }}
                     >
                       Add
@@ -350,6 +269,81 @@ function DevicesPage() {
           ) : null}
         </CardContent>
       </Card>
+
+      <Dialog open={detailsOpen} onOpenChange={setDetailsOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>
+              {manualAsTs ? "Add Tailscale peer" : "Add peer by address"}
+            </DialogTitle>
+            <DialogDescription>
+              Host may include port (e.g. <code className="rounded bg-muted px-1">100.x:53319</code>
+              ). Not trusted until you Pair on both devices.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-3">
+            <div className="space-y-1.5">
+              <Label htmlFor="detail-host" className="text-xs">
+                Host / IP
+              </Label>
+              <Input
+                id="detail-host"
+                value={manualHost}
+                onChange={(e) => setManualHost(e.target.value)}
+                placeholder={manualAsTs ? "100.83.145.32" : "192.168.1.42"}
+                className="rounded-md font-mono"
+                autoCapitalize="off"
+                autoCorrect="off"
+              />
+            </div>
+            <div className="grid grid-cols-[7rem_1fr] gap-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="detail-port" className="text-xs">
+                  Port
+                </Label>
+                <Input
+                  id="detail-port"
+                  value={manualPort}
+                  onChange={(e) => setManualPort(e.target.value)}
+                  className="rounded-md"
+                  inputMode="numeric"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="detail-name" className="text-xs">
+                  Nickname (optional)
+                </Label>
+                <Input
+                  id="detail-name"
+                  value={manualName}
+                  onChange={(e) => setManualName(e.target.value)}
+                  placeholder="Pixel 6"
+                  className="rounded-md"
+                />
+              </div>
+            </div>
+            <label className="flex cursor-pointer items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={manualAsTs}
+                onChange={(e) => setManualAsTs(e.target.checked)}
+                className="size-4 rounded border-border"
+              />
+              Mark as Tailscale address
+            </label>
+            {manualError ? <p className="text-xs text-destructive">{manualError}</p> : null}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDetailsOpen(false)}>
+              Cancel
+            </Button>
+            <Button disabled={!manualHost.trim()} onClick={submitDetails}>
+              <Plus className="size-4" />
+              Add peer
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <div className="flex flex-col gap-3 sm:flex-row">
         <Input

@@ -19,8 +19,15 @@ function shouldSeedDemo(): boolean {
 
 export function LyraProvider({ children }: { children: ReactNode }) {
   const onStoreReady = useCallback((store: import("@lyra-sync-app/core").LyraStore) => {
+    // Recheck mutual trust on startup (web + desktop)
+    const trustTimer = setTimeout(() => {
+      void store.recheckPairedTrust();
+    }, 2000);
+
     const api = getDesktopApi();
-    if (!api) return;
+    if (!api) {
+      return () => clearTimeout(trustTimer);
+    }
 
     let didInitialScan = false;
     const onPeerStatus = (status: {
@@ -146,6 +153,14 @@ export function LyraProvider({ children }: { children: ReactNode }) {
 
     const unsubClip = api.onClipboardPush?.((item) => {
       store.receiveClipboardItem(item as import("@lyra-sync-app/protocol").ClipboardItem);
+      const auto =
+        store.getState().settings.autoAcceptClipboard ||
+        store.getState().settings.clipboardSyncEnabled;
+      if (auto && item.type === "text" && item.text) {
+        void import("./clipboard").then(({ writeSystemClipboard }) =>
+          writeSystemClipboard(item.text!).catch(() => undefined),
+        );
+      }
     });
 
     const unsubTs = api.onTailscalePeers?.((peers) => {
@@ -187,6 +202,7 @@ export function LyraProvider({ children }: { children: ReactNode }) {
     });
 
     return () => {
+      clearTimeout(trustTimer);
       unsubStatus();
       unsubStore();
       unsubDl();

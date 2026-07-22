@@ -38,10 +38,10 @@ export function resolveDeviceHost(
   const ts = device.tailscaleHost?.trim() || null;
   if (pref === "tailscale") return ts || lan;
   if (pref === "lan") return lan || ts;
-  // auto: prefer Tailscale when the only host is TS-shaped, else LAN first
+  // auto: prefer Tailscale when both are set (LAN often goes stale off-network)
   if (lan && ts) {
     if (isLikelyTailscaleHost(lan) && !isLikelyTailscaleHost(ts)) return lan;
-    return lan;
+    return ts || lan;
   }
   return lan || ts;
 }
@@ -62,22 +62,66 @@ export function isLivePeer(device: PairedDevice): boolean {
   return Boolean(resolveDeviceHost(device)) && !device.id.startsWith("demo_");
 }
 
+/** Build candidate endpoints (preferred + alternate LAN/Tailscale host, port fallbacks). */
+function deviceEndpointCandidates(
+  device: Pick<PairedDevice, "host" | "port" | "tailscaleHost" | "preferredAddress">,
+): PeerUrl[] {
+  const port = device.port ?? LYRA_DEFAULT_PORT;
+  const pref = device.preferredAddress ?? "auto";
+  const lan = device.host?.trim() || null;
+  const ts = device.tailscaleHost?.trim() || null;
+  const ordered: string[] = [];
+  const push = (h: string | null) => {
+    if (h && !ordered.includes(h)) ordered.push(h);
+  };
+  if (pref === "tailscale") {
+    push(ts);
+    push(lan);
+  } else if (pref === "lan") {
+    push(lan);
+    push(ts);
+  } else {
+    // auto: try Tailscale first when present (LAN IPs go stale off-network)
+    if (ts) {
+      push(ts);
+      push(lan);
+    } else {
+      push(lan);
+    }
+  }
+  const ports = [...new Set([port, LYRA_DEFAULT_PORT, port + 2, port + 4].filter((p) => p > 0))];
+  const out: PeerUrl[] = [];
+  for (const host of ordered) {
+    for (const p of ports) {
+      out.push({ host, port: p, protocol: "http" });
+    }
+  }
+  return out;
+}
+
 export async function ensureSession(input: {
   device: PairedDevice;
   identity: DeviceIdentity;
   privateKey: string;
 }): Promise<{ ok: true; sessionToken: string; endpoint: PeerUrl } | { ok: false; error: string }> {
-  const endpoint = deviceEndpoint(input.device);
-  if (!endpoint) return { ok: false, error: "Peer has no host" };
-  const session = await getOrCreatePeerSession({
-    endpoint,
-    identity: input.identity,
-    privateKey: input.privateKey,
-    sharedSecret: input.device.authSecret,
-    peerDeviceId: input.device.id,
-  });
-  if (!session.ok) return session;
-  return { ok: true, sessionToken: session.sessionToken, endpoint };
+  const candidates = deviceEndpointCandidates(input.device);
+  if (candidates.length === 0) return { ok: false, error: "Peer has no host" };
+
+  let lastError = "Peer has no host";
+  for (const endpoint of candidates) {
+    const session = await getOrCreatePeerSession({
+      endpoint,
+      identity: input.identity,
+      privateKey: input.privateKey,
+      sharedSecret: input.device.authSecret,
+      peerDeviceId: input.device.id,
+    });
+    if (session.ok) {
+      return { ok: true, sessionToken: session.sessionToken, endpoint };
+    }
+    lastError = session.error;
+  }
+  return { ok: false, error: lastError };
 }
 
 export async function wirePushClipboard(input: {
@@ -367,13 +411,24 @@ export async function wireTrustHandshake(input: {
   identity: DeviceIdentity;
   privateKey: string;
   pairingToken: string;
-}): Promise<{ ok: true; authSecret: string } | { ok: false; error: string }> {
-  if (!input.device.host) return { ok: false, error: "Peer has no host" };
+  /** Our advertised reachability so the host can call us back. */
+  localHost?: string;
+  localPort?: number;
+}): Promise<
+  | {
+      ok: true;
+      authSecret: string;
+      remote: DeviceIdentity;
+      host?: string;
+      port?: number;
+    }
+  | { ok: false; error: string }
+> {
+  const host = resolveDeviceHost(input.device);
+  if (!host) return { ok: false, error: "Peer has no host" };
+  const port = input.device.port ?? LYRA_DEFAULT_PORT;
   const { deriveMutualAuthSecret, fetchPeerInfo } = await import("@lyra-sync-app/net");
-  const info = await fetchPeerInfo({
-    host: input.device.host,
-    port: input.device.port,
-  });
+  const info = await fetchPeerInfo({ host, port });
   if (!info.ok) return { ok: false, error: info.error };
   const authSecret = await deriveMutualAuthSecret({
     pairingToken: input.pairingToken,
@@ -382,10 +437,10 @@ export async function wireTrustHandshake(input: {
     localPublicKey: input.identity.publicKey,
     remotePublicKey: info.identity.publicKey,
   });
-  // Send pair_request so remote can dual-confirm
-  await wireSendPairRequest({
-    host: input.device.host,
-    port: input.device.port,
+  // Dual-confirm: wait for host Accept (pair_confirm) before treating as trusted
+  const wire = await wireSendPairRequest({
+    host,
+    port,
     identity: input.identity,
     payload: {
       version: 1,
@@ -396,12 +451,97 @@ export async function wireTrustHandshake(input: {
       fingerprint: input.identity.fingerprint,
       publicKey: input.identity.publicKey,
       token: input.pairingToken,
-      host: undefined,
-      port: undefined,
+      host: input.localHost,
+      port: input.localPort,
       expiresAt: Date.now() + 5 * 60 * 1000,
     },
+    waitForConfirmMs: 120_000,
   });
-  return { ok: true, authSecret };
+  if (!wire.ok) return { ok: false, error: wire.error };
+  const env = wire.envelope;
+  if (!env || env.type === "pair_reject") {
+    const reason =
+      env && env.type === "pair_reject"
+        ? String((env.payload as { reason?: string })?.reason ?? "rejected")
+        : "Pairing declined or timed out";
+    return { ok: false, error: reason };
+  }
+  if (env.type !== "pair_confirm") {
+    return { ok: false, error: `Unexpected pairing reply: ${env.type}` };
+  }
+  const confirm = env.payload as {
+    identity?: DeviceIdentity;
+    host?: string;
+    port?: number;
+    publicKey?: string;
+  };
+  const remote = confirm.identity ?? info.identity;
+  return {
+    ok: true,
+    authSecret,
+    remote: {
+      ...remote,
+      publicKey: confirm.publicKey || remote.publicKey,
+    },
+    host: confirm.host || host,
+    port: confirm.port ?? port,
+  };
+}
+
+/**
+ * Verify that a paired peer still recognizes our shared secret.
+ * Used after unpair on the other side (startup + discovery refresh).
+ */
+export async function wireVerifyPairTrust(input: {
+  device: PairedDevice;
+  identity: DeviceIdentity;
+  privateKey: string;
+}): Promise<
+  | { ok: true; stillTrusted: true }
+  | { ok: true; stillTrusted: false; reason: string }
+  | { ok: false; error: string; unreachable?: boolean }
+> {
+  const endpoint = deviceEndpoint(input.device);
+  if (!endpoint || !input.device.authSecret) {
+    return { ok: false, error: "No live trusted peer", unreachable: true };
+  }
+  // First check reachability — offline peers are not treated as unpaired
+  const { fetchPeerInfo, authenticateWithPeer, clearPeerSessionFor } = await import(
+    "@lyra-sync-app/net"
+  );
+  const info = await fetchPeerInfo(endpoint);
+  if (!info.ok) {
+    return { ok: false, error: info.error, unreachable: true };
+  }
+  clearPeerSessionFor(endpoint, input.device.id);
+  const auth = await authenticateWithPeer({
+    endpoint,
+    identity: input.identity,
+    privateKey: input.privateKey,
+    sharedSecret: input.device.authSecret,
+  });
+  if (!auth.ok) {
+    // Peer is online but rejects our pairing secret → they unpaired us (or secret rotated)
+    return {
+      ok: true,
+      stillTrusted: false,
+      reason: auth.error || "Trust rejected",
+    };
+  }
+  // Confirm peer identity still matches what we stored
+  if (
+    auth.peerDeviceId &&
+    auth.peerDeviceId !== input.device.id &&
+    auth.peerFingerprint &&
+    auth.peerFingerprint !== input.device.fingerprint
+  ) {
+    return {
+      ok: true,
+      stillTrusted: false,
+      reason: "Peer identity changed",
+    };
+  }
+  return { ok: true, stillTrusted: true };
 }
 
 export async function wireSendPairRequest(input: {

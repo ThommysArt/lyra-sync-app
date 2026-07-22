@@ -9,6 +9,7 @@ import { ACCENT, ACCENT_DARK, fonts, PAGE_BG } from "@/lib/constants";
 import {
   defaultDownloadLabel,
   defaultDownloadPath,
+  ensureDefaultDownloadDir,
   formatDownloadLabel,
   pickDownloadDirectory,
 } from "@/lib/download-location";
@@ -43,6 +44,21 @@ export default function SettingsScreen() {
   const muted = isDark ? "rgba(255,255,255,0.55)" : "rgba(0,0,0,0.45)";
   const card = isDark ? "#202020" : "#FFFFFF";
   const accent = isDark ? ACCENT_DARK : ACCENT;
+
+  // Create Downloads/Lyra (or Documents/Lyra) once and seed settings when empty
+  useEffect(() => {
+    let cancelled = false;
+    void ensureDefaultDownloadDir().then((ensured) => {
+      if (cancelled || !ensured) return;
+      if (!store.getState().settings.downloadDirectory) {
+        store.updateSettings({ downloadDirectory: ensured.path });
+        setDownloadLabel(ensured.label);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [store]);
 
   useEffect(() => {
     if (settings.downloadDirectory) {

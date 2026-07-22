@@ -6,16 +6,22 @@
 
 ---
 
-## 2026-07-22 — App variants + versioned APKs
+## 2026-07-22 — App variants + versioned APKs / desktop
 
+### Mobile
 - `app.config.ts` + `APP_VARIANT` → distinct package IDs (`app.lyra.sync.dev` / `.preview` / prod)
 - Version owned by `apps/native/package.json` → **0.2.3** (`versionCode` 2003)
 - Builds emit `apps/native/dist/lyra-0.2.3-dev.apk` (etc.); install scripts pick them up
-- EAS profiles set `APP_VARIANT`; CI artifact names include version
+
+### Desktop (Electron)
+- `LYRA_VARIANT` → Lyra Dev / Preview / Prod · separate `userData` + appId + peer ports (53317 / 53327 / 53337)
+- Version **0.2.3** · artifacts `release/Lyra-0.2.3-{dev|preview|prod}.AppImage`
+- Scripts: `dev:desktop`, `dev:desktop:preview`, `dist:desktop:dev`, …
 
 ```bash
 pnpm run build:dev && pnpm run install:dev
-pnpm run build:preview && pnpm run install:preview
+pnpm run dev:desktop            # Lyra Dev
+pnpm run dev:desktop:preview    # side-by-side Preview
 ```
 
 ---

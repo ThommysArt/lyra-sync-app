@@ -150,7 +150,12 @@ export default ({ config }: ConfigContext): ExpoConfig => {
         "android.permission.ACCESS_NETWORK_STATE",
         "android.permission.ACCESS_WIFI_STATE",
         "android.permission.CHANGE_WIFI_MULTICAST_STATE",
+        // Received files → public Downloads/Lyra (Android 9 and below; soft-denied on newer)
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.READ_EXTERNAL_STORAGE",
       ],
+      // Allow writing under /storage/emulated/0/Download on Android 10
+      requestLegacyExternalStorage: true,
     },
     plugins: [
       "expo-font",

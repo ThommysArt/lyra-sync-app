@@ -5,6 +5,7 @@
 import {
   app,
   BrowserWindow,
+  clipboard,
   dialog,
   ipcMain,
   Menu,
@@ -28,18 +29,6 @@ if (
   app.commandLine.appendSwitch("disable-setuid-sandbox");
 }
 
-// package.json name is the monorepo filter ("desktop"); show "Lyra" in the OS
-// taskbar / dock / about menu instead.
-app.setName("Lyra");
-if (process.platform === "win32") {
-  app.setAppUserModelId("app.lyra.desktop");
-}
-// Chromium on Linux looks up Icon= from the .desktop file named by CHROME_DESKTOP
-// (must match StartupWMClass / our lyra.desktop entry).
-if (process.platform === "linux") {
-  process.env.CHROME_DESKTOP = "lyra.desktop";
-}
-
 import { createDeviceIdentity, hashPairingCode } from "@lyra-sync-app/core";
 import {
   deleteOsPath,
@@ -58,8 +47,92 @@ import { accessSync, constants as fsConstants } from "node:fs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+/** App variants — side-by-side Dev / Preview / Prod (see scripts/variant.ts). */
+type DesktopVariant = "development" | "preview" | "production";
+
+function resolveVariant(): DesktopVariant {
+  const v = (process.env.LYRA_VARIANT ?? process.env.APP_VARIANT ?? "production")
+    .toLowerCase()
+    .trim();
+  if (v === "development" || v === "dev") return "development";
+  if (v === "preview" || v === "pre") return "preview";
+  return "production";
+}
+
+function variantAppName(v: DesktopVariant): string {
+  if (v === "development") return "Lyra Dev";
+  if (v === "preview") return "Lyra Preview";
+  return "Lyra";
+}
+
+function variantAppId(v: DesktopVariant): string {
+  if (v === "development") return "app.lyra.desktop.dev";
+  if (v === "preview") return "app.lyra.desktop.preview";
+  return "app.lyra.desktop";
+}
+
+function variantUserDataDir(v: DesktopVariant): string {
+  if (v === "development") return "lyra-desktop-dev";
+  if (v === "preview") return "lyra-desktop-preview";
+  return "lyra-desktop";
+}
+
+function variantDefaultPort(v: DesktopVariant): number {
+  if (v === "development") return 53317;
+  if (v === "preview") return 53327;
+  return 53337;
+}
+
+function variantDeviceName(v: DesktopVariant): string {
+  if (v === "development") return "Lyra Desktop (Dev)";
+  if (v === "preview") return "Lyra Desktop (Preview)";
+  return "Lyra Desktop";
+}
+
+function variantDesktopMeta(v: DesktopVariant): {
+  fileName: string;
+  wmClass: string;
+  iconName: string;
+} {
+  if (v === "development") {
+    return { fileName: "lyra-dev.desktop", wmClass: "Lyra Dev", iconName: "lyra-dev" };
+  }
+  if (v === "preview") {
+    return {
+      fileName: "lyra-preview.desktop",
+      wmClass: "Lyra Preview",
+      iconName: "lyra-preview",
+    };
+  }
+  return { fileName: "lyra.desktop", wmClass: "Lyra", iconName: "lyra" };
+}
+
+const VARIANT = resolveVariant();
+const APP_DISPLAY_NAME = variantAppName(VARIANT);
+const APP_ID = variantAppId(VARIANT);
+const DESKTOP_META = variantDesktopMeta(VARIANT);
+
+// package.json name is the monorepo filter ("desktop"); show variant name in the OS
+// taskbar / dock / about menu instead. Must run before ready / single-instance lock.
+app.setName(APP_DISPLAY_NAME);
+try {
+  app.setPath("userData", path.join(app.getPath("appData"), variantUserDataDir(VARIANT)));
+} catch {
+  // very early startup — fall back to default userData
+}
+if (process.platform === "win32") {
+  app.setAppUserModelId(APP_ID);
+}
+// Chromium on Linux looks up Icon= from the .desktop file named by CHROME_DESKTOP
+// (must match StartupWMClass / our per-variant .desktop entry).
+if (process.platform === "linux") {
+  process.env.CHROME_DESKTOP = DESKTOP_META.fileName;
+}
+
 const WEB_DEV_URL = process.env.LYRA_WEB_URL ?? "http://localhost:3001";
-const PEER_PORT = Number(process.env.LYRA_PORT ?? LYRA_DEFAULT_PORT);
+const PEER_PORT = Number(
+  process.env.LYRA_PORT ?? variantDefaultPort(VARIANT) ?? LYRA_DEFAULT_PORT,
+);
 const USE_TLS = process.env.LYRA_TLS === "1" || process.env.LYRA_TLS === "true";
 
 type TrustedPeer = {
@@ -153,7 +226,7 @@ function broadcastStatus() {
 async function ensureIdentity() {
   if (identity && privateKey) return;
   const created = await createDeviceIdentity({
-    name: process.env.LYRA_NAME ?? "Lyra Desktop",
+    name: process.env.LYRA_NAME ?? variantDeviceName(VARIANT),
     platform:
       process.platform === "darwin"
         ? "macos"
@@ -282,6 +355,13 @@ async function startNetworking() {
               return true;
             },
             onClipboardPush: (item) => {
+              if (item.type === "text" && item.text) {
+                try {
+                  clipboard.writeText(item.text);
+                } catch {
+                  // ignore write failures
+                }
+              }
               mainWindow?.webContents.send("lyra:clipboard-push", item);
             },
             onPairRequest: (payload) => {
@@ -516,11 +596,11 @@ function installLinuxDesktopIntegration(iconPath: string | undefined) {
     mkdirSync(iconDir, { recursive: true });
     mkdirSync(appDir, { recursive: true });
 
-    const destIcon = path.join(iconDir, "lyra.png");
+    const destIcon = path.join(iconDir, `${DESKTOP_META.iconName}.png`);
     copyFileSync(iconPath, destIcon);
 
-    // Gearlever stores a flat path icon — overwrite so WM_CLASS=Lyra picks rounded art.
-    const gearleverIcon = path.join(home, "AppImages", ".icons", "lyra");
+    // Gearlever stores a flat path icon — overwrite so WM_CLASS picks rounded art.
+    const gearleverIcon = path.join(home, "AppImages", ".icons", DESKTOP_META.iconName);
     try {
       mkdirSync(path.dirname(gearleverIcon), { recursive: true });
       copyFileSync(iconPath, gearleverIcon);
@@ -532,7 +612,11 @@ function installLinuxDesktopIntegration(iconPath: string | undefined) {
       ? process.env.APPIMAGE || process.execPath
       : process.execPath;
     // Prefer existing Gearlever AppImage if present for the launcher entry.
-    const appImageGuess = path.join(home, "AppImages", "lyra.appimage");
+    const appImageGuess = path.join(
+      home,
+      "AppImages",
+      VARIANT === "production" ? "lyra.appimage" : `lyra-${variantSlug()}.appimage`,
+    );
     const launchExec = existsSync(appImageGuess)
       ? `env DESKTOPINTEGRATION=1 "${appImageGuess}" --no-sandbox %U`
       : app.isPackaged
@@ -541,21 +625,27 @@ function installLinuxDesktopIntegration(iconPath: string | undefined) {
 
     const desktop = `[Desktop Entry]
 Type=Application
-Name=Lyra
+Name=${APP_DISPLAY_NAME}
 Comment=Privacy-first device network — clipboard, files, and remote browse
-Icon=lyra
+Icon=${DESKTOP_META.iconName}
 Exec=${launchExec}
 Terminal=false
 Categories=Network;
-StartupWMClass=Lyra
+StartupWMClass=${DESKTOP_META.wmClass}
 StartupNotify=true
 `;
-    writeFileSync(path.join(appDir, "lyra.desktop"), desktop, "utf8");
-    process.env.CHROME_DESKTOP = "lyra.desktop";
-    console.log("[lyra] installed Linux desktop icon →", destIcon);
+    writeFileSync(path.join(appDir, DESKTOP_META.fileName), desktop, "utf8");
+    process.env.CHROME_DESKTOP = DESKTOP_META.fileName;
+    console.log("[lyra] installed Linux desktop icon →", destIcon, `(${APP_DISPLAY_NAME})`);
   } catch (err) {
     console.warn("[lyra] Linux desktop integration failed", err);
   }
+}
+
+function variantSlug(): string {
+  if (VARIANT === "development") return "dev";
+  if (VARIANT === "preview") return "preview";
+  return "prod";
 }
 
 function installApplicationMenu() {
@@ -636,11 +726,11 @@ function createWindow() {
   });
 
   // Keep a short title if any WM still surfaces it
-  mainWindow.setTitle("Lyra");
+  mainWindow.setTitle(APP_DISPLAY_NAME);
   applyWindowIcon(mainWindow, appIcon);
   mainWindow.webContents.on("page-title-updated", (e) => {
     e.preventDefault();
-    mainWindow?.setTitle("Lyra");
+    mainWindow?.setTitle(APP_DISPLAY_NAME);
   });
   // Dev loads the Vite UI — Chromium swaps the taskbar icon to the page favicon
   // (square logo.png). Force our rounded app icon back on every favicon update.
@@ -716,8 +806,10 @@ function createWindow() {
 }
 
 // Allow two Electron windows on one PC for local pairing tests:
-//   LYRA_ALLOW_MULTI=1 LYRA_INSTANCE=a LYRA_PORT=53317 pnpm run dev:desktop
-//   LYRA_ALLOW_MULTI=1 LYRA_INSTANCE=b LYRA_PORT=53319 pnpm run dev:desktop
+//   LYRA_ALLOW_MULTI=1 LYRA_INSTANCE=a LYRA_PORT=53317 pnpm run dev:pair-a
+//   LYRA_ALLOW_MULTI=1 LYRA_INSTANCE=b LYRA_PORT=53319 pnpm run dev:pair-b
+// Variants (dev/preview/prod) already isolate userData + ports, so they can
+// run side-by-side without LYRA_ALLOW_MULTI.
 const allowMulti =
   process.env.LYRA_ALLOW_MULTI === "1" || process.env.LYRA_ALLOW_MULTI === "true";
 const instanceId = (process.env.LYRA_INSTANCE ?? "").trim();
@@ -728,6 +820,7 @@ if (instanceId) {
   app.setPath("userData", path.join(base, `instance-${instanceId}`));
 }
 
+// Single-instance lock is per userData path → each variant gets its own lock.
 const gotLock = allowMulti ? true : app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
@@ -744,9 +837,12 @@ if (!gotLock) {
 }
 
 app.whenReady().then(async () => {
+  console.log(
+    `[lyra] ${APP_DISPLAY_NAME} · variant=${VARIANT} · port=${PEER_PORT} · userData=${app.getPath("userData")}`,
+  );
   if (allowMulti || instanceId) {
     console.log(
-      `[lyra] multi-instance mode instance=${instanceId || "default"} port=${PEER_PORT} name=${process.env.LYRA_NAME ?? "Lyra Desktop"}`,
+      `[lyra] multi-instance mode instance=${instanceId || "default"} name=${process.env.LYRA_NAME ?? variantDeviceName(VARIANT)}`,
     );
   }
 

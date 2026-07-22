@@ -98,6 +98,23 @@ describe("createLyraStore", () => {
     assert.equal(d.connectionType, "both");
   });
 
+  it("parses host:port in addManualPeer", async () => {
+    const store = createLyraStore({
+      storage: memoryStorage(),
+      seedDemo: false,
+      platformHint: "web",
+    });
+    await store.hydrate();
+    const added = store.addManualPeer({
+      host: "100.83.145.32:53319",
+      asTailscale: true,
+    });
+    assert.equal(added.ok, true);
+    if (!added.ok) throw new Error("expected ok");
+    assert.equal(added.device.host, "100.83.145.32");
+    assert.equal(added.device.port, 53319);
+  });
+
   it("starts and stops demo screen mirror with frames", async () => {
     const store = createLyraStore({
       storage: memoryStorage(),

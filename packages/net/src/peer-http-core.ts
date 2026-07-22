@@ -366,7 +366,17 @@ export function createPeerHttpCore(options: PeerHttpCoreOptions): PeerHttpCore {
 
         let envelope = parsed.envelope;
 
-        if (session?.sharedSecret && isSealedPayload(envelope.payload)) {
+        if (isSealedPayload(envelope.payload)) {
+          if (!session?.sharedSecret) {
+            return jsonResponse(
+              401,
+              {
+                error:
+                  "Sealed payload requires a paired session (shared secret). Re-pair this device.",
+              },
+              cors,
+            );
+          }
           try {
             const opened = await openEnvelopePayload(session.sharedSecret, envelope.payload);
             envelope = { ...envelope, payload: opened };

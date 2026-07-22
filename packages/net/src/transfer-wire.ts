@@ -99,6 +99,14 @@ export async function sendFilesOverWire(
     sealSecret: input.sealSecret,
   });
   if (!offerRes.ok) return { ok: false, error: offerRes.error };
+  if (offerRes.envelope && offerRes.envelope.type !== "transfer_accept") {
+    const reason =
+      (offerRes.envelope.payload as { reason?: string; error?: string } | undefined)
+        ?.reason ||
+      (offerRes.envelope.payload as { error?: string } | undefined)?.error ||
+      `Unexpected transfer offer reply: ${offerRes.envelope.type}`;
+    return { ok: false, error: reason };
+  }
 
   // Build concatenated view for session-offset addressing
   const parts = input.files.map((f) => f.bytes);

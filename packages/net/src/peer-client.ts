@@ -228,20 +228,27 @@ export async function sendEnvelope(
     signal: opts?.signal,
   });
   if (!res.ok) return { ok: false, error: res.error };
-  if (res.data && typeof res.data === "object" && res.data !== null && "type" in res.data) {
-    const parsed = parseEnvelope(res.data);
-    if (!parsed.ok) return { ok: true };
-    let env = parsed.envelope;
-    // Open sealed replies when we have the secret
-    if (opts?.sealSecret && isSealedPayload(env.payload)) {
-      try {
-        const opened = await openEnvelopePayload(opts.sealSecret, env.payload);
-        env = { ...env, payload: opened };
-      } catch {
-        // leave sealed if open fails
-      }
+  if (res.data && typeof res.data === "object" && res.data !== null) {
+    const data = res.data as Record<string, unknown>;
+    // Application-level failures (HTTP 200 with { ok: false, error })
+    if (data.ok === false && typeof data.error === "string") {
+      return { ok: false, error: data.error };
     }
-    return { ok: true, envelope: env };
+    if ("type" in data) {
+      const parsed = parseEnvelope(res.data);
+      if (!parsed.ok) return { ok: false, error: parsed.error || "Invalid envelope reply" };
+      let env = parsed.envelope;
+      // Open sealed replies when we have the secret
+      if (opts?.sealSecret && isSealedPayload(env.payload)) {
+        try {
+          const opened = await openEnvelopePayload(opts.sealSecret, env.payload);
+          env = { ...env, payload: opened };
+        } catch {
+          // leave sealed if open fails
+        }
+      }
+      return { ok: true, envelope: env };
+    }
   }
   return { ok: true };
 }
@@ -654,4 +661,19 @@ export async function getOrCreatePeerSession(input: {
 
 export function clearPeerSessionCache(): void {
   sessionCache.clear();
+}
+
+/** Drop cached sessions for one peer endpoint (e.g. after unpair / trust loss). */
+export function clearPeerSessionFor(
+  endpoint: PeerUrl,
+  peerDeviceId?: string,
+): void {
+  if (peerDeviceId) {
+    sessionCache.delete(peerSessionCacheKey(endpoint, peerDeviceId));
+    return;
+  }
+  const base = peerBaseUrl(endpoint);
+  for (const key of sessionCache.keys()) {
+    if (key.startsWith(`${base}::`)) sessionCache.delete(key);
+  }
 }

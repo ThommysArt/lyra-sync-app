@@ -49,6 +49,11 @@ export function LyraProvider({ children }: { children: ReactNode }) {
     let detachPeer: (() => void) | null = null;
     let peerHandle: NativePeerHandle | null = null;
 
+    // Recheck mutual trust shortly after startup (detect remote unpair)
+    const trustTimer = setTimeout(() => {
+      if (!cancelled) void store.recheckPairedTrust();
+    }, 2000);
+
     void Network.getIpAddressAsync()
       .then((ip) => {
         if (ip && ip !== "0.0.0.0") store.setLocalLanHint(ip);
@@ -131,6 +136,15 @@ export function LyraProvider({ children }: { children: ReactNode }) {
             },
             onClipboardPush: (item) => {
               store.receiveClipboardItem(item as import("@lyra-sync-app/protocol").ClipboardItem);
+              // Mirror into OS clipboard when auto-accept is on
+              const auto =
+                store.getState().settings.autoAcceptClipboard ||
+                store.getState().settings.clipboardSyncEnabled;
+              if (auto && item.type === "text" && item.text) {
+                void import("expo-clipboard").then((Clipboard) =>
+                  Clipboard.setStringAsync(item.text!).catch(() => undefined),
+                );
+              }
             },
             onUnpair: (deviceId) => {
               const still = store.getState().devices.find((d) => d.id === deviceId);
@@ -146,12 +160,39 @@ export function LyraProvider({ children }: { children: ReactNode }) {
               }
             },
             onTransferComplete: (state) => {
-              store.recordReceivedTransfer({
-                transferId: state.transferId,
-                files: state.files,
-                receivedBytes: state.receivedBytes,
-                deviceName: "Peer",
-              });
+              void (async () => {
+                let savedPaths: string[] | undefined;
+                try {
+                  const { saveReceivedTransferFiles, ensureDefaultDownloadDir } =
+                    await import("@/lib/download-location");
+                  const dir =
+                    store.getState().settings.downloadDirectory ||
+                    (await ensureDefaultDownloadDir())?.path;
+                  if (state.chunks?.length && state.files?.length) {
+                    const { savedPaths: paths, errors } = await saveReceivedTransferFiles(
+                      dir,
+                      state.files,
+                      state.chunks,
+                    );
+                    if (paths.length) savedPaths = paths;
+                    if (errors.length) {
+                      console.warn("[lyra] save transfer errors", errors);
+                    }
+                  }
+                } catch (e) {
+                  console.warn(
+                    "[lyra] save transfer failed",
+                    e instanceof Error ? e.message : e,
+                  );
+                }
+                store.recordReceivedTransfer({
+                  transferId: state.transferId,
+                  files: state.files,
+                  receivedBytes: state.receivedBytes,
+                  deviceName: "Peer",
+                  savedPaths,
+                });
+              })();
             },
           },
         });
@@ -194,6 +235,7 @@ export function LyraProvider({ children }: { children: ReactNode }) {
 
     return () => {
       cancelled = true;
+      clearTimeout(trustTimer);
       detachPeer?.();
       detachPeer = null;
       void peerHandle?.stop();

@@ -81,39 +81,47 @@ Clipboard Accessibility plugin: `./plugins/with-clipboard-accessibility` — see
 
 ## Desktop (Electron)
 
+### Variants (side-by-side)
+
+| Variant | Title | App id | Peer port | Artifact |
+|---------|-------|--------|-----------|----------|
+| development | Lyra Dev | `app.lyra.desktop.dev` | 53317 | `Lyra-0.2.3-dev.AppImage` |
+| preview | Lyra Preview | `app.lyra.desktop.preview` | 53327 | `Lyra-0.2.3-preview.AppImage` |
+| production | Lyra | `app.lyra.desktop` | 53337 | `Lyra-0.2.3-prod.AppImage` |
+
+Version from `apps/desktop/package.json` (aligned with native **0.2.3**). Bump there before a release.
+
 ### Dev
 
 ```bash
-pnpm run dev:web                 # UI :3001
-pnpm --filter desktop dev        # shell + peer + multicast
+pnpm run dev:web                    # UI :3001
+pnpm run dev:desktop                # Lyra Dev
+pnpm run dev:desktop:preview        # Lyra Preview (other port + profile)
+pnpm run dev:desktop:prod           # Lyra (prod identity)
 ```
 
-### Local package (verified)
+### Local package
 
 ```bash
-pnpm --filter web build
-pnpm --filter desktop build:electron
-pnpm --filter desktop pack       # → apps/desktop/release/linux-unpacked/lyra
+pnpm run dist:desktop:dev        # AppImage + dir · dev variant
+pnpm run dist:desktop:preview
+pnpm run dist:desktop            # production
+# or unpacked only:
+pnpm run pack:desktop:preview
 ```
 
 Produced (example):
 
-- `apps/desktop/release/linux-unpacked/lyra` — runnable binary
+- `apps/desktop/release/Lyra-0.2.3-prod.AppImage`
+- `apps/desktop/release/linux-unpacked/` — runnable binary
 - `resources/web-dist/` — packaged web UI
-- `resources/app.asar` — main process
-
-Optional installers:
-
-```bash
-pnpm --filter desktop dist                 # platform defaults
-pnpm --filter desktop exec electron-builder --linux AppImage
-```
 
 Environment:
 
 | Variable | Purpose |
 |----------|---------|
-| `LYRA_PORT` | Peer listen port |
+| `LYRA_VARIANT` / `APP_VARIANT` | `development` \| `preview` \| `production` |
+| `LYRA_PORT` | Peer listen port (defaults per variant) |
 | `LYRA_TLS=1` | HTTPS self-signed (openssl) |
 | `LYRA_NAME` | Device display name |
 | `LYRA_WEB_URL` | Dev renderer URL |
