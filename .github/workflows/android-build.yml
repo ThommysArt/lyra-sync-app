@@ -88,10 +88,10 @@ jobs:
             echo "lyra_env=preview" >> "$GITHUB_OUTPUT"
           fi
 
-      # android/ is gitignored — generate on the runner (not part of local npm scripts).
+      # android/ is gitignored — generate on the runner via the same script as local.
       - name: Generate native Android project
         working-directory: apps/native
-        run: pnpm exec expo prebuild --platform android --non-interactive
+        run: pnpm run prebuild
         env:
           EXPO_PUBLIC_LYRA_ENV: ${{ steps.profile.outputs.lyra_env }}
           EXPO_PUBLIC_SERVER_URL: https://lyra.app
