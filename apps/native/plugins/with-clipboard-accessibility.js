@@ -7,6 +7,8 @@
  *   - res/xml/lyra_clipboard_accessibility.xml
  *   - Kotlin stub ClipboardAccessibilityService (no-op events — safe to compile)
  *
+ * Package id follows config.android.package so app variants (dev/preview/prod) work.
+ *
  * Real clipboard extraction is still a follow-up; expo-clipboard remains the default path.
  */
 const fs = require("node:fs");
@@ -27,9 +29,6 @@ const {
   createRunOncePlugin,
 } = configPlugins;
 
-const PACKAGE = "app.lyra.sync";
-const SERVICE_FQCN = `${PACKAGE}.clipboard.ClipboardAccessibilityService`;
-
 const ACCESSIBILITY_XML = `<?xml version="1.0" encoding="utf-8"?>
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeViewTextChanged|typeWindowContentChanged"
@@ -41,7 +40,11 @@ const ACCESSIBILITY_XML = `<?xml version="1.0" encoding="utf-8"?>
     android:settingsActivity="" />
 `;
 
-const SERVICE_KT = `package app.lyra.sync.clipboard
+/**
+ * @param {string} packageId
+ */
+function serviceKt(packageId) {
+  return `package ${packageId}.clipboard
 
 import android.accessibilityservice.AccessibilityService
 import android.view.accessibility.AccessibilityEvent
@@ -61,25 +64,36 @@ class ClipboardAccessibilityService : AccessibilityService() {
   }
 }
 `;
+}
+
+/**
+ * @param {import('@expo/config-plugins').ExportedConfig} config
+ */
+function resolveAndroidPackage(config) {
+  return config.android?.package || "app.lyra.sync";
+}
 
 /**
  * @param {import('@expo/config-plugins').ExportedConfig} config
  */
 function withClipboardAccessibilityManifest(config) {
   return withAndroidManifest(config, (cfg) => {
+    const packageId = resolveAndroidPackage(cfg);
+    const serviceFqcn = `${packageId}.clipboard.ClipboardAccessibilityService`;
     const manifest = cfg.modResults;
     const app = AndroidConfig.Manifest.getMainApplicationOrThrow(manifest);
 
     if (!app.service) app.service = [];
     const exists = app.service.some(
       (s) =>
-        s.$?.["android:name"] === SERVICE_FQCN ||
-        s.$?.["android:name"] === ".clipboard.ClipboardAccessibilityService",
+        s.$?.["android:name"] === serviceFqcn ||
+        s.$?.["android:name"] === ".clipboard.ClipboardAccessibilityService" ||
+        String(s.$?.["android:name"] || "").endsWith(".clipboard.ClipboardAccessibilityService"),
     );
     if (!exists) {
       app.service.push({
         $: {
-          "android:name": SERVICE_FQCN,
+          "android:name": serviceFqcn,
           "android:exported": "false",
           "android:permission": "android.permission.BIND_ACCESSIBILITY_SERVICE",
           "android:label": "Lyra clipboard monitor",
@@ -118,13 +132,12 @@ function withClipboardAccessibilityFiles(config) {
   return withDangerousMod(config, [
     "android",
     async (cfg) => {
+      const packageId = resolveAndroidPackage(cfg);
+      const packagePath = packageId.replace(/\./g, "/");
       const projectRoot = cfg.modRequest.platformProjectRoot;
       const xmlDir = path.join(projectRoot, "app/src/main/res/xml");
       const valuesDir = path.join(projectRoot, "app/src/main/res/values");
-      const kotlinDir = path.join(
-        projectRoot,
-        "app/src/main/java/app/lyra/sync/clipboard",
-      );
+      const kotlinDir = path.join(projectRoot, "app/src/main/java", packagePath, "clipboard");
 
       fs.mkdirSync(xmlDir, { recursive: true });
       fs.mkdirSync(valuesDir, { recursive: true });
@@ -150,7 +163,7 @@ function withClipboardAccessibilityFiles(config) {
 
       fs.writeFileSync(
         path.join(kotlinDir, "ClipboardAccessibilityService.kt"),
-        SERVICE_KT,
+        serviceKt(packageId),
         "utf8",
       );
 
@@ -168,5 +181,5 @@ function withClipboardAccessibility(config) {
 module.exports = createRunOncePlugin(
   withClipboardAccessibility,
   "with-lyra-clipboard-accessibility",
-  "1.1.0",
+  "1.2.0",
 );

@@ -32,12 +32,15 @@
     "prebuild:native": "pnpm --filter native prebuild",
     "build:dev": "pnpm --filter native build:dev",
     "build:preview": "pnpm --filter native build:preview",
+    "build:prod": "pnpm --filter native build:prod",
     "install:dev": "pnpm --filter native install:dev",
     "install:preview": "pnpm --filter native install:preview",
+    "install:prod": "pnpm --filter native install:prod",
     "ci:android:dev": "gh workflow run \"Android Build\" -f profile=dev",
     "ci:android:preview": "gh workflow run \"Android Build\" -f profile=preview",
     "eas:dev": "pnpm --filter native eas:dev -- --non-interactive --no-wait",
     "eas:preview": "pnpm --filter native eas:preview -- --non-interactive --no-wait",
+    "eas:prod": "pnpm --filter native eas:prod -- --non-interactive --no-wait",
     "eas:android:preview": "pnpm run eas:preview"
   },
   "dependencies": {

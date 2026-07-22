@@ -1,8 +1,22 @@
 # Lyra — Agent Progress Report
 
-**Last updated:** 2026-07-22 (native peer server + cleartext fix)  
-**Status:** Mobile hosts peer HTTP server · Android cleartext for LAN/Tailscale · unit green  
+**Last updated:** 2026-07-22 (app variants + versioned APKs)  
+**Status:** Dev/preview/prod side-by-side · APKs labeled `lyra-0.2.3-{dev|preview}` · unit green  
 **Plan:** [`docs/GAP-FIX-PLAN.md`](./GAP-FIX-PLAN.md) · **Packaging:** [`docs/PACKAGING.md`](./PACKAGING.md)
+
+---
+
+## 2026-07-22 — App variants + versioned APKs
+
+- `app.config.ts` + `APP_VARIANT` → distinct package IDs (`app.lyra.sync.dev` / `.preview` / prod)
+- Version owned by `apps/native/package.json` → **0.2.3** (`versionCode` 2003)
+- Builds emit `apps/native/dist/lyra-0.2.3-dev.apk` (etc.); install scripts pick them up
+- EAS profiles set `APP_VARIANT`; CI artifact names include version
+
+```bash
+pnpm run build:dev && pnpm run install:dev
+pnpm run build:preview && pnpm run install:preview
+```
 
 ---
 
