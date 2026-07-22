@@ -1,8 +1,25 @@
 # Lyra — Agent Progress Report
 
-**Last updated:** 2026-07-22 (screen mirror + Tailscale addresses)  
-**Status:** Screen mirror (demo bezel + scrcpy path) · Tailscale IP first-class UI · unit/e2e green  
+**Last updated:** 2026-07-22 (native peer server + cleartext fix)  
+**Status:** Mobile hosts peer HTTP server · Android cleartext for LAN/Tailscale · unit green  
 **Plan:** [`docs/GAP-FIX-PLAN.md`](./GAP-FIX-PLAN.md) · **Packaging:** [`docs/PACKAGING.md`](./PACKAGING.md)
+
+---
+
+## 2026-07-22 — Native peer server + CLEARTEXT / discovery UX
+
+### Root causes fixed
+- **Release APK blocked cleartext HTTP** → Tailscale pair failed with `UnknownServiceException: CLEARTEXT…`. Main `AndroidManifest` lacked `usesCleartextTraffic` (only debug had it). Added manifest flag + `network_security_config.xml`.
+- **Mobile never started a peer server** → Settings showed “Browser / Expo web” + “Discovery off”. Native now starts TCP peer server (`react-native-tcp-socket` + shared `peer-http-core`) on dev/preview builds.
+- **False “Expo Go cannot host pairing code”** on every native build → `isExpoGo` was `!peerRunning && android/ios`. Now uses `Constants.appOwnership` / executionEnvironment.
+- **Desktop port steal on multi-instance** → peer listen falls back through `LYRA_PORT+2…` when EADDRINUSE.
+
+### Rebuild required
+```bash
+pnpm run build:dev     # or build:preview / EAS
+pnpm run install:dev
+```
+Expo Go still cannot host a peer server (no native TCP module).
 
 ---
 

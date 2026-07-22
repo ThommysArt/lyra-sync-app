@@ -17,6 +17,7 @@ import { QrScanner } from "@/components/qr-scanner";
 import { useAppTheme } from "@/contexts/app-theme-context";
 import { ACCENT, ACCENT_DARK, fonts, PAGE_BG } from "@/lib/constants";
 import { useLyraSelector, useLyraStore } from "@/lib/lyra";
+import { isExpoGoRuntime } from "@/lib/peer-server";
 
 export default function PairScreen() {
   const store = useLyraStore();
@@ -52,12 +53,8 @@ export default function PairScreen() {
   );
 
   const canHostCode = peerRunning;
-  const isExpoGo =
-    // @ts-expect-error Constants may exist in Expo
-    typeof globalThis !== "undefined" &&
-    // heuristic: Expo Go has no peer server and runs on native
-    !peerRunning &&
-    (Platform.OS === "ios" || Platform.OS === "android");
+  // Only true inside Expo Go store client — not dev clients / release APKs
+  const isExpoGo = isExpoGoRuntime();
 
   const applyScannedPayload = useCallback(
     async (data: string) => {
@@ -102,8 +99,16 @@ export default function PairScreen() {
       <Stack.Screen options={{ title: "Pair device", headerShadowVisible: false }} />
       <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 40 }}>
         <Text style={{ color: muted, fontFamily: fonts.medium, fontSize: 14, marginBottom: 12 }}>
-          <Text style={{ fontFamily: fonts.semiBold, color: ink }}>Desktop shows the code.</Text>{" "}
-          This phone enters it. Same Wi‑Fi required.
+          {canHostCode ? (
+            <>
+              Either device can show a code. Prefer scanning a QR when one side has a camera.
+            </>
+          ) : (
+            <>
+              <Text style={{ fontFamily: fonts.semiBold, color: ink }}>Desktop shows the code.</Text>{" "}
+              This phone enters it. Same Wi‑Fi or Tailscale required.
+            </>
+          )}
         </Text>
 
         {isExpoGo ? (
@@ -119,9 +124,28 @@ export default function PairScreen() {
               Expo Go limitation
             </Text>
             <Text style={{ color: muted, fontFamily: fonts.medium, fontSize: 12, marginTop: 4 }}>
-              Expo Go cannot host a pairing code (no peer server / multicast). Use{" "}
+              Expo Go cannot host a pairing code (no native peer server). Use{" "}
               <Text style={{ fontFamily: fonts.semiBold }}>Enter code</Text> with the code from the
-              desktop app. Prefer scanning the desktop QR when possible.
+              desktop app, or install a dev/preview build so this phone can host too.
+            </Text>
+          </View>
+        ) : null}
+
+        {!canHostCode && !isExpoGo && Platform.OS !== "web" ? (
+          <View
+            style={{
+              backgroundColor: isDark ? "rgba(251,191,36,0.12)" : "rgba(245,158,11,0.12)",
+              borderRadius: 10,
+              marginBottom: 16,
+              padding: 12,
+            }}
+          >
+            <Text style={{ color: isDark ? "#FCD34D" : "#B45309", fontFamily: fonts.semiBold, fontSize: 13 }}>
+              Peer server not running
+            </Text>
+            <Text style={{ color: muted, fontFamily: fonts.medium, fontSize: 12, marginTop: 4 }}>
+              This build could not start a local peer server, so hosting a code is disabled. You can
+              still enter a desktop code. Check Settings → Network for the error.
             </Text>
           </View>
         ) : null}
@@ -222,13 +246,14 @@ export default function PairScreen() {
           onScanned={applyScannedPayload}
         />
 
-        {/* Host code — only useful with peer server (not Expo Go) */}
+        {/* Host code — needs this device's peer server (dev/preview build, not Expo Go) */}
         <Text style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 16, marginTop: 28 }}>
           Your QR & code
         </Text>
         {!canHostCode ? (
           <Text style={{ color: muted, fontFamily: fonts.medium, fontSize: 13, marginTop: 8 }}>
-            Hosting a code needs the desktop peer server. On this phone, enter a desktop code instead.
+            Hosting a code needs this device&apos;s peer server. Enter a desktop code above, or use a
+            native build with the peer server running (see Settings → Network).
           </Text>
         ) : null}
         <Pressable
@@ -266,7 +291,11 @@ export default function PairScreen() {
             {active?.code ?? "------"}
           </Text>
           <Text style={{ color: muted, fontFamily: fonts.medium, fontSize: 13, marginTop: 8 }}>
-            {canHostCode ? `Tap to ${active ? "refresh" : "generate"}` : "Unavailable on Expo Go"}
+            {canHostCode
+              ? `Tap to ${active ? "refresh" : "generate"}`
+              : isExpoGo
+                ? "Unavailable in Expo Go"
+                : "Unavailable until peer server starts"}
           </Text>
           {identity ? (
             <Text style={{ color: muted, fontFamily: fonts.regular, fontSize: 11, marginTop: 6 }}>

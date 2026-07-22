@@ -109,7 +109,11 @@ export default function SettingsScreen() {
                 ? `Peer server on :${peerServer.port ?? "—"}`
                 : "Peer server idle"}
               {" · "}
-              {peerServer.discoveryActive ? "Discovery on" : "Discovery off"}
+              {peerServer.running || peerServer.discoveryActive
+                ? "Discovery on"
+                : settings.discoveryEnabled
+                  ? "Discovery ready (HTTP probe)"
+                  : "Discovery off"}
             </Text>
             <View
               style={{
@@ -122,15 +126,32 @@ export default function SettingsScreen() {
               }}
             >
               <Text style={{ color: accent, fontFamily: fonts.medium, fontSize: 12 }}>
-                {peerServer.running ? "Desktop / Node" : "Browser / Expo web"}
+                {peerServer.running
+                  ? Platform.OS === "web"
+                    ? "Desktop / Node"
+                    : "This device (mobile)"
+                  : Platform.OS === "web"
+                    ? "Browser / Expo web"
+                    : "Mobile · client only"}
               </Text>
             </View>
             <Text style={{ color: muted, fontFamily: fonts.regular, fontSize: 12, marginTop: 10 }}>
               {peerServer.running
-                ? "Listening for peers on your LAN."
-                : "No listen socket here — probe peers via HTTP /lyra/info, or run desktop / peer-server on :" +
-                  String(settings.peerListenPort)}
+                ? peerServer.lanHost
+                  ? `Listening at ${peerServer.lanHost}:${peerServer.port ?? "—"} — other devices can pair and push here.`
+                  : "Listening for peers on your LAN / Tailscale."
+                : Platform.OS === "web"
+                  ? "No listen socket here — probe peers via HTTP /lyra/info, or run desktop / peer-server on :" +
+                    String(settings.peerListenPort)
+                  : peerServer.lastError
+                    ? peerServer.lastError
+                    : "Peer server not running. Use a native dev/preview build (not Expo Go) so this phone can host a code and receive pushes."}
             </Text>
+            {peerServer.url ? (
+              <Text style={{ color: muted, fontFamily: fonts.regular, fontSize: 11, marginTop: 6 }}>
+                {peerServer.url}
+              </Text>
+            ) : null}
             {lastProbeSummary ? (
               <Text style={{ color: muted, fontFamily: fonts.regular, fontSize: 12, marginTop: 8 }}>
                 {lastProbeSummary}
@@ -337,7 +358,8 @@ export default function SettingsScreen() {
               Peer listen port
             </Text>
             <Text style={{ color: muted, fontFamily: fonts.regular, fontSize: 12, marginTop: 4 }}>
-              Preferred port for desktop / Node peer server
+              Preferred listen port for this device&apos;s peer server (default 53317). Restart the
+              app after changing.
             </Text>
             <TextInput
               keyboardType="number-pad"

@@ -680,6 +680,11 @@ function localLanHostFromState(s: LyraState): string | undefined {
       // ignore
     }
   }
+  // Mobile / browser LAN hint from expo-network or desktop bridge
+  if (s.localLanHint) {
+    const h = s.localLanHint.trim();
+    if (h && h !== "127.0.0.1" && h !== "localhost" && h !== "0.0.0.0") return h;
+  }
   return undefined;
 }
 
@@ -785,7 +790,7 @@ function stripDemoMesh(input: {
 export function createLyraStore(options?: {
   storage?: StorageLike | null;
   seedDemo?: boolean;
-  platformHint?: "web" | "native";
+  platformHint?: "web" | "native" | "android" | "ios";
 }): LyraStore {
   let state = createInitialState();
   const listeners = new Set<() => void>();
@@ -863,10 +868,19 @@ export function createLyraStore(options?: {
     }
 
     if (!identity || !privateKey) {
+      const hint = options?.platformHint;
+      const isMobile =
+        hint === "native" || hint === "android" || hint === "ios";
+      const platform =
+        hint === "ios"
+          ? "ios"
+          : hint === "android" || hint === "native"
+            ? "android"
+            : "web";
       const created = await createDeviceIdentity({
-        name: options?.platformHint === "native" ? "My Phone" : "My Computer",
-        platform: options?.platformHint === "native" ? "android" : "web",
-        type: options?.platformHint === "native" ? "mobile" : "desktop",
+        name: isMobile ? "My Phone" : "My Computer",
+        platform,
+        type: isMobile ? "mobile" : "desktop",
       });
       if (!created.ok) {
         throw created.error;
@@ -1057,9 +1071,9 @@ export function createLyraStore(options?: {
         const hint = s0.localLanHint ? ` Your IP looks like ${s0.localLanHint}.` : "";
         const msg =
           "No device found with that code." +
-          " The other device must be showing its code in the desktop app (peer server running)" +
-          " — Expo Go cannot host a code." +
-          " Try Refresh discovery, or enter the desktop’s LAN IP below." +
+          " The other device must be showing its code with its peer server running" +
+          " (desktop app, native preview build, or `pnpm peer-server`)." +
+          " Expo Go cannot host a code. Try Refresh discovery, or enter the host’s LAN / Tailscale IP below." +
           hint;
         notify(set, msg, "error");
         return { ok: false as const, error: msg };

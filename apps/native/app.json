@@ -30,7 +30,12 @@
       "bundleIdentifier": "app.lyra.sync",
       "infoPlist": {
         "NSCameraUsageDescription": "Allow Lyra to access your camera to scan pairing QR codes.",
-        "NSLocalNetworkUsageDescription": "Lyra discovers and connects to your other devices on the local network."
+        "NSLocalNetworkUsageDescription": "Lyra discovers and connects to your other devices on the local network.",
+        "NSBonjourServices": ["_lyra._tcp"],
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true,
+          "NSAllowsArbitraryLoads": true
+        }
       }
     },
     "android": {

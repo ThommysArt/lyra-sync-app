@@ -222,136 +222,175 @@ async function startNetworking() {
   await ensureIdentity();
   if (!identity) return;
 
+  // Prefer LYRA_PORT, then fall back so two desktop instances / peer-server CLI
+  // on one machine don't permanently steal the default 53317 slot.
+  const portCandidates = [
+    PEER_PORT,
+    PEER_PORT + 2,
+    PEER_PORT + 4,
+    PEER_PORT + 10,
+    PEER_PORT + 20,
+    0, // ephemeral last resort
+  ];
+
   try {
-    peer = await startPeerServer({
-      identity,
-      port: PEER_PORT,
-      tls: USE_TLS,
-      // Prefer paired shared secrets; allow first-contact only when no trust map hit
-      allowFirstContactAuth: true,
-      resolvePeerAuth: ({ deviceId, fingerprint }) => {
-        const byId = trustedPeers.get(deviceId);
-        if (byId) {
-          return {
-            sharedSecret: byId.authSecret,
-            expectedFingerprint: byId.fingerprint,
-            expectedDeviceId: byId.deviceId,
-          };
-        }
-        for (const t of trustedPeers.values()) {
-          if (t.fingerprint === fingerprint) {
-            return {
-              sharedSecret: t.authSecret,
-              expectedFingerprint: t.fingerprint,
-              expectedDeviceId: t.deviceId,
-            };
-          }
-        }
-        // First contact allowed for pairing handshake
-        return {};
-      },
-      getPairingOffer: () => {
-        if (!pairingOffer || pairingOffer.expiresAt < Date.now()) return null;
-        return pairingOffer;
-      },
-      onEnvelope: async (envelope) => {
-        mainWindow?.webContents.send("lyra:envelope", {
-          type: envelope.type,
-          fromDeviceId: envelope.fromDeviceId,
-        });
-        return undefined;
-      },
-      handlers: {
-        onOpenUrl: (url) => {
-          void shell.openExternal(url);
-          return true;
-        },
-        onClipboardPush: (item) => {
-          mainWindow?.webContents.send("lyra:clipboard-push", item);
-        },
-        onPairRequest: (payload) => {
-          mainWindow?.webContents.send("lyra:pair-request", payload);
-        },
-        onUnpair: (deviceId) => {
-          trustedPeers.delete(deviceId);
-          mainWindow?.webContents.send("lyra:unpaired", { deviceId });
-        },
-        onFsList: async (fsPath) => {
-          try {
-            return await listOsFiles(fsPath);
-          } catch (e) {
-            console.warn("[fs_list]", e instanceof Error ? e.message : e);
-            return [];
-          }
-        },
-        onFsRead: (fsPath, offset, maxBytes) => readOsFileChunk(fsPath, offset, maxBytes),
-        onFsDelete: (fsPath) => deleteOsPath(fsPath),
-        onFsRename: (fsPath, newName) => renameOsPath(fsPath, newName),
-        // Soft screen share: accept and let the viewer fall back to demo if frames
-        // are not pushed (full desktop capture can be wired later via desktopCapturer).
-        onScreenShareRequest: (request) => ({
-          sessionId: request.sessionId,
-          width: request.maxEdge ?? 720,
-          height: Math.round((request.maxEdge ?? 720) * (16 / 9)),
-          fps: request.fps ?? 12,
-          mode: "p2p" as const,
-          mimeType: "image/jpeg" as const,
-        }),
-        onScreenFrame: (frame) => {
-          mainWindow?.webContents.send("lyra:screen-frame", frame);
-        },
-        onScreenShareStop: (sessionId) => {
-          mainWindow?.webContents.send("lyra:screen-share-stop", { sessionId });
-        },
-        onTransferComplete: async (state) => {
-          const destDir = resolveDownloadDir();
-          try {
-            mkdirSync(destDir, { recursive: true });
-          } catch {
-            // continue with best-effort write
-          }
-          const savedPaths: string[] = [];
-          try {
-            // Prefer disk-backed path; fall back to in-memory chunks
-            let blob: Buffer | null = null;
-            if (state.diskPath && existsSync(state.diskPath)) {
-              blob = await readFile(state.diskPath);
-            } else if (state.chunks?.length) {
-              blob = Buffer.concat(state.chunks.map((c) => Buffer.from(c)));
+    let lastListenError: unknown = null;
+    peer = null;
+    for (const tryPort of portCandidates) {
+      try {
+        peer = await startPeerServer({
+          identity,
+          port: tryPort,
+          tls: USE_TLS,
+          // Prefer paired shared secrets; allow first-contact only when no trust map hit
+          allowFirstContactAuth: true,
+          resolvePeerAuth: ({ deviceId, fingerprint }) => {
+            const byId = trustedPeers.get(deviceId);
+            if (byId) {
+              return {
+                sharedSecret: byId.authSecret,
+                expectedFingerprint: byId.fingerprint,
+                expectedDeviceId: byId.deviceId,
+              };
             }
-            if (blob && state.files.length > 0) {
-              let offset = 0;
-              for (const file of state.files) {
-                const size = Math.min(file.size, Math.max(0, blob.length - offset));
-                const safeName = path.basename(file.name).replace(/[^\w.\- ()[\]]+/g, "_") || "file";
-                let dest = path.join(destDir, safeName);
-                // Avoid overwrite: append counter
-                let n = 1;
-                while (existsSync(dest)) {
-                  const ext = path.extname(safeName);
-                  const base = path.basename(safeName, ext);
-                  dest = path.join(destDir, `${base} (${n})${ext}`);
-                  n++;
-                }
-                writeFileSync(dest, blob.subarray(offset, offset + size));
-                savedPaths.push(dest);
-                offset += size;
+            for (const t of trustedPeers.values()) {
+              if (t.fingerprint === fingerprint) {
+                return {
+                  sharedSecret: t.authSecret,
+                  expectedFingerprint: t.fingerprint,
+                  expectedDeviceId: t.deviceId,
+                };
               }
             }
-          } catch (e) {
-            console.warn("[transfer] save failed", e instanceof Error ? e.message : e);
-          }
-          mainWindow?.webContents.send("lyra:transfer-complete", {
-            transferId: state.transferId,
-            receivedBytes: state.receivedBytes,
-            files: state.files,
-            diskPath: state.diskPath,
-            savedPaths,
-            downloadDir: destDir,
-          });
-        },
-      },
-    });
+            // First contact allowed for pairing handshake
+            return {};
+          },
+          getPairingOffer: () => {
+            if (!pairingOffer || pairingOffer.expiresAt < Date.now()) return null;
+            return pairingOffer;
+          },
+          onEnvelope: async (envelope) => {
+            mainWindow?.webContents.send("lyra:envelope", {
+              type: envelope.type,
+              fromDeviceId: envelope.fromDeviceId,
+            });
+            return undefined;
+          },
+          handlers: {
+            onOpenUrl: (url) => {
+              void shell.openExternal(url);
+              return true;
+            },
+            onClipboardPush: (item) => {
+              mainWindow?.webContents.send("lyra:clipboard-push", item);
+            },
+            onPairRequest: (payload) => {
+              mainWindow?.webContents.send("lyra:pair-request", payload);
+            },
+            onUnpair: (deviceId) => {
+              trustedPeers.delete(deviceId);
+              mainWindow?.webContents.send("lyra:unpaired", { deviceId });
+            },
+            onFsList: async (fsPath) => {
+              try {
+                return await listOsFiles(fsPath);
+              } catch (e) {
+                console.warn("[fs_list]", e instanceof Error ? e.message : e);
+                return [];
+              }
+            },
+            onFsRead: (fsPath, offset, maxBytes) => readOsFileChunk(fsPath, offset, maxBytes),
+            onFsDelete: (fsPath) => deleteOsPath(fsPath),
+            onFsRename: (fsPath, newName) => renameOsPath(fsPath, newName),
+            // Soft screen share: accept and let the viewer fall back to demo if frames
+            // are not pushed (full desktop capture can be wired later via desktopCapturer).
+            onScreenShareRequest: (request) => ({
+              sessionId: request.sessionId,
+              width: request.maxEdge ?? 720,
+              height: Math.round((request.maxEdge ?? 720) * (16 / 9)),
+              fps: request.fps ?? 12,
+              mode: "p2p" as const,
+              mimeType: "image/jpeg" as const,
+            }),
+            onScreenFrame: (frame) => {
+              mainWindow?.webContents.send("lyra:screen-frame", frame);
+            },
+            onScreenShareStop: (sessionId) => {
+              mainWindow?.webContents.send("lyra:screen-share-stop", { sessionId });
+            },
+            onTransferComplete: async (state) => {
+              const destDir = resolveDownloadDir();
+              try {
+                mkdirSync(destDir, { recursive: true });
+              } catch {
+                // continue with best-effort write
+              }
+              const savedPaths: string[] = [];
+              try {
+                // Prefer disk-backed path; fall back to in-memory chunks
+                let blob: Buffer | null = null;
+                if (state.diskPath && existsSync(state.diskPath)) {
+                  blob = await readFile(state.diskPath);
+                } else if (state.chunks?.length) {
+                  blob = Buffer.concat(state.chunks.map((c) => Buffer.from(c)));
+                }
+                if (blob && state.files.length > 0) {
+                  let offset = 0;
+                  for (const file of state.files) {
+                    const size = Math.min(file.size, Math.max(0, blob.length - offset));
+                    const safeName = path.basename(file.name).replace(/[^\w.\- ()[\]]+/g, "_") || "file";
+                    let dest = path.join(destDir, safeName);
+                    // Avoid overwrite: append counter
+                    let n = 1;
+                    while (existsSync(dest)) {
+                      const ext = path.extname(safeName);
+                      const base = path.basename(safeName, ext);
+                      dest = path.join(destDir, `${base} (${n})${ext}`);
+                      n++;
+                    }
+                    writeFileSync(dest, blob.subarray(offset, offset + size));
+                    savedPaths.push(dest);
+                    offset += size;
+                  }
+                }
+              } catch (e) {
+                console.warn("[transfer] save failed", e instanceof Error ? e.message : e);
+              }
+              mainWindow?.webContents.send("lyra:transfer-complete", {
+                transferId: state.transferId,
+                receivedBytes: state.receivedBytes,
+                files: state.files,
+                diskPath: state.diskPath,
+                savedPaths,
+                downloadDir: destDir,
+              });
+            },
+          },
+        });
+        if (tryPort !== PEER_PORT && tryPort !== 0) {
+          console.warn(
+            `[lyra] preferred port ${PEER_PORT} busy — listening on ${peer.port} instead (set LYRA_PORT to pin)`,
+          );
+        } else if (tryPort === 0) {
+          console.warn(`[lyra] using ephemeral peer port ${peer.port}`);
+        }
+        lastListenError = null;
+        break;
+      } catch (e) {
+        lastListenError = e;
+        const msg = e instanceof Error ? e.message : String(e);
+        if (/EADDRINUSE|address already in use/i.test(msg)) {
+          console.warn(`[lyra] port ${tryPort} in use, trying next…`);
+          continue;
+        }
+        throw e;
+      }
+    }
+    if (!peer) {
+      throw lastListenError instanceof Error
+        ? lastListenError
+        : new Error(`Could not bind peer port (tried ${portCandidates.join(", ")})`);
+    }
 
     status.running = true;
     status.port = peer.port;

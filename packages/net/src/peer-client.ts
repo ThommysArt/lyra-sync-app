@@ -103,7 +103,7 @@ async function postJson<T = unknown>(
   } catch (e) {
     return {
       ok: false,
-      error: e instanceof Error ? e.message : String(e),
+      error: formatNetworkError(e),
       status: 0,
     };
   }
@@ -133,10 +133,26 @@ async function getJson<T = unknown>(
   } catch (e) {
     return {
       ok: false,
-      error: e instanceof Error ? e.message : String(e),
+      error: formatNetworkError(e),
       status: 0,
     };
   }
+}
+
+/** Human-readable network errors (Android CLEARTEXT, offline, TLS, etc.). */
+export function formatNetworkError(e: unknown): string {
+  const raw = e instanceof Error ? e.message : String(e);
+  if (/CLEARTEXT|cleartext|UnknownServiceException/i.test(raw)) {
+    return (
+      "Cleartext HTTP blocked by the OS network policy. " +
+      "Use a rebuild with usesCleartextTraffic (LAN/Tailscale peers speak HTTP). " +
+      `Detail: ${raw}`
+    );
+  }
+  if (/Network request failed|Failed to fetch|ECONNREFUSED|timed out|Timeout/i.test(raw)) {
+    return `${raw} — check that the peer is online, same Wi‑Fi/Tailscale, and its peer server is running.`;
+  }
+  return raw;
 }
 
 export type PeerPairingOffer = {
