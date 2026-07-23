@@ -16,6 +16,7 @@ import {
   startNativePeerServer,
   type NativePeerHandle,
 } from "@/lib/peer-server";
+import { installNativePeerHttpTransport } from "@/lib/tcp-http-client";
 
 export { useLyraSelector, useLyraState, useLyraStore };
 
@@ -23,6 +24,11 @@ export function LyraProvider({ children }: { children: ReactNode }) {
   const { isDark } = useAppTheme();
   const storage = useMemo(() => createSecureLyraStorage(), []);
   const [storageReady, setStorageReady] = useState(false);
+
+  // Peer ops use TCP sockets (not RN fetch) for reliable cleartext POST on LAN/Tailscale
+  useEffect(() => {
+    return installNativePeerHttpTransport();
+  }, []);
 
   useEffect(() => {
     let cancelled = false;

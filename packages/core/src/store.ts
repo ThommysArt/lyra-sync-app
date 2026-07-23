@@ -582,6 +582,12 @@ async function finalizePairDevice(
   });
 
   const now = Date.now();
+  const host = input.payload.host?.trim() || undefined;
+  const tsHost =
+    (input.payload as { tailscaleHost?: string }).tailscaleHost?.trim() ||
+    (host && isLikelyTailscaleHost(host) ? host : undefined);
+  const lanHost = host && !isLikelyTailscaleHost(host) ? host : undefined;
+  const port = input.payload.port && input.payload.port > 0 ? input.payload.port : LYRA_DEFAULT_PORT;
   const device: PairedDevice = {
     id: input.payload.deviceId,
     name: input.payload.name || "Paired device",
@@ -592,16 +598,17 @@ async function finalizePairDevice(
     pairedAt: now,
     lastSeenAt: now,
     online: true,
-    connectionType: input.payload.host
-      ? input.payload.host.startsWith("100.")
-        ? "tailscale"
-        : "local"
-      : "local",
+    connectionType: tsHost && lanHost ? "both" : tsHost ? "tailscale" : "local",
     autoAcceptTransfers: s.settings.autoAcceptTransfers,
     autoAcceptClipboard: s.settings.autoAcceptClipboard,
     showInMainList: true,
-    host: input.payload.host,
-    port: input.payload.port,
+    host: lanHost || host,
+    port,
+    tailscaleHost: tsHost,
+    preferredAddress: tsHost && !lanHost ? "tailscale" : "auto",
+    // Connection that just completed pairing is the best first try for callback
+    lastReachableHost: host,
+    lastReachablePort: port,
     authSecret,
   };
 
@@ -1321,6 +1328,35 @@ export function createLyraStore(options?: {
 
         if (device) {
           notify(set, `Paired with ${device.name}`, "success");
+          // Immediately verify we can call the peer back (mobile→desktop path)
+          if (device.host || device.tailscaleHost) {
+            void store.probePeerAddress({
+              host: device.lastReachableHost || device.host || device.tailscaleHost!,
+              port: device.lastReachablePort || device.port,
+            }).then((result) => {
+              if (result.ok) {
+                set((st) => ({
+                  ...st,
+                  devices: st.devices.map((d) =>
+                    d.id === device!.id
+                      ? applyReachableEndpoint(d, {
+                          host: result.host,
+                          port: result.port,
+                          protocol: "http",
+                        })
+                      : d,
+                  ),
+                }));
+                persist();
+              } else {
+                notify(
+                  set,
+                  `Paired, but cannot reach ${device.name} yet (${result.error}). Check its address in device details.`,
+                  "info",
+                );
+              }
+            });
+          }
         } else {
           notify(set, "Could not complete pairing — try again", "error");
         }
@@ -1999,30 +2035,39 @@ export function createLyraStore(options?: {
       // 3) LocalSend HttpScanDiscovery: walk local /24 for /lyra/info
       //    Known devices are already multi-endpoint probed above — only expand
       //    a few seed /24s so mobile does not walk thousands of hosts.
+      //    Note: Tailscale CGNAT is /10 — expanding only a /24 of our 100.x IP
+      //    will miss peers on other 100.x.y segments (common). For 100.x seeds we
+      //    do NOT expand; we only probe exact known hosts (paired / hints).
       const seeds = new Set<string>();
+      const exactOnly = new Set<string>(); // never expand these to /24
       const lan = localLanHostFromState(getState()) ?? getState().localLanHint;
-      if (lan) seeds.add(lan);
-      // Prefer one seed per unique /24 from known addresses
       const slash24Seen = new Set<string>();
-      const considerSeed = (raw: string | null | undefined) => {
+      const considerSeed = (raw: string | null | undefined, expand: boolean) => {
         const h = raw?.trim();
         if (!h) return;
+        if (!expand || isLikelyTailscaleHost(h)) {
+          exactOnly.add(h);
+          seeds.add(h);
+          return;
+        }
         const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
         if (m) {
           const key = `${m[1]}.${m[2]}.${m[3]}`;
           if (slash24Seen.has(key)) return;
-          if (slash24Seen.size >= 3) return; // cap subnet fan-out
+          if (slash24Seen.size >= 3) return;
           slash24Seen.add(key);
         }
         seeds.add(h);
       };
-      considerSeed(lan);
+      // Prefer Wi‑Fi-looking seeds for /24 expansion when possible
+      considerSeed(lan, true);
       for (const d of getState().devices) {
-        considerSeed(d.host);
-        considerSeed(d.tailscaleHost);
+        considerSeed(d.host, true);
+        considerSeed(d.tailscaleHost, false);
+        considerSeed(d.lastReachableHost, !isLikelyTailscaleHost(d.lastReachableHost ?? ""));
       }
       for (const h of getState().tailscalePeerHints) {
-        considerSeed(h.host);
+        considerSeed(h.host, false);
       }
       // Common home/lab prefixes when we have no local IP yet (browser)
       if (seeds.size === 0) {
@@ -2745,6 +2790,7 @@ export function createLyraStore(options?: {
       const targets =
         targetDeviceIds ??
         s.devices.filter((d) => d.online && d.showInMainList).map((d) => d.id);
+      const live = s.devices.filter((d) => targets.includes(d.id) && isLivePeer(d) && d.authSecret);
       const item: ClipboardItem = {
         id: generateId("clip"),
         type: "text",
@@ -2753,6 +2799,12 @@ export function createLyraStore(options?: {
         sourceDeviceName: s.identity.name,
         createdAt: Date.now(),
         pinned: false,
+        deliveryStatus: live.length > 0 ? "sending" : targets.length > 0 ? "failed" : "local",
+        deliveryError:
+          live.length === 0 && targets.length > 0
+            ? "No reachable paired peer"
+            : undefined,
+        deliveredTo: [],
       };
       set((st) => ({
         ...st,
@@ -2761,8 +2813,6 @@ export function createLyraStore(options?: {
       }));
       persist();
 
-      // Real wire push to live peers with host + auth
-      const live = s.devices.filter((d) => targets.includes(d.id) && isLivePeer(d) && d.authSecret);
       if (live.length === 0) {
         notify(
           set,
@@ -2782,16 +2832,21 @@ export function createLyraStore(options?: {
 
       void (async () => {
         let okCount = 0;
+        const deliveredTo: string[] = [];
+        let lastError: string | undefined;
         for (const device of live) {
+          // Use freshest device record (host may update mid-flight)
+          const current =
+            getState().devices.find((d) => d.id === device.id) ?? device;
           const res = await wirePushClipboard({
-            device,
+            device: current,
             identity: s.identity!,
             privateKey: s.privateKey!,
             item,
           });
           if (res.ok) {
             okCount++;
-            // Remember the endpoint that actually worked (LAN vs Tailscale / port)
+            deliveredTo.push(device.id);
             if (res.endpoint) {
               set((st) => ({
                 ...st,
@@ -2801,9 +2856,27 @@ export function createLyraStore(options?: {
               }));
             }
           } else {
-            notify(set, `Clipboard to ${device.nickname || device.name} failed: ${res.error}`, "error");
+            lastError = res.error;
+            notify(
+              set,
+              `Clipboard to ${device.nickname || device.name} failed: ${res.error}`,
+              "error",
+            );
           }
         }
+        set((st) => ({
+          ...st,
+          clipboardHistory: st.clipboardHistory.map((c) =>
+            c.id === item.id
+              ? {
+                  ...c,
+                  deliveryStatus: okCount > 0 ? ("sent" as const) : ("failed" as const),
+                  deliveryError: okCount > 0 ? undefined : lastError,
+                  deliveredTo,
+                }
+              : c,
+          ),
+        }));
         persist();
         if (okCount > 0) {
           notify(

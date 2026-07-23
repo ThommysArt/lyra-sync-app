@@ -17,7 +17,10 @@ import {
   isEcdsaPrivateKey,
 } from "./auth";
 import { createEnvelope, parseEnvelope } from "./envelope";
+import { getHttpTransport } from "./http-transport";
 import { isSealedString, openSealedJson, sealJson } from "./seal";
+
+export { setHttpTransport, type HttpTransport } from "./http-transport";
 
 /** Marker object for AES-GCM sealed payloads (post-pairing encryption default). */
 export const SEALED_PAYLOAD_KEY = "__lyra_sealed" as const;
@@ -75,7 +78,8 @@ async function postJson<T = unknown>(
   init?: { headers?: Record<string, string>; signal?: AbortSignal },
 ): Promise<{ ok: true; data: T; status: number } | { ok: false; error: string; status: number }> {
   try {
-    const res = await fetch(url, {
+    const http = getHttpTransport();
+    const res = await http(url, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -84,8 +88,6 @@ async function postJson<T = unknown>(
       },
       body: JSON.stringify(body),
       signal: init?.signal,
-      // Avoid caching / keep-alive issues with short-lived peer servers
-      cache: "no-store",
     });
     const text = await res.text();
     let data: unknown = null;
@@ -116,7 +118,8 @@ async function getJson<T = unknown>(
   init?: { signal?: AbortSignal },
 ): Promise<{ ok: true; data: T; status: number } | { ok: false; error: string; status: number }> {
   try {
-    const res = await fetch(url, {
+    const http = getHttpTransport();
+    const res = await http(url, {
       method: "GET",
       headers: { accept: "application/json" },
       signal: init?.signal,
@@ -650,12 +653,13 @@ export async function getOrCreatePeerSession(input: {
   if (cached && cached.expiresAt > Date.now() + 30_000) {
     return { ok: true, sessionToken: cached.token };
   }
-  // Bound handshake so multi-endpoint fallback stays snappy (~2.5s per candidate)
+  // Bound handshake; probe-first ensureSession already filtered dead hosts,
+  // so allow a bit longer for Tailscale RTT + crypto.
   let signal = input.signal;
   let timer: ReturnType<typeof setTimeout> | undefined;
   if (!signal) {
     const controller = new AbortController();
-    timer = setTimeout(() => controller.abort(), 2_500);
+    timer = setTimeout(() => controller.abort(), 6_000);
     signal = controller.signal;
   }
   try {

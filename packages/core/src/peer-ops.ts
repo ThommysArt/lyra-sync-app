@@ -67,7 +67,15 @@ export function isLivePeer(device: PairedDevice): boolean {
  * Exported so discovery can re-probe the same matrix used for clipboard/transfers.
  */
 export function deviceEndpointCandidates(
-  device: Pick<PairedDevice, "host" | "port" | "tailscaleHost" | "preferredAddress">,
+  device: Pick<
+    PairedDevice,
+    | "host"
+    | "port"
+    | "tailscaleHost"
+    | "preferredAddress"
+    | "lastReachableHost"
+    | "lastReachablePort"
+  >,
   opts?: { extraPorts?: number[] },
 ): PeerUrl[] {
   const port = device.port ?? LYRA_DEFAULT_PORT;
@@ -84,6 +92,8 @@ export function deviceEndpointCandidates(
     const v = h?.trim();
     if (v && !ordered.includes(v)) ordered.push(v);
   };
+  // Always try last known-good host first
+  push(device.lastReachableHost);
   if (pref === "tailscale") {
     push(tsHost);
     push(lanHost);
@@ -103,16 +113,35 @@ export function deviceEndpointCandidates(
   }
 
   // Keep the matrix small: multi-endpoint auth has a ~2.5s timeout each
+  const lastPort = device.lastReachablePort;
   const ports = [
     ...new Set(
-      [port, LYRA_DEFAULT_PORT, port + 2, port + 4, ...(opts?.extraPorts ?? [])].filter(
-        (p) => typeof p === "number" && p > 0 && p <= 65535,
-      ),
+      [
+        lastPort,
+        port,
+        LYRA_DEFAULT_PORT,
+        port + 2,
+        port + 4,
+        ...(opts?.extraPorts ?? []),
+      ].filter((p) => typeof p === "number" && p > 0 && p <= 65535),
     ),
   ].slice(0, 4);
   const out: PeerUrl[] = [];
+  // Prefer sticky host:port combo first
+  if (device.lastReachableHost && device.lastReachablePort) {
+    out.push({
+      host: device.lastReachableHost,
+      port: device.lastReachablePort,
+      protocol: "http",
+    });
+  }
   for (const host of ordered) {
     for (const p of ports) {
+      if (
+        out.some((e) => e.host === host && e.port === p)
+      ) {
+        continue;
+      }
       out.push({ host, port: p, protocol: "http" });
     }
   }
@@ -128,12 +157,17 @@ export function applyReachableEndpoint(
   const port = endpoint.port ?? device.port ?? LYRA_DEFAULT_PORT;
   if (!host) return device;
   const isTs = isLikelyTailscaleHost(host);
+  const sticky = {
+    lastReachableHost: host,
+    lastReachablePort: port,
+    online: true as const,
+    lastSeenAt: Date.now(),
+    port,
+  };
   if (isTs) {
     return {
       ...device,
-      online: true,
-      lastSeenAt: Date.now(),
-      port,
+      ...sticky,
       tailscaleHost: host,
       // Keep a distinct LAN host when we already have one
       host:
@@ -150,9 +184,7 @@ export function applyReachableEndpoint(
   }
   return {
     ...device,
-    online: true,
-    lastSeenAt: Date.now(),
-    port,
+    ...sticky,
     host,
     connectionType:
       device.tailscaleHost || device.connectionType === "tailscale"
@@ -171,8 +203,37 @@ export async function ensureSession(input: {
   const candidates = deviceEndpointCandidates(input.device);
   if (candidates.length === 0) return { ok: false, error: "Peer has no host" };
 
-  let lastError = "Peer has no host";
+  // Probe-first: only run auth against endpoints that answer GET /lyra/info.
+  // Avoids burning timeouts on dead Tailscale/LAN addresses and surfaces
+  // real auth errors instead of "Failed to fetch".
+  const { probePeer } = await import("@lyra-sync-app/net");
+  const reachable: PeerUrl[] = [];
+  const seen = new Set<string>();
   for (const endpoint of candidates) {
+    const key = `${endpoint.host}:${endpoint.port ?? LYRA_DEFAULT_PORT}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const probe = await probePeer(
+      { host: endpoint.host, port: endpoint.port, protocol: "http" },
+      {
+        timeoutMs: 1200,
+        preferTailscale: isLikelyTailscaleHost(endpoint.host),
+      },
+    );
+    if (probe.ok) {
+      reachable.push({
+        host: probe.host,
+        port: probe.port,
+        protocol: "http",
+      });
+      // Two live endpoints is enough — auth the best one first
+      if (reachable.length >= 2) break;
+    }
+  }
+
+  const tryList = reachable.length > 0 ? reachable : candidates.slice(0, 4);
+  let lastError = reachable.length === 0 ? "Peer unreachable (probe failed)" : "Auth failed";
+  for (const endpoint of tryList) {
     const session = await getOrCreatePeerSession({
       endpoint,
       identity: input.identity,
@@ -574,47 +635,78 @@ export async function wireVerifyPairTrust(input: {
   | { ok: true; stillTrusted: false; reason: string }
   | { ok: false; error: string; unreachable?: boolean }
 > {
-  const endpoint = deviceEndpoint(input.device);
-  if (!endpoint || !input.device.authSecret) {
+  if (!input.device.authSecret) {
     return { ok: false, error: "No live trusted peer", unreachable: true };
   }
-  // First check reachability — offline peers are not treated as unpaired
-  const { fetchPeerInfo, authenticateWithPeer, clearPeerSessionFor } = await import(
+  const { authenticateWithPeer, clearPeerSessionFor, probePeer } = await import(
     "@lyra-sync-app/net"
   );
-  const info = await fetchPeerInfo(endpoint);
-  if (!info.ok) {
-    return { ok: false, error: info.error, unreachable: true };
+  // Try every LAN/Tailscale candidate — a single stale host must not unpair us.
+  const candidates = deviceEndpointCandidates(input.device);
+  if (candidates.length === 0) {
+    return { ok: false, error: "No live trusted peer", unreachable: true };
   }
-  clearPeerSessionFor(endpoint, input.device.id);
-  const auth = await authenticateWithPeer({
-    endpoint,
-    identity: input.identity,
-    privateKey: input.privateKey,
-    sharedSecret: input.device.authSecret,
-  });
-  if (!auth.ok) {
-    // Peer is online but rejects our pairing secret → they unpaired us (or secret rotated)
-    return {
-      ok: true,
-      stillTrusted: false,
-      reason: auth.error || "Trust rejected",
-    };
+
+  let sawReachable = false;
+  let lastAuthError = "Trust rejected";
+  for (const endpoint of candidates) {
+    const probe = await probePeer(
+      { host: endpoint.host, port: endpoint.port, protocol: "http" },
+      { timeoutMs: 1200, preferTailscale: isLikelyTailscaleHost(endpoint.host) },
+    );
+    if (!probe.ok) continue;
+    sawReachable = true;
+    const live: PeerUrl = { host: probe.host, port: probe.port, protocol: "http" };
+    clearPeerSessionFor(live, input.device.id);
+    const auth = await authenticateWithPeer({
+      endpoint: live,
+      identity: input.identity,
+      privateKey: input.privateKey,
+      sharedSecret: input.device.authSecret,
+    });
+    if (auth.ok) {
+      if (
+        auth.peerDeviceId &&
+        auth.peerDeviceId !== input.device.id &&
+        auth.peerFingerprint &&
+        auth.peerFingerprint !== input.device.fingerprint
+      ) {
+        return {
+          ok: true,
+          stillTrusted: false,
+          reason: "Peer identity changed",
+        };
+      }
+      return { ok: true, stillTrusted: true };
+    }
+    lastAuthError = auth.error || lastAuthError;
+    // Network-ish auth failures on a reachable host: try next candidate, don't unpair yet
+    if (
+      /Failed to fetch|Network request failed|timed out|Timeout|ECONNREFUSED|unreachable|Aborted/i.test(
+        auth.error,
+      )
+    ) {
+      continue;
+    }
+    // Explicit crypto/auth rejection — peer is online but does not trust us
+    if (
+      /Invalid proof|Fingerprint|Device id|Unauthorized|pairing|Unknown peer|401/i.test(
+        auth.error,
+      )
+    ) {
+      return {
+        ok: true,
+        stillTrusted: false,
+        reason: auth.error || "Trust rejected",
+      };
+    }
   }
-  // Confirm peer identity still matches what we stored
-  if (
-    auth.peerDeviceId &&
-    auth.peerDeviceId !== input.device.id &&
-    auth.peerFingerprint &&
-    auth.peerFingerprint !== input.device.fingerprint
-  ) {
-    return {
-      ok: true,
-      stillTrusted: false,
-      reason: "Peer identity changed",
-    };
+
+  if (!sawReachable) {
+    return { ok: false, error: "Peer unreachable", unreachable: true };
   }
-  return { ok: true, stillTrusted: true };
+  // Reachable but could not complete auth on any path — keep pair (transient)
+  return { ok: false, error: lastAuthError, unreachable: true };
 }
 
 export async function wireSendPairRequest(input: {

@@ -386,15 +386,41 @@ export function createPeerHttpCore(options: PeerHttpCoreOptions): PeerHttpCore {
         }
 
         if (envelope.type === "pair_request" && envelope.payload && typeof envelope.payload === "object") {
-          const p = envelope.payload as { host?: string };
-          if (!p.host || p.host === "127.0.0.1" || p.host === "0.0.0.0" || p.host === "localhost") {
-            const remote = req.remoteAddress?.replace(/^::ffff:/, "");
-            if (remote && remote !== "127.0.0.1" && remote !== "::1") {
-              envelope = {
-                ...envelope,
-                payload: { ...p, host: remote },
-              };
+          // TCP source is ground truth for callback. Joiner-advertised hosts are often
+          // wrong on multi-homed desktops (docker/virbr) — that caused mobile→desktop
+          // timeouts after a successful laptop→phone pair.
+          const p = envelope.payload as {
+            host?: string;
+            port?: number;
+            tailscaleHost?: string;
+          };
+          const remote = req.remoteAddress
+            ?.replace(/^::ffff:/, "")
+            .replace(/%.*$/, "")
+            .trim();
+          if (remote && remote !== "127.0.0.1" && remote !== "::1" && remote !== "0.0.0.0") {
+            const isTs = (h: string) =>
+              /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(h) || h.endsWith(".ts.net");
+            const advertised = p.host?.trim();
+            let host = remote;
+            let tailscaleHost = p.tailscaleHost?.trim();
+            if (advertised && advertised !== remote) {
+              if (isTs(advertised) && !isTs(remote)) {
+                host = remote;
+                tailscaleHost = advertised;
+              } else if (isTs(remote) && !isTs(advertised)) {
+                host = advertised;
+                tailscaleHost = remote;
+              }
             }
+            envelope = {
+              ...envelope,
+              payload: {
+                ...p,
+                host,
+                ...(tailscaleHost ? { tailscaleHost } : {}),
+              },
+            };
           }
         }
 

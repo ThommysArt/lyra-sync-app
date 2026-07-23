@@ -8,3 +8,4 @@ export * from "./seal";
 export * from "./transfer-wire";
 export * from "./message-handlers";
 export * from "./peer-http-core";
+export * from "./http-transport";

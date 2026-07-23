@@ -179,6 +179,12 @@ export function expandLanCandidates(
       add("127.0.0.1", port);
       continue;
     }
+    // Tailscale CGNAT is 100.64/10 — a single /24 expansion almost never covers
+    // other tailnet peers (different 100.x.y). Only probe the seed itself;
+    // pair / manual add / MagicDNS scan supplies the rest.
+    if (a === 100 && b >= 64 && b <= 127) {
+      continue;
+    }
     for (let d = 1; d <= 254; d++) {
       add(`${a}.${b}.${c}.${d}`, port);
     }

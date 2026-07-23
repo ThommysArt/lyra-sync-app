@@ -121,6 +121,9 @@ export type PairConfirmPayload = z.infer<typeof PairConfirmPayloadSchema>;
 
 export const ClipboardPushPayloadSchema = ClipboardItemSchema.omit({
   pinned: true,
+  deliveryStatus: true,
+  deliveryError: true,
+  deliveredTo: true,
 }).extend({
   pinned: z.boolean().optional(),
 });

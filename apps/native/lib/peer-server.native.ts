@@ -91,12 +91,25 @@ function concatBytes(chunks: Uint8Array[]): Uint8Array {
   return out;
 }
 
-function toUint8Array(data: string | Uint8Array | ArrayBuffer): Uint8Array {
+function toUint8Array(data: unknown): Uint8Array {
   if (typeof data === "string") {
     return new TextEncoder().encode(data);
   }
   if (data instanceof Uint8Array) return data;
-  return new Uint8Array(data);
+  if (data instanceof ArrayBuffer) return new Uint8Array(data);
+  if (data && typeof data === "object" && ArrayBuffer.isView(data as ArrayBufferView)) {
+    const v = data as ArrayBufferView;
+    return new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
+  }
+  // react-native-tcp-socket may emit Buffer-like objects
+  if (data && typeof data === "object" && "length" in (data as object)) {
+    try {
+      return Uint8Array.from(data as ArrayLike<number>);
+    } catch {
+      // fall through
+    }
+  }
+  return new TextEncoder().encode(String(data ?? ""));
 }
 
 function indexOfHeaderEnd(buf: Uint8Array): number {
@@ -146,30 +159,57 @@ function parseHttpRequestBytes(raw: Uint8Array): {
       headers[k] = v;
     }
   }
-  const contentLength = Number.parseInt(headers["content-length"] ?? "0", 10);
+  const contentLengthRaw = headers["content-length"];
+  const contentLength = contentLengthRaw
+    ? Number.parseInt(contentLengthRaw, 10)
+    : Number.NaN;
   const bodyStart = headerEnd + 4;
-  const bodyLen = Number.isFinite(contentLength) && contentLength > 0 ? contentLength : 0;
-  if (bodyLen > MAX_REQUEST_BYTES) {
-    // Signal oversized — caller should 400
+  const methodUpper = method.toUpperCase();
+  const expectsBody =
+    methodUpper === "POST" || methodUpper === "PUT" || methodUpper === "PATCH";
+
+  // Prefer Content-Length when present (fetch / Node always set it for JSON).
+  if (Number.isFinite(contentLength) && contentLength >= 0) {
+    const bodyLen = contentLength;
+    if (bodyLen > MAX_REQUEST_BYTES) {
+      return { method, path, headers, body: "", consumed: -1 };
+    }
+    if (raw.byteLength < bodyStart + bodyLen) {
+      return null; // wait for more bytes
+    }
+    const bodyBytes = raw.subarray(bodyStart, bodyStart + bodyLen);
+    return {
+      method,
+      path,
+      headers,
+      body: new TextDecoder().decode(bodyBytes),
+      consumed: bodyStart + bodyLen,
+    };
+  }
+
+  // No Content-Length: GET/HEAD have empty body. For POST without CL, treat any
+  // already-buffered trailing bytes as the body (some stacks omit CL on LAN).
+  if (!expectsBody) {
     return {
       method,
       path,
       headers,
       body: "",
-      consumed: -1,
+      consumed: bodyStart,
     };
   }
-  if (raw.byteLength < bodyStart + bodyLen) {
-    return null; // wait for more bytes
+  // Wait for more data if we only have headers so far (chunked / late body).
+  // Caller should also complete on socket 'end'.
+  if (raw.byteLength === bodyStart) {
+    return null;
   }
-  const bodyBytes = raw.subarray(bodyStart, bodyStart + bodyLen);
-  const body = new TextDecoder().decode(bodyBytes);
+  const bodyBytes = raw.subarray(bodyStart);
   return {
     method,
     path,
     headers,
-    body,
-    consumed: bodyStart + bodyLen,
+    body: new TextDecoder().decode(bodyBytes),
+    consumed: raw.byteLength,
   };
 }
 
@@ -282,6 +322,7 @@ export async function startNativePeerServer(
           // react-native-tcp-socket crashes the app if write() hits a removed id:
           // java.lang.IllegalArgumentException: No socket with id N
           let done = false;
+          let idleTimer: ReturnType<typeof setTimeout> | undefined;
 
           const isLive = () => {
             if (done) return false;
@@ -377,8 +418,15 @@ export async function startNativePeerServer(
             chunks.length = 0;
             totalBytes = 0;
 
+            // react-native-tcp-socket sets remoteAddress after connect
+            const remoteRaw =
+              (socket as { remoteAddress?: string }).remoteAddress ??
+              (socket as { _remoteAddress?: string })._remoteAddress ??
+              null;
             const remote =
-              (socket as { remoteAddress?: string }).remoteAddress ?? null;
+              typeof remoteRaw === "string"
+                ? remoteRaw.replace(/^::ffff:/, "").replace(/%.*$/, "")
+                : null;
 
             void core
               .handle({
@@ -412,12 +460,25 @@ export async function startNativePeerServer(
             // ignore
           }
 
-          socket.on("data", (data: string | Uint8Array | ArrayBuffer) => {
+          const bumpIdle = () => {
+            try {
+              clearTimeout(idleTimer);
+            } catch {
+              // ignore
+            }
+            idleTimer = setTimeout(() => {
+              // Only kill if we never started handling a complete request
+              if (!handling && !done) safeClose();
+            }, 20_000);
+          };
+
+          socket.on("data", (data: unknown) => {
             if (done || handling) return;
             try {
               const bytes = toUint8Array(data);
               chunks.push(bytes);
               totalBytes += bytes.byteLength;
+              bumpIdle();
               if (totalBytes > MAX_REQUEST_BYTES) {
                 respond(
                   buildHttpResponse(
@@ -450,14 +511,18 @@ export async function startNativePeerServer(
           });
 
           socket.on("end", () => {
-            // Peer half-closed. If we haven't responded, abandon (client gone).
-            if (!handling) safeClose();
+            // Peer half-closed after sending body without Content-Length
+            if (!handling && !done && chunks.length > 0) {
+              tryHandle();
+            }
+            // If still nothing to handle, abandon
+            if (!handling && !done) safeClose();
           });
 
           // Idle timeout for half-open / stalled clients
-          const idleTimer = setTimeout(() => {
-            if (!handling) safeClose();
-          }, 15_000);
+          idleTimer = setTimeout(() => {
+            if (!handling && !done) safeClose();
+          }, 20_000);
         });
 
         srv.on("error", (err: Error) => {

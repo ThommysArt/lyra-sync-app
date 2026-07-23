@@ -27,6 +27,12 @@ pnpm run build:dev && pnpm run install:dev
 # or preview/release via EAS
 ```
 
+### 2026-07-23 follow-up — clipboard / transfer wire still broken after discovery fix
+- RN `fetch` POST to cleartext LAN/Tailscale peers often fails while GET works → **TCP HTTP client** via `react-native-tcp-socket` for all peer ops on native
+- `ensureSession` now **probe-first**, sticky `lastReachableHost/Port`
+- Trust recheck no longer **unpairs** when POST auth fails with network errors after GET succeeded
+- Native server body parsing hardened (Content-Length / missing CL)
+
 ---
 
 ## 2026-07-22 — Screen mirror: separate windows + real capture

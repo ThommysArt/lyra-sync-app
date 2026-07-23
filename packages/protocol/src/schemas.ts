@@ -86,6 +86,12 @@ export const PairedDeviceSchema = z.object({
   /** Last successful probe latency in ms */
   lastProbeLatencyMs: z.number().nonnegative().optional(),
   /**
+   * Last host:port that successfully answered /lyra/info or completed auth.
+   * Always tried first for clipboard/transfers so we don't thrash stale LAN/TS IPs.
+   */
+  lastReachableHost: z.string().optional(),
+  lastReachablePort: z.number().int().positive().optional(),
+  /**
    * Optional ADB serial / host:port for scrcpy (Sefirah-style Android mirror).
    * Example: `100.83.145.32:5555` over Tailscale.
    */
@@ -134,6 +140,16 @@ export const ClipboardItemSchema = z.object({
   sourceDeviceName: z.string(),
   createdAt: z.number().int().nonnegative(),
   pinned: z.boolean(),
+  /**
+   * Outbound delivery status for items this device pushed.
+   * Incoming items use `local` / omitted.
+   */
+  deliveryStatus: z
+    .enum(["pending", "sending", "sent", "failed", "local"])
+    .optional(),
+  deliveryError: z.string().optional(),
+  /** Device ids that successfully received this item over the wire */
+  deliveredTo: z.array(z.string()).optional(),
 });
 export type ClipboardItem = z.infer<typeof ClipboardItemSchema>;
 
@@ -233,9 +249,21 @@ export const PairingPayloadSchema = z.object({
   token: z.string(),
   host: z.string().optional(),
   port: z.number().int().optional(),
+  /** Alternate Tailscale / MagicDNS address when host is LAN (or vice versa). */
+  tailscaleHost: z.string().optional(),
   expiresAt: z.number().int().nonnegative(),
 });
 export type PairingPayload = z.infer<typeof PairingPayloadSchema>;
+
+/** Delivery state for outbound clipboard items (per device or aggregate). */
+export const ClipboardDeliveryStatusSchema = z.enum([
+  "pending",
+  "sending",
+  "sent",
+  "failed",
+  "local",
+]);
+export type ClipboardDeliveryStatus = z.infer<typeof ClipboardDeliveryStatusSchema>;
 
 export const AppSettingsSchema = z.object({
   clipboardHistoryLimit: z.number().int().min(5).max(200).default(40),
