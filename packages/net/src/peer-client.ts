@@ -84,6 +84,8 @@ async function postJson<T = unknown>(
       },
       body: JSON.stringify(body),
       signal: init?.signal,
+      // Avoid caching / keep-alive issues with short-lived peer servers
+      cache: "no-store",
     });
     const text = await res.text();
     let data: unknown = null;
@@ -142,12 +144,16 @@ async function getJson<T = unknown>(
 /** Human-readable network errors (Android CLEARTEXT, offline, TLS, etc.). */
 export function formatNetworkError(e: unknown): string {
   const raw = e instanceof Error ? e.message : String(e);
+  const name = e instanceof Error ? e.name : "";
   if (/CLEARTEXT|cleartext|UnknownServiceException/i.test(raw)) {
     return (
       "Cleartext HTTP blocked by the OS network policy. " +
       "Use a rebuild with usesCleartextTraffic (LAN/Tailscale peers speak HTTP). " +
       `Detail: ${raw}`
     );
+  }
+  if (name === "AbortError" || /aborted|AbortError/i.test(raw)) {
+    return "Timed out reaching peer — check Wi‑Fi/Tailscale address and that its peer server is running.";
   }
   if (/Network request failed|Failed to fetch|ECONNREFUSED|timed out|Timeout/i.test(raw)) {
     return `${raw} — check that the peer is online, same Wi‑Fi/Tailscale, and its peer server is running.`;
@@ -644,19 +650,35 @@ export async function getOrCreatePeerSession(input: {
   if (cached && cached.expiresAt > Date.now() + 30_000) {
     return { ok: true, sessionToken: cached.token };
   }
-  const auth = await authenticateWithPeer({
-    endpoint: input.endpoint,
-    identity: input.identity,
-    privateKey: input.privateKey,
-    sharedSecret: input.sharedSecret,
-    signal: input.signal,
-  });
-  if (!auth.ok) return auth;
-  sessionCache.set(key, {
-    token: auth.sessionToken,
-    expiresAt: Date.now() + 50 * 60_000,
-  });
-  return { ok: true, sessionToken: auth.sessionToken };
+  // Bound handshake so multi-endpoint fallback stays snappy (~2.5s per candidate)
+  let signal = input.signal;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  if (!signal) {
+    const controller = new AbortController();
+    timer = setTimeout(() => controller.abort(), 2_500);
+    signal = controller.signal;
+  }
+  try {
+    const auth = await authenticateWithPeer({
+      endpoint: input.endpoint,
+      identity: input.identity,
+      privateKey: input.privateKey,
+      sharedSecret: input.sharedSecret,
+      signal,
+    });
+    if (!auth.ok) {
+      // Drop any stale cached token for this key
+      sessionCache.delete(key);
+      return auth;
+    }
+    sessionCache.set(key, {
+      token: auth.sessionToken,
+      expiresAt: Date.now() + 50 * 60_000,
+    });
+    return { ok: true, sessionToken: auth.sessionToken };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 export function clearPeerSessionCache(): void {

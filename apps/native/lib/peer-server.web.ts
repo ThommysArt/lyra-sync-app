@@ -18,6 +18,7 @@ export type NativePeerHandle = {
     key: { deviceId?: string; token?: string },
     decision: { accepted: true; host?: string; port?: number } | { accepted: false; reason?: string },
   ) => boolean;
+  refreshLanHost: () => Promise<string | null>;
 };
 
 export function isExpoGoRuntime(): boolean {

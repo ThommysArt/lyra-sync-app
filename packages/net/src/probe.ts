@@ -190,14 +190,26 @@ export function expandLanCandidates(
  * HTTP subnet scan (LocalSend HttpScanDiscovery).
  * Probes /lyra/info on every host in the same /24 as each seed address.
  * Used as a reliable fallback when UDP multicast is blocked or flaky.
+ *
+ * When `ports` is provided, each host is tried on those ports (dev/preview/prod
+ * variants often land on 53317/53327/53337). Peers are de-duped by device id.
  */
 export async function scanLanForPeers(input: {
   /** Seed IPs (local addresses or known peers) — each expands to /24 */
   seedHosts: string[];
+  /** Primary port (also used when `ports` is omitted) */
   port?: number;
+  /** Optional multi-port scan (capped). */
+  ports?: number[];
   timeoutMs?: number;
   concurrency?: number;
   localDeviceId?: string;
+  /**
+   * Do not open TCP to these host:port pairs (own peer server).
+   * Scanning ourselves floods the native TCP server and races write/destroy
+   * (Android: IllegalArgumentException No socket with id).
+   */
+  skipEndpoints?: Array<{ host: string; port?: number }>;
 }): Promise<
   Array<{
     host: string;
@@ -212,14 +224,42 @@ export async function scanLanForPeers(input: {
     };
   }>
 > {
-  const port = input.port ?? LYRA_DEFAULT_PORT;
-  const seeds = input.seedHosts
-    .map((h) => h.trim())
-    .filter(Boolean)
-    .map((host) => ({ host, port }));
+  const primaryPort = input.port ?? LYRA_DEFAULT_PORT;
+  const ports = [
+    ...new Set(
+      (input.ports?.length ? input.ports : [primaryPort])
+        .map((p) => Number(p))
+        .filter((p) => p > 0 && p <= 65535),
+    ),
+  ].slice(0, 4);
+  if (ports.length === 0) ports.push(primaryPort);
+
+  const seeds = input.seedHosts.map((h) => h.trim()).filter(Boolean);
   if (seeds.length === 0) return [];
 
-  const candidates = expandLanCandidates(seeds, port);
+  const skip = new Set<string>();
+  for (const ep of input.skipEndpoints ?? []) {
+    const h = ep.host?.trim();
+    if (!h) continue;
+    const p = ep.port && ep.port > 0 ? ep.port : primaryPort;
+    skip.add(`${h}:${p}`);
+    // Also skip all scan ports on our own host
+    for (const sp of ports) skip.add(`${h}:${sp}`);
+  }
+
+  // Expand hosts once, then cartesian-product with ports
+  const hostCandidates = expandLanCandidates(
+    seeds.map((host) => ({ host, port: primaryPort })),
+    primaryPort,
+  );
+  const candidates: PeerUrl[] = [];
+  for (const ep of hostCandidates) {
+    for (const p of ports) {
+      if (skip.has(`${ep.host}:${p}`)) continue;
+      candidates.push({ host: ep.host, port: p });
+    }
+  }
+
   const concurrency = Math.max(1, input.concurrency ?? 50);
   const timeoutMs = input.timeoutMs ?? 500;
   const found: Array<{
@@ -242,7 +282,11 @@ export async function scanLanForPeers(input: {
       const i = next++;
       const ep = candidates[i]!;
       const host = ep.host.trim();
-      const p = ep.port ?? port;
+      const p = ep.port ?? primaryPort;
+      // Skip remaining ports for a device we already found
+      if (seen.size > 0) {
+        // cheap path — still probe; de-dupe on success
+      }
       try {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -254,9 +298,10 @@ export async function scanLanForPeers(input: {
         if (input.localDeviceId && info.identity.id === input.localDeviceId) continue;
         if (seen.has(info.identity.id)) continue;
         seen.add(info.identity.id);
+        // Prefer the address we actually connected to (not a possibly-stale advert)
         found.push({
-          host: info.host && info.host !== "0.0.0.0" ? info.host : host,
-          port: info.port && info.port > 0 ? info.port : p,
+          host,
+          port: info.port && info.port > 0 && info.port === p ? info.port : p,
           identity: {
             id: info.identity.id,
             name: info.identity.name,

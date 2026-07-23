@@ -62,34 +62,54 @@ export function isLivePeer(device: PairedDevice): boolean {
   return Boolean(resolveDeviceHost(device)) && !device.id.startsWith("demo_");
 }
 
-/** Build candidate endpoints (preferred + alternate LAN/Tailscale host, port fallbacks). */
-function deviceEndpointCandidates(
+/**
+ * Build candidate endpoints (preferred + alternate LAN/Tailscale host, port fallbacks).
+ * Exported so discovery can re-probe the same matrix used for clipboard/transfers.
+ */
+export function deviceEndpointCandidates(
   device: Pick<PairedDevice, "host" | "port" | "tailscaleHost" | "preferredAddress">,
+  opts?: { extraPorts?: number[] },
 ): PeerUrl[] {
   const port = device.port ?? LYRA_DEFAULT_PORT;
   const pref = device.preferredAddress ?? "auto";
-  const lan = device.host?.trim() || null;
-  const ts = device.tailscaleHost?.trim() || null;
+  const hostField = device.host?.trim() || null;
+  const tsField = device.tailscaleHost?.trim() || null;
+  // Split: non-TS host field is LAN; Tailscale is explicit field or TS-shaped host
+  const lanHost = hostField && !isLikelyTailscaleHost(hostField) ? hostField : null;
+  const tsHost =
+    tsField || (hostField && isLikelyTailscaleHost(hostField) ? hostField : null);
+
   const ordered: string[] = [];
-  const push = (h: string | null) => {
-    if (h && !ordered.includes(h)) ordered.push(h);
+  const push = (h: string | null | undefined) => {
+    const v = h?.trim();
+    if (v && !ordered.includes(v)) ordered.push(v);
   };
   if (pref === "tailscale") {
-    push(ts);
-    push(lan);
+    push(tsHost);
+    push(lanHost);
+    push(hostField);
   } else if (pref === "lan") {
-    push(lan);
-    push(ts);
+    push(lanHost);
+    push(hostField);
+    push(tsHost);
+  } else if (tsHost) {
+    // auto: Tailscale first when present (LAN IPs go stale off-network)
+    push(tsHost);
+    push(lanHost);
+    push(hostField);
   } else {
-    // auto: try Tailscale first when present (LAN IPs go stale off-network)
-    if (ts) {
-      push(ts);
-      push(lan);
-    } else {
-      push(lan);
-    }
+    push(lanHost);
+    push(hostField);
   }
-  const ports = [...new Set([port, LYRA_DEFAULT_PORT, port + 2, port + 4].filter((p) => p > 0))];
+
+  // Keep the matrix small: multi-endpoint auth has a ~2.5s timeout each
+  const ports = [
+    ...new Set(
+      [port, LYRA_DEFAULT_PORT, port + 2, port + 4, ...(opts?.extraPorts ?? [])].filter(
+        (p) => typeof p === "number" && p > 0 && p <= 65535,
+      ),
+    ),
+  ].slice(0, 4);
   const out: PeerUrl[] = [];
   for (const host of ordered) {
     for (const p of ports) {
@@ -97,6 +117,50 @@ function deviceEndpointCandidates(
     }
   }
   return out;
+}
+
+/** Merge a reachable endpoint back onto a device record (LAN vs Tailscale). */
+export function applyReachableEndpoint(
+  device: PairedDevice,
+  endpoint: PeerUrl,
+): PairedDevice {
+  const host = endpoint.host.trim();
+  const port = endpoint.port ?? device.port ?? LYRA_DEFAULT_PORT;
+  if (!host) return device;
+  const isTs = isLikelyTailscaleHost(host);
+  if (isTs) {
+    return {
+      ...device,
+      online: true,
+      lastSeenAt: Date.now(),
+      port,
+      tailscaleHost: host,
+      // Keep a distinct LAN host when we already have one
+      host:
+        device.host && !isLikelyTailscaleHost(device.host) ? device.host : device.host || host,
+      connectionType:
+        device.host && !isLikelyTailscaleHost(device.host)
+          ? "both"
+          : device.connectionType === "local"
+            ? "both"
+            : "tailscale",
+      preferredAddress:
+        device.preferredAddress === "lan" ? "lan" : device.preferredAddress ?? "auto",
+    };
+  }
+  return {
+    ...device,
+    online: true,
+    lastSeenAt: Date.now(),
+    port,
+    host,
+    connectionType:
+      device.tailscaleHost || device.connectionType === "tailscale"
+        ? "both"
+        : device.connectionType === "manual"
+          ? "manual"
+          : "local",
+  };
 }
 
 export async function ensureSession(input: {
@@ -129,10 +193,12 @@ export async function wirePushClipboard(input: {
   identity: DeviceIdentity;
   privateKey: string;
   item: ClipboardItem;
-}): Promise<{ ok: true } | { ok: false; error: string }> {
+}): Promise<
+  { ok: true; endpoint: PeerUrl } | { ok: false; error: string; endpoint?: PeerUrl }
+> {
   const session = await ensureSession(input);
   if (!session.ok) return session;
-  return pushClipboardToPeer({
+  const pushed = await pushClipboardToPeer({
     endpoint: session.endpoint,
     sessionToken: session.sessionToken,
     fromDeviceId: input.identity.id,
@@ -148,6 +214,8 @@ export async function wirePushClipboard(input: {
     },
     sealSecret: input.device.authSecret,
   });
+  if (!pushed.ok) return { ok: false, error: pushed.error, endpoint: session.endpoint };
+  return { ok: true, endpoint: session.endpoint };
 }
 
 export async function wireOpenUrl(input: {
@@ -199,7 +267,10 @@ export async function wireSendFiles(input: {
   files: { name: string; size: number; mimeType?: string; checksum?: string; bytes?: Uint8Array }[];
   resumeOffset?: number;
   onProgress?: (p: WireTransferProgress) => void;
-}): Promise<{ ok: true; checksums: string[] } | { ok: false; error: string }> {
+}): Promise<
+  | { ok: true; checksums: string[]; endpoint: PeerUrl }
+  | { ok: false; error: string; endpoint?: PeerUrl }
+> {
   const session = await ensureSession(input);
   if (!session.ok) return session;
 
@@ -226,7 +297,7 @@ export async function wireSendFiles(input: {
     };
   });
 
-  return sendFilesOverWire({
+  const sent = await sendFilesOverWire({
     endpoint: session.endpoint,
     sessionToken: session.sessionToken,
     fromDeviceId: input.identity.id,
@@ -237,6 +308,8 @@ export async function wireSendFiles(input: {
     onProgress: input.onProgress,
     sealSecret: input.device.authSecret,
   });
+  if (!sent.ok) return { ok: false, error: sent.error, endpoint: session.endpoint };
+  return { ok: true, checksums: sent.checksums, endpoint: session.endpoint };
 }
 
 /** Notify a peer that we unpaired them (best-effort). */

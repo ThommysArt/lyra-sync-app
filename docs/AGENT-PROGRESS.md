@@ -1,8 +1,31 @@
 # Lyra — Agent Progress Report
 
-**Last updated:** 2026-07-22 (screen mirror windows + capture permissions)  
-**Status:** Dev/preview/prod side-by-side · screen mirror opens dedicated windows · unit green  
+**Last updated:** 2026-07-23 (mobile discovery + peer wire path)  
+**Status:** Dev/preview/prod side-by-side · mobile↔desktop wire path fixed · unit green  
 **Plan:** [`docs/GAP-FIX-PLAN.md`](./GAP-FIX-PLAN.md) · **Packaging:** [`docs/PACKAGING.md`](./PACKAGING.md)
+
+---
+
+## 2026-07-23 — Mobile discovery / clipboard / transfer wire path
+
+### Why it was broken
+- **Discovery only probed `device.host`** — stale LAN IPs marked peers offline even when Tailscale still worked; mobile “Refresh” / “Scan Tailscale” reported 0 while desktop (UDP + HTTP) still saw the phone.
+- **Optimistic clipboard toast** claimed “sent (wire)” before the POST finished.
+- **Native HTTP peer server** compared `Content-Length` (bytes) to UTF-8 **string** length and could hang on non-ASCII / multi-chunk bodies → desktop `Failed to fetch` into the phone.
+- **Android cleartext** lived only on the debug manifest; release/preview and post-prebuild main manifests blocked LAN/Tailscale HTTP.
+
+### Fixes
+- Multi-endpoint probe matrix (LAN + Tailscale + port fallbacks) on discovery and `ensureSession`
+- Remember the host:port that actually answered after clipboard/transfer
+- Byte-safe native TCP HTTP parser + larger body limit + flush-before-close
+- `usesCleartextTraffic` + `network_security_config` on **main** + Expo config plugin
+- Honest clipboard success/failure toasts
+
+### Rebuild required (mobile)
+```bash
+pnpm run build:dev && pnpm run install:dev
+# or preview/release via EAS
+```
 
 ---
 

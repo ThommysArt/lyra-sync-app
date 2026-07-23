@@ -185,6 +185,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
         },
       ],
       "./plugins/with-clipboard-accessibility",
+      "./plugins/with-cleartext-traffic",
     ],
     experiments: {
       typedRoutes: true,

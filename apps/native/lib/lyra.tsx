@@ -54,13 +54,21 @@ export function LyraProvider({ children }: { children: ReactNode }) {
       if (!cancelled) void store.recheckPairedTrust();
     }, 2000);
 
-    void Network.getIpAddressAsync()
-      .then((ip) => {
-        if (ip && ip !== "0.0.0.0") store.setLocalLanHint(ip);
-      })
-      .catch(() => {
-        // ignore — pairing still works with manual/discovered hosts
-      });
+    const refreshLocalIp = () =>
+      Network.getIpAddressAsync()
+        .then((ip) => {
+          if (ip && ip !== "0.0.0.0" && ip !== "127.0.0.1") {
+            store.setLocalLanHint(ip);
+          }
+        })
+        .catch(() => {
+          // ignore — pairing still works with manual/discovered hosts
+        });
+    void refreshLocalIp();
+    // Re-check IP when network changes (Wi‑Fi ↔ Tailscale)
+    const netSub = Network.addNetworkStateListener?.(() => {
+      void refreshLocalIp();
+    });
 
     const startPeer = async () => {
       // Wait for identity hydrate
@@ -236,6 +244,11 @@ export function LyraProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
       clearTimeout(trustTimer);
+      try {
+        netSub?.remove?.();
+      } catch {
+        // ignore
+      }
       detachPeer?.();
       detachPeer = null;
       void peerHandle?.stop();

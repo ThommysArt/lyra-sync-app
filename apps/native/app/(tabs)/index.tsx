@@ -110,8 +110,16 @@ export default function DevicesScreen() {
     if (!tailscaleEnabled) return;
     setScanBusy(true);
     try {
-      // Mobile cannot run `tailscale status` locally; probe known + hint peers
-      // and refresh discovery so LAN/Tailscale hosts with Lyra respond.
+      // Mobile cannot run `tailscale status` locally. Refresh multi-endpoint
+      // discovery (LAN + Tailscale + port fallbacks), then probe TS-tagged peers.
+      try {
+        const ip = await (await import("expo-network")).getIpAddressAsync();
+        if (ip && ip !== "0.0.0.0" && ip !== "127.0.0.1") {
+          store.setLocalLanHint(ip);
+        }
+      } catch {
+        // ignore
+      }
       await store.refreshDiscovery();
       await store.probeTailscalePeers();
     } finally {
