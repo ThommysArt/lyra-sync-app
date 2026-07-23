@@ -95,6 +95,50 @@ export type LyraDesktopApi = {
     extraArgs?: string;
   }) => Promise<{ ok: boolean; error?: string; pid?: number }>;
   stopScrcpy?: (deviceId: string) => Promise<{ ok: boolean }>;
+  /** Preflight ADB / wireless-debug readiness for scrcpy. */
+  checkAdb?: (opts?: {
+    serial?: string;
+  }) => Promise<{
+    ok: boolean;
+    adbPath?: string | null;
+    scrcpyPath?: string | null;
+    devices?: string[];
+    error?: string;
+    hint?: string;
+  }>;
+  /** Dedicated Xcode-Simulator-style mirror BrowserWindow. */
+  openMirrorWindow?: (opts: {
+    deviceId: string;
+    title: string;
+    url: string;
+    width: number;
+    height: number;
+    minWidth?: number;
+    minHeight?: number;
+    aspectRatio?: number;
+    isPhone?: boolean;
+    resizable?: boolean;
+    backgroundColor?: string;
+  }) => Promise<{ ok: boolean; error?: string }>;
+  /** Refit an open mirror window when frame size / scale changes. */
+  resizeMirrorWindow?: (opts: {
+    deviceId: string;
+    width: number;
+    height: number;
+    aspectRatio?: number;
+  }) => Promise<{ ok: boolean; error?: string }>;
+  closeMirrorWindow?: (deviceId: string) => Promise<{ ok: boolean }>;
+  /** Host decision for an incoming screen_share_request. */
+  respondScreenShare?: (payload: {
+    sessionId: string;
+    accepted: boolean;
+    reason?: string;
+    width?: number;
+    height?: number;
+    fps?: number;
+    mode?: "p2p" | "demo" | "scrcpy" | "unavailable";
+    mimeType?: "image/jpeg" | "image/webp" | "image/png";
+  }) => Promise<{ ok: boolean }>;
   windowMinimize?: () => Promise<void>;
   windowMaximizeToggle?: () => Promise<{ maximized: boolean }>;
   windowClose?: () => Promise<void>;
@@ -110,6 +154,39 @@ export type LyraDesktopApi = {
     handler: (peers: { host: string; port?: number; name?: string; online?: boolean }[]) => void,
   ) => () => void;
   onTransferComplete?: (handler: (data: TransferCompleteEvent) => void) => () => void;
+  /** Incoming peer request to capture *this* desktop's screen. */
+  onScreenShareRequest?: (
+    handler: (payload: {
+      request: {
+        sessionId: string;
+        maxEdge?: number;
+        fps?: number;
+        quality?: number;
+      };
+      fromDeviceId: string;
+    }) => void,
+  ) => () => void;
+  /** Wire frames while we are the viewer. */
+  onScreenFrame?: (
+    handler: (payload: {
+      frame: {
+        sessionId: string;
+        seq: number;
+        width: number;
+        height: number;
+        mimeType: "image/jpeg" | "image/webp" | "image/png";
+        dataBase64: string;
+        capturedAt: number;
+      };
+      fromDeviceId: string;
+    }) => void,
+  ) => () => void;
+  onScreenShareStop?: (
+    handler: (payload: { sessionId: string; fromDeviceId?: string; reason?: string }) => void,
+  ) => () => void;
+  onScrcpyExit?: (
+    handler: (payload: { deviceId: string; code: number | null; stderr?: string }) => void,
+  ) => () => void;
 };
 
 declare global {

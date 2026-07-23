@@ -192,7 +192,9 @@ export default function DeviceDetailScreen() {
         <View style={{ backgroundColor: card, borderRadius: 14, padding: 16, gap: 12 }}>
           <Text style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 16 }}>Screen mirror</Text>
           <Text style={{ color: muted, fontFamily: fonts.regular, fontSize: 12 }}>
-            Xcode-style cast preview. Demo frames always work; live share when peers support it.
+            Preview cast of a peer. Demo frames always work. Live desktop capture needs the desktop
+            app to allow screen share; high-quality Android mirror uses scrcpy + wireless debugging
+            from desktop (enable Developer options → Wireless debugging, adb connect over Tailscale).
           </Text>
           <View
             style={{

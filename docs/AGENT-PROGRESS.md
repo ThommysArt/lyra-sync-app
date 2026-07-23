@@ -1,8 +1,32 @@
 # Lyra — Agent Progress Report
 
-**Last updated:** 2026-07-22 (app variants + versioned APKs)  
-**Status:** Dev/preview/prod side-by-side · APKs labeled `lyra-0.2.3-{dev|preview}` · unit green  
+**Last updated:** 2026-07-22 (screen mirror windows + capture permissions)  
+**Status:** Dev/preview/prod side-by-side · screen mirror opens dedicated windows · unit green  
 **Plan:** [`docs/GAP-FIX-PLAN.md`](./GAP-FIX-PLAN.md) · **Packaging:** [`docs/PACKAGING.md`](./PACKAGING.md)
+
+---
+
+## 2026-07-22 — Screen mirror: separate windows + real capture
+
+### Why it was broken
+- Desktop **accepted** P2P `screen_share_request` but never captured or sent frames
+- `lyra:screen-frame` was never exposed on preload / wired into the store
+- Mirrors only rendered inline (no dedicated window)
+
+### What works now
+- **Dedicated mirror window** (Electron `BrowserWindow` or browser popup) with phone/desktop sizing + aspect ratio
+- **Route** `/mirror/$deviceId` (no sidebar chrome)
+- **BroadcastChannel** sync so demo/P2P frames appear in the mirror window
+- **Desktop as source:** permission dialog → `getDisplayMedia` via Electron `setDisplayMediaRequestHandler` + `desktopCapturer` → JPEG frames over peer protocol
+- **Android / scrcpy:** ADB preflight (`lyra:check-adb`), checklist UI, scrcpy window sized ~400×860
+- Incoming frames + scrcpy exit errors surface in the session UI
+
+### Permissions workflow
+| Role | What is requested |
+|------|-------------------|
+| Desktop source | In-app “Share your screen?” → system display picker (Electron grants display-capture) |
+| Desktop viewer of Android | Wireless debugging + `adb connect` + `scrcpy` on PATH |
+| Demo | No permissions — synthetic bezel frames |
 
 ---
 

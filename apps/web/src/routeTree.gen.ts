@@ -13,6 +13,7 @@ import { Route as TransfersRouteImport } from './routes/transfers'
 import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as ClipboardRouteImport } from './routes/clipboard'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as MirrorDeviceIdRouteImport } from './routes/mirror.$deviceId'
 import { Route as DevicesDeviceIdRouteImport } from './routes/devices.$deviceId'
 
 const TransfersRoute = TransfersRouteImport.update({
@@ -35,6 +36,11 @@ const IndexRoute = IndexRouteImport.update({
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const MirrorDeviceIdRoute = MirrorDeviceIdRouteImport.update({
+  id: '/mirror/$deviceId',
+  path: '/mirror/$deviceId',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const DevicesDeviceIdRoute = DevicesDeviceIdRouteImport.update({
   id: '/devices/$deviceId',
   path: '/devices/$deviceId',
@@ -47,6 +53,7 @@ export interface FileRoutesByFullPath {
   '/settings': typeof SettingsRoute
   '/transfers': typeof TransfersRoute
   '/devices/$deviceId': typeof DevicesDeviceIdRoute
+  '/mirror/$deviceId': typeof MirrorDeviceIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -54,6 +61,7 @@ export interface FileRoutesByTo {
   '/settings': typeof SettingsRoute
   '/transfers': typeof TransfersRoute
   '/devices/$deviceId': typeof DevicesDeviceIdRoute
+  '/mirror/$deviceId': typeof MirrorDeviceIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -62,13 +70,25 @@ export interface FileRoutesById {
   '/settings': typeof SettingsRoute
   '/transfers': typeof TransfersRoute
   '/devices/$deviceId': typeof DevicesDeviceIdRoute
+  '/mirror/$deviceId': typeof MirrorDeviceIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
-    '/' | '/clipboard' | '/settings' | '/transfers' | '/devices/$deviceId'
+    | '/'
+    | '/clipboard'
+    | '/settings'
+    | '/transfers'
+    | '/devices/$deviceId'
+    | '/mirror/$deviceId'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/clipboard' | '/settings' | '/transfers' | '/devices/$deviceId'
+  to:
+    | '/'
+    | '/clipboard'
+    | '/settings'
+    | '/transfers'
+    | '/devices/$deviceId'
+    | '/mirror/$deviceId'
   id:
     | '__root__'
     | '/'
@@ -76,6 +96,7 @@ export interface FileRouteTypes {
     | '/settings'
     | '/transfers'
     | '/devices/$deviceId'
+    | '/mirror/$deviceId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -84,6 +105,7 @@ export interface RootRouteChildren {
   SettingsRoute: typeof SettingsRoute
   TransfersRoute: typeof TransfersRoute
   DevicesDeviceIdRoute: typeof DevicesDeviceIdRoute
+  MirrorDeviceIdRoute: typeof MirrorDeviceIdRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -116,6 +138,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/mirror/$deviceId': {
+      id: '/mirror/$deviceId'
+      path: '/mirror/$deviceId'
+      fullPath: '/mirror/$deviceId'
+      preLoaderRoute: typeof MirrorDeviceIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/devices/$deviceId': {
       id: '/devices/$deviceId'
       path: '/devices/$deviceId'
@@ -132,6 +161,7 @@ const rootRouteChildren: RootRouteChildren = {
   SettingsRoute: SettingsRoute,
   TransfersRoute: TransfersRoute,
   DevicesDeviceIdRoute: DevicesDeviceIdRoute,
+  MirrorDeviceIdRoute: MirrorDeviceIdRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

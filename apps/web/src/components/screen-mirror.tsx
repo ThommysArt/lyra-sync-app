@@ -1,16 +1,21 @@
 /**
- * Screen mirror panel — Sefirah/scrcpy-inspired, Xcode-bezel presentation.
+ * Device-detail controls for screen mirror.
+ * The real experience is the separate Simulator-style window — this card only
+ * starts/stops and shows a small status thumbnail.
  */
 
 import type { PairedDevice, ScreenSession } from "@lyra-sync-app/protocol";
-import { MonitorPlay, Smartphone, Square, Wifi } from "lucide-react";
+import { ExternalLink, MonitorPlay, Smartphone, Square, Wifi } from "lucide-react";
 import { useState } from "react";
+import { toast } from "sonner";
 
 import { Badge } from "@lyra-sync-app/ui/components/badge";
 import { Button } from "@lyra-sync-app/ui/components/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@lyra-sync-app/ui/components/card";
-import { DeviceFrame } from "@/components/device-frame";
+import { AndroidMirrorSetupHints } from "@/components/screen-share-host";
 import { getDesktopApi, isDesktopShell } from "@/lib/desktop-bridge";
+import { formatScale, resolveDeviceProfile } from "@/lib/device-geometry";
+import { closeMirrorViewerWindow, layoutForDevice, openMirrorViewerWindow } from "@/lib/mirror-window";
 import { useLyraStore } from "@/lib/lyra";
 
 export function ScreenMirrorPanel({
@@ -22,43 +27,87 @@ export function ScreenMirrorPanel({
 }) {
   const store = useLyraStore();
   const [busy, setBusy] = useState(false);
+  const [lastAdbHint, setLastAdbHint] = useState<string | null>(null);
   const active = session && (session.status === "active" || session.status === "requesting");
-  const isPhone = device.type === "mobile" || device.platform === "android" || device.platform === "ios";
   const desktop = isDesktopShell();
+  const showAndroidHints =
+    device.platform === "android" || (device.type === "mobile" && device.platform !== "ios");
+  const profile = resolveDeviceProfile(device);
+  const previewLayout = layoutForDevice(device, {
+    width: session?.width,
+    height: session?.height,
+  });
+
+  const openWindow = async () => {
+    const res = await openMirrorViewerWindow(device, {
+      frameWidth: session?.width,
+      frameHeight: session?.height,
+    });
+    if (!res.ok && res.error) {
+      toast.message("Mirror window", { description: res.error });
+    }
+  };
 
   const start = async (mode?: "auto" | "demo" | "p2p" | "scrcpy") => {
     setBusy(true);
+    setLastAdbHint(null);
     try {
-      const res = await store.startScreenMirror(device.id, { mode });
-      if (!res.ok) return;
+      if (
+        desktop &&
+        (mode === "scrcpy" || mode === "auto") &&
+        (device.platform === "android" || device.type === "mobile")
+      ) {
+        const api = getDesktopApi();
+        const host = device.adbSerial || device.tailscaleHost || device.host;
+        if (api?.checkAdb) {
+          const serial = host
+            ? host.includes(":")
+              ? host
+              : `${host}:5555`
+            : undefined;
+          const adb = await api.checkAdb({ serial });
+          if (!adb.ok) {
+            setLastAdbHint(adb.hint ?? adb.error ?? "ADB not ready");
+            if (mode === "scrcpy") {
+              toast.error(adb.error ?? "ADB not ready", { description: adb.hint });
+            } else {
+              toast.message("Live Android mirror needs ADB", {
+                description: adb.hint ?? adb.error,
+              });
+            }
+          }
+        }
+      }
 
-      // Scrcpy path: ask desktop shell to launch external high-quality mirror
+      const res = await store.startScreenMirror(device.id, { mode });
+      if (!res.ok) {
+        toast.error(res.error);
+        return;
+      }
+
       if ((mode === "scrcpy" || mode === "auto") && desktop && device.platform === "android") {
         const api = getDesktopApi();
-        const host =
-          device.adbSerial ||
-          device.tailscaleHost ||
-          device.host;
-        if (api && "startScrcpy" in api && typeof (api as { startScrcpy?: unknown }).startScrcpy === "function") {
-          const startScrcpy = (
-            api as {
-              startScrcpy: (opts: {
-                deviceId: string;
-                serial?: string;
-                extraArgs?: string;
-              }) => Promise<{ ok: boolean; error?: string }>;
-            }
-          ).startScrcpy;
-          const scrcpyRes = await startScrcpy({
+        const host = device.adbSerial || device.tailscaleHost || device.host;
+        if (api?.startScrcpy) {
+          const scrcpyRes = await api.startScrcpy({
             deviceId: device.id,
             serial: host ? (host.includes(":") ? host : `${host}:5555`) : undefined,
             extraArgs: store.getState().settings.scrcpyExtraArgs,
+            scrcpyPath: store.getState().settings.scrcpyPath,
           });
           if (!scrcpyRes.ok && scrcpyRes.error) {
-            // Keep in-app demo bezel; surface reason
-            console.info("[lyra] scrcpy:", scrcpyRes.error);
+            toast.message("scrcpy", { description: scrcpyRes.error });
           }
         }
+      }
+
+      // Primary UX: open the Simulator-style window — that *is* the mirror
+      const opened = await openMirrorViewerWindow(device, {
+        frameWidth: session?.width ?? previewLayout.screenWidth / previewLayout.scale,
+        frameHeight: session?.height ?? previewLayout.screenHeight / previewLayout.scale,
+      });
+      if (!opened.ok) {
+        toast.message("Could not open mirror window", { description: opened.error });
       }
     } finally {
       setBusy(false);
@@ -70,11 +119,8 @@ export function ScreenMirrorPanel({
     try {
       await store.stopScreenMirror(device.id);
       const api = getDesktopApi();
-      if (api && "stopScrcpy" in api) {
-        void (
-          api as { stopScrcpy?: (deviceId: string) => Promise<unknown> }
-        ).stopScrcpy?.(device.id);
-      }
+      if (api?.stopScrcpy) void api.stopScrcpy(device.id);
+      await closeMirrorViewerWindow(device.id);
     } finally {
       setBusy(false);
     }
@@ -86,8 +132,13 @@ export function ScreenMirrorPanel({
         <div>
           <CardTitle className="text-base">Screen mirror</CardTitle>
           <CardDescription>
-            Xcode-style device cast. Demo preview always works; live P2P or scrcpy when the peer
-            supports it.
+            Opens a separate Simulator-style window sized to this device (
+            {profile.label}
+            {" · "}
+            {profile.screenWidth}×{profile.screenHeight}
+            {" at "}
+            {formatScale(previewLayout.scale)}
+            ). Just the bezel and live screen — like Xcode&apos;s iPhone simulator.
           </CardDescription>
         </div>
         {active ? (
@@ -100,59 +151,52 @@ export function ScreenMirrorPanel({
         )}
       </CardHeader>
       <CardContent className="space-y-4">
-        <div className="flex flex-col items-center gap-4 sm:flex-row sm:items-start">
-          <DeviceFrame
-            variant={isPhone ? "phone" : "desktop"}
-            platform={device.platform}
-            frameSrc={session?.lastFrameDataUrl}
-            live={Boolean(active && session?.status === "active")}
-            caption={
-              active
-                ? `${session?.width ?? "—"}×${session?.height ?? "—"} · ${session?.fps?.toFixed?.(1) ?? session?.fps ?? "—"} fps · ${session?.frameCount ?? 0} frames`
-                : device.nickname || device.name
-            }
-            placeholder={
-              <div className="flex flex-col items-center gap-2 px-4">
-                {isPhone ? (
-                  <Smartphone className="size-8 text-zinc-600" />
-                ) : (
-                  <MonitorPlay className="size-8 text-zinc-600" />
-                )}
-                <p className="text-xs text-zinc-500">Start mirror to cast this device</p>
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-start">
+          {/* Small status thumb only — the real mirror is the other window */}
+          <div
+            className="relative mx-auto shrink-0 overflow-hidden rounded-[1.25rem] border border-border/80 bg-zinc-950 shadow-inner sm:mx-0"
+            style={{
+              width: 96,
+              height: Math.round(96 * (profile.screenHeight / profile.screenWidth)),
+              maxHeight: 180,
+            }}
+          >
+            {session?.lastFrameDataUrl ? (
+              <img
+                src={session.lastFrameDataUrl}
+                alt=""
+                className="size-full object-cover"
+                draggable={false}
+              />
+            ) : (
+              <div className="flex size-full flex-col items-center justify-center gap-1 text-zinc-600">
+                <Smartphone className="size-5" />
+                <span className="text-[9px]">Window</span>
               </div>
-            }
-            maxHeight={isPhone ? 560 : 360}
-          />
+            )}
+          </div>
 
-          <div className="flex w-full min-w-0 flex-1 flex-col gap-2 sm:max-w-xs">
+          <div className="flex min-w-0 flex-1 flex-col gap-2">
             {!active ? (
               <>
                 <Button disabled={busy || !device.online} onClick={() => void start("auto")}>
                   <MonitorPlay className="size-4" />
-                  Start mirror
+                  Open mirror window
                 </Button>
-                <Button
-                  variant="outline"
-                  disabled={busy}
-                  onClick={() => void start("demo")}
-                >
-                  Preview in bezel
+                <Button variant="outline" disabled={busy} onClick={() => void start("demo")}>
+                  Preview (demo frames)
                 </Button>
                 {(device.platform === "android" || device.type === "mobile") && desktop ? (
                   <Button
                     variant="outline"
                     disabled={busy || !device.online}
                     onClick={() => void start("scrcpy")}
-                    title="Requires scrcpy + ADB (wireless TCP/IP or USB). Uses Tailscale IP when set."
+                    title="Requires scrcpy + ADB"
                   >
                     <Wifi className="size-4" />
-                    Scrcpy (high quality)
+                    Scrcpy (native window)
                   </Button>
                 ) : null}
-                <p className="text-xs text-muted-foreground">
-                  For Android over Tailscale, set the device Tailscale IP (100.x) below and enable
-                  wireless debugging / ADB TCP 5555. Scrcpy path mirrors Sefirah.
-                </p>
               </>
             ) : (
               <>
@@ -160,20 +204,39 @@ export function ScreenMirrorPanel({
                   <Square className="size-4" />
                   Stop mirror
                 </Button>
+                <Button variant="outline" disabled={busy} onClick={() => void openWindow()}>
+                  <ExternalLink className="size-4" />
+                  Focus mirror window
+                </Button>
                 {session?.error ? (
                   <p className="text-xs text-destructive">{session.error}</p>
                 ) : (
                   <p className="text-xs text-muted-foreground">
                     Mode <strong>{session?.mode}</strong>
-                    {session?.mode === "demo"
-                      ? " — synthetic high-quality preview (offline-safe)."
-                      : session?.mode === "scrcpy"
-                        ? " — external scrcpy window when the binary is available."
-                        : " — live frames over the Lyra peer protocol."}
+                    {session?.width && session?.height
+                      ? ` · stream ${session.width}×${session.height}`
+                      : null}
+                    {" · window "}
+                    {previewLayout.windowWidth}×{previewLayout.windowHeight}px
                   </p>
                 )}
               </>
             )}
+
+            {showAndroidHints ? (
+              <AndroidMirrorSetupHints
+                hasHost={Boolean(device.host)}
+                hasTailscale={Boolean(device.tailscaleHost)}
+                hasAdbSerial={Boolean(device.adbSerial)}
+              />
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                Desktop sources get a system screen/window picker when a peer starts a live mirror.
+              </p>
+            )}
+            {lastAdbHint ? (
+              <p className="text-xs text-amber-700 dark:text-amber-300">{lastAdbHint}</p>
+            ) : null}
           </div>
         </div>
       </CardContent>

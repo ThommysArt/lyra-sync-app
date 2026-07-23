@@ -73,17 +73,15 @@ test.describe("Screen mirror + Tailscale UI", () => {
     await expect(page.getByText("Connection addresses")).toBeVisible();
     await expect(page.getByLabel("Tailscale IP or MagicDNS")).toBeVisible();
 
-    await page.getByRole("button", { name: "Preview in bezel" }).click();
-    await expect(page.getByText(/fps|frames/i).first()).toBeVisible({
+    // Opens Simulator-style window; main panel keeps a status thumbnail
+    await page.getByRole("button", { name: "Preview (demo frames)" }).click();
+    await expect(page.getByRole("button", { name: "Focus mirror window" })).toBeVisible({
       timeout: 10_000,
     });
-    // Frame image should appear inside bezel
-    await expect(page.locator('img[alt="Remote screen"]').first()).toBeVisible({
-      timeout: 10_000,
-    });
+    await expect(page.getByRole("button", { name: "Stop mirror" })).toBeVisible();
 
     await page.getByRole("button", { name: "Stop mirror" }).click();
-    await expect(page.getByRole("button", { name: "Start mirror" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Open mirror window" })).toBeVisible();
 
     expect(errors.filter((e) => e.includes("Maximum update depth")).length).toBe(0);
   });

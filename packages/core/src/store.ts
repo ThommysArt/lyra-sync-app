@@ -267,6 +267,11 @@ export type LyraStore = {
       capturedAt: number;
     },
   ) => void;
+  /**
+   * Replace screen session map (multi-window BroadcastChannel sync).
+   * Used so a dedicated mirror popup sees demo/P2P frames from the main window.
+   */
+  applyScreenSessions: (sessions: Record<string, ScreenSession>) => void;
   /** Record Tailscale discovery status for Settings UI. */
   setTailscaleStatus: (status: NonNullable<LyraState["tailscaleStatus"]>) => void;
   /**
@@ -1855,8 +1860,30 @@ export function createLyraStore(options?: {
       if (!dataUrl) return;
       const now = Date.now();
       set((st) => {
-        const cur = st.screenSessions[deviceId];
-        if (!cur || cur.sessionId !== frame.sessionId) return st;
+        let key = deviceId;
+        let cur = st.screenSessions[deviceId];
+        if (!cur || cur.sessionId !== frame.sessionId) {
+          const found = Object.entries(st.screenSessions).find(
+            ([, s]) => s.sessionId === frame.sessionId,
+          );
+          if (found) {
+            key = found[0];
+            cur = found[1];
+          } else {
+            // First frame may arrive in a mirror window before session state syncs
+            cur = {
+              sessionId: frame.sessionId,
+              deviceId,
+              role: "viewer",
+              status: "active",
+              mode: "p2p",
+              fps: 0,
+              frameCount: 0,
+              startedAt: now,
+              updatedAt: now,
+            };
+          }
+        }
         const elapsed = Math.max(1, now - cur.startedAt);
         const frameCount = (cur.frameCount ?? 0) + 1;
         const fps = frameCount / (elapsed / 1000);
@@ -1864,7 +1891,7 @@ export function createLyraStore(options?: {
           ...st,
           screenSessions: {
             ...st.screenSessions,
-            [deviceId]: {
+            [key]: {
               ...cur,
               status: "active",
               lastFrameDataUrl: dataUrl,
@@ -1878,6 +1905,9 @@ export function createLyraStore(options?: {
           },
         };
       });
+    },
+    applyScreenSessions: (sessions) => {
+      set((st) => ({ ...st, screenSessions: { ...sessions } }));
     },
     setTailscaleStatus: (status) => {
       set((st) => ({ ...st, tailscaleStatus: status }));
