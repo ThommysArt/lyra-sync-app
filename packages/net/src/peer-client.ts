@@ -17,7 +17,10 @@ import {
   isEcdsaPrivateKey,
 } from "./auth";
 import { createEnvelope, parseEnvelope } from "./envelope";
+import { getHttpTransport } from "./http-transport";
 import { isSealedString, openSealedJson, sealJson } from "./seal";
+
+export { setHttpTransport, type HttpTransport } from "./http-transport";
 
 /** Marker object for AES-GCM sealed payloads (post-pairing encryption default). */
 export const SEALED_PAYLOAD_KEY = "__lyra_sealed" as const;
@@ -75,7 +78,8 @@ async function postJson<T = unknown>(
   init?: { headers?: Record<string, string>; signal?: AbortSignal },
 ): Promise<{ ok: true; data: T; status: number } | { ok: false; error: string; status: number }> {
   try {
-    const res = await fetch(url, {
+    const http = getHttpTransport();
+    const res = await http(url, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -103,7 +107,7 @@ async function postJson<T = unknown>(
   } catch (e) {
     return {
       ok: false,
-      error: e instanceof Error ? e.message : String(e),
+      error: formatNetworkError(e),
       status: 0,
     };
   }
@@ -114,7 +118,8 @@ async function getJson<T = unknown>(
   init?: { signal?: AbortSignal },
 ): Promise<{ ok: true; data: T; status: number } | { ok: false; error: string; status: number }> {
   try {
-    const res = await fetch(url, {
+    const http = getHttpTransport();
+    const res = await http(url, {
       method: "GET",
       headers: { accept: "application/json" },
       signal: init?.signal,
@@ -133,10 +138,30 @@ async function getJson<T = unknown>(
   } catch (e) {
     return {
       ok: false,
-      error: e instanceof Error ? e.message : String(e),
+      error: formatNetworkError(e),
       status: 0,
     };
   }
+}
+
+/** Human-readable network errors (Android CLEARTEXT, offline, TLS, etc.). */
+export function formatNetworkError(e: unknown): string {
+  const raw = e instanceof Error ? e.message : String(e);
+  const name = e instanceof Error ? e.name : "";
+  if (/CLEARTEXT|cleartext|UnknownServiceException/i.test(raw)) {
+    return (
+      "Cleartext HTTP blocked by the OS network policy. " +
+      "Use a rebuild with usesCleartextTraffic (LAN/Tailscale peers speak HTTP). " +
+      `Detail: ${raw}`
+    );
+  }
+  if (name === "AbortError" || /aborted|AbortError/i.test(raw)) {
+    return "Timed out reaching peer — check Wi‑Fi/Tailscale address and that its peer server is running.";
+  }
+  if (/Network request failed|Failed to fetch|ECONNREFUSED|timed out|Timeout/i.test(raw)) {
+    return `${raw} — check that the peer is online, same Wi‑Fi/Tailscale, and its peer server is running.`;
+  }
+  return raw;
 }
 
 export type PeerPairingOffer = {
@@ -212,20 +237,27 @@ export async function sendEnvelope(
     signal: opts?.signal,
   });
   if (!res.ok) return { ok: false, error: res.error };
-  if (res.data && typeof res.data === "object" && res.data !== null && "type" in res.data) {
-    const parsed = parseEnvelope(res.data);
-    if (!parsed.ok) return { ok: true };
-    let env = parsed.envelope;
-    // Open sealed replies when we have the secret
-    if (opts?.sealSecret && isSealedPayload(env.payload)) {
-      try {
-        const opened = await openEnvelopePayload(opts.sealSecret, env.payload);
-        env = { ...env, payload: opened };
-      } catch {
-        // leave sealed if open fails
-      }
+  if (res.data && typeof res.data === "object" && res.data !== null) {
+    const data = res.data as Record<string, unknown>;
+    // Application-level failures (HTTP 200 with { ok: false, error })
+    if (data.ok === false && typeof data.error === "string") {
+      return { ok: false, error: data.error };
     }
-    return { ok: true, envelope: env };
+    if ("type" in data) {
+      const parsed = parseEnvelope(res.data);
+      if (!parsed.ok) return { ok: false, error: parsed.error || "Invalid envelope reply" };
+      let env = parsed.envelope;
+      // Open sealed replies when we have the secret
+      if (opts?.sealSecret && isSealedPayload(env.payload)) {
+        try {
+          const opened = await openEnvelopePayload(opts.sealSecret, env.payload);
+          env = { ...env, payload: opened };
+        } catch {
+          // leave sealed if open fails
+        }
+      }
+      return { ok: true, envelope: env };
+    }
   }
   return { ok: true };
 }
@@ -384,6 +416,115 @@ export async function openUrlOnPeer(input: {
   return { ok: true, opened: payload?.opened };
 }
 
+/** Request screen share from a peer (viewer → source). */
+export async function requestScreenShare(input: {
+  endpoint: PeerUrl;
+  sessionToken: string;
+  fromDeviceId: string;
+  toDeviceId: string;
+  sessionId: string;
+  maxEdge?: number;
+  fps?: number;
+  quality?: number;
+  signal?: AbortSignal;
+  sealSecret?: string;
+}): Promise<
+  | {
+      ok: true;
+      accept: import("@lyra-sync-app/protocol").ScreenShareAcceptPayload;
+    }
+  | { ok: false; error: string }
+> {
+  const envelope = createEnvelope({
+    type: "screen_share_request",
+    fromDeviceId: input.fromDeviceId,
+    toDeviceId: input.toDeviceId,
+    payload: {
+      sessionId: input.sessionId,
+      maxEdge: input.maxEdge ?? 720,
+      fps: input.fps ?? 12,
+      quality: input.quality ?? 0.72,
+    },
+  });
+  const res = await sendEnvelope(input.endpoint, envelope, {
+    sessionToken: input.sessionToken,
+    signal: input.signal,
+    sealSecret: input.sealSecret,
+  });
+  if (!res.ok) return { ok: false, error: res.error };
+  const env = res.envelope;
+  if (!env) return { ok: false, error: "No response" };
+  if (env.type === "screen_share_reject") {
+    const reason =
+      (env.payload as { reason?: string } | undefined)?.reason ?? "rejected";
+    return { ok: false, error: reason };
+  }
+  if (env.type !== "screen_share_accept") {
+    return { ok: false, error: `Unexpected response: ${env.type}` };
+  }
+  return {
+    ok: true,
+    accept: env.payload as import("@lyra-sync-app/protocol").ScreenShareAcceptPayload,
+  };
+}
+
+export async function stopScreenShare(input: {
+  endpoint: PeerUrl;
+  sessionToken: string;
+  fromDeviceId: string;
+  toDeviceId: string;
+  sessionId: string;
+  reason?: string;
+  signal?: AbortSignal;
+  sealSecret?: string;
+}): Promise<{ ok: true } | { ok: false; error: string }> {
+  const envelope = createEnvelope({
+    type: "screen_share_stop",
+    fromDeviceId: input.fromDeviceId,
+    toDeviceId: input.toDeviceId,
+    payload: { sessionId: input.sessionId, reason: input.reason },
+  });
+  const res = await sendEnvelope(input.endpoint, envelope, {
+    sessionToken: input.sessionToken,
+    signal: input.signal,
+    sealSecret: input.sealSecret,
+  });
+  if (!res.ok) return { ok: false, error: res.error };
+  return { ok: true };
+}
+
+export async function sendScreenFrame(input: {
+  endpoint: PeerUrl;
+  sessionToken: string;
+  fromDeviceId: string;
+  toDeviceId: string;
+  frame: {
+    sessionId: string;
+    seq: number;
+    width: number;
+    height: number;
+    mimeType: "image/jpeg" | "image/webp" | "image/png";
+    dataBase64: string;
+    capturedAt: number;
+  };
+  signal?: AbortSignal;
+  sealSecret?: string;
+}): Promise<{ ok: true } | { ok: false; error: string }> {
+  const envelope = createEnvelope({
+    type: "screen_frame",
+    fromDeviceId: input.fromDeviceId,
+    toDeviceId: input.toDeviceId,
+    payload: input.frame,
+  });
+  const res = await sendEnvelope(input.endpoint, envelope, {
+    sessionToken: input.sessionToken,
+    signal: input.signal,
+    sealSecret: input.sealSecret,
+  });
+  if (!res.ok) return { ok: false, error: res.error };
+  return { ok: true };
+}
+
 /** List remote filesystem via peer. */
 export async function listRemoteFs(input: {
   endpoint: PeerUrl;
@@ -512,21 +653,53 @@ export async function getOrCreatePeerSession(input: {
   if (cached && cached.expiresAt > Date.now() + 30_000) {
     return { ok: true, sessionToken: cached.token };
   }
-  const auth = await authenticateWithPeer({
-    endpoint: input.endpoint,
-    identity: input.identity,
-    privateKey: input.privateKey,
-    sharedSecret: input.sharedSecret,
-    signal: input.signal,
-  });
-  if (!auth.ok) return auth;
-  sessionCache.set(key, {
-    token: auth.sessionToken,
-    expiresAt: Date.now() + 50 * 60_000,
-  });
-  return { ok: true, sessionToken: auth.sessionToken };
+  // Bound handshake; probe-first ensureSession already filtered dead hosts,
+  // so allow a bit longer for Tailscale RTT + crypto.
+  let signal = input.signal;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  if (!signal) {
+    const controller = new AbortController();
+    timer = setTimeout(() => controller.abort(), 6_000);
+    signal = controller.signal;
+  }
+  try {
+    const auth = await authenticateWithPeer({
+      endpoint: input.endpoint,
+      identity: input.identity,
+      privateKey: input.privateKey,
+      sharedSecret: input.sharedSecret,
+      signal,
+    });
+    if (!auth.ok) {
+      // Drop any stale cached token for this key
+      sessionCache.delete(key);
+      return auth;
+    }
+    sessionCache.set(key, {
+      token: auth.sessionToken,
+      expiresAt: Date.now() + 50 * 60_000,
+    });
+    return { ok: true, sessionToken: auth.sessionToken };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 export function clearPeerSessionCache(): void {
   sessionCache.clear();
+}
+
+/** Drop cached sessions for one peer endpoint (e.g. after unpair / trust loss). */
+export function clearPeerSessionFor(
+  endpoint: PeerUrl,
+  peerDeviceId?: string,
+): void {
+  if (peerDeviceId) {
+    sessionCache.delete(peerSessionCacheKey(endpoint, peerDeviceId));
+    return;
+  }
+  const base = peerBaseUrl(endpoint);
+  for (const key of sessionCache.keys()) {
+    if (key.startsWith(`${base}::`)) sessionCache.delete(key);
+  }
 }

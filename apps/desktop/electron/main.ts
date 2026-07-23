@@ -5,11 +5,14 @@
 import {
   app,
   BrowserWindow,
+  clipboard,
+  desktopCapturer,
   dialog,
   ipcMain,
   Menu,
   nativeImage,
   safeStorage,
+  session,
   shell,
   type NativeImage,
 } from "electron";
@@ -28,18 +31,6 @@ if (
   app.commandLine.appendSwitch("disable-setuid-sandbox");
 }
 
-// package.json name is the monorepo filter ("desktop"); show "Lyra" in the OS
-// taskbar / dock / about menu instead.
-app.setName("Lyra");
-if (process.platform === "win32") {
-  app.setAppUserModelId("app.lyra.desktop");
-}
-// Chromium on Linux looks up Icon= from the .desktop file named by CHROME_DESKTOP
-// (must match StartupWMClass / our lyra.desktop entry).
-if (process.platform === "linux") {
-  process.env.CHROME_DESKTOP = "lyra.desktop";
-}
-
 import { createDeviceIdentity, hashPairingCode } from "@lyra-sync-app/core";
 import {
   deleteOsPath,
@@ -53,11 +44,97 @@ import {
 } from "@lyra-sync-app/net/node";
 import type { DeviceIdentity } from "@lyra-sync-app/protocol";
 import { LYRA_DEFAULT_PORT } from "@lyra-sync-app/protocol";
+import { spawn, type ChildProcess } from "node:child_process";
+import { accessSync, constants as fsConstants } from "node:fs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+/** App variants — side-by-side Dev / Preview / Prod (see scripts/variant.ts). */
+type DesktopVariant = "development" | "preview" | "production";
+
+function resolveVariant(): DesktopVariant {
+  const v = (process.env.LYRA_VARIANT ?? process.env.APP_VARIANT ?? "production")
+    .toLowerCase()
+    .trim();
+  if (v === "development" || v === "dev") return "development";
+  if (v === "preview" || v === "pre") return "preview";
+  return "production";
+}
+
+function variantAppName(v: DesktopVariant): string {
+  if (v === "development") return "Lyra Dev";
+  if (v === "preview") return "Lyra Preview";
+  return "Lyra";
+}
+
+function variantAppId(v: DesktopVariant): string {
+  if (v === "development") return "app.lyra.desktop.dev";
+  if (v === "preview") return "app.lyra.desktop.preview";
+  return "app.lyra.desktop";
+}
+
+function variantUserDataDir(v: DesktopVariant): string {
+  if (v === "development") return "lyra-desktop-dev";
+  if (v === "preview") return "lyra-desktop-preview";
+  return "lyra-desktop";
+}
+
+function variantDefaultPort(v: DesktopVariant): number {
+  if (v === "development") return 53317;
+  if (v === "preview") return 53327;
+  return 53337;
+}
+
+function variantDeviceName(v: DesktopVariant): string {
+  if (v === "development") return "Lyra Desktop (Dev)";
+  if (v === "preview") return "Lyra Desktop (Preview)";
+  return "Lyra Desktop";
+}
+
+function variantDesktopMeta(v: DesktopVariant): {
+  fileName: string;
+  wmClass: string;
+  iconName: string;
+} {
+  if (v === "development") {
+    return { fileName: "lyra-dev.desktop", wmClass: "Lyra Dev", iconName: "lyra-dev" };
+  }
+  if (v === "preview") {
+    return {
+      fileName: "lyra-preview.desktop",
+      wmClass: "Lyra Preview",
+      iconName: "lyra-preview",
+    };
+  }
+  return { fileName: "lyra.desktop", wmClass: "Lyra", iconName: "lyra" };
+}
+
+const VARIANT = resolveVariant();
+const APP_DISPLAY_NAME = variantAppName(VARIANT);
+const APP_ID = variantAppId(VARIANT);
+const DESKTOP_META = variantDesktopMeta(VARIANT);
+
+// package.json name is the monorepo filter ("desktop"); show variant name in the OS
+// taskbar / dock / about menu instead. Must run before ready / single-instance lock.
+app.setName(APP_DISPLAY_NAME);
+try {
+  app.setPath("userData", path.join(app.getPath("appData"), variantUserDataDir(VARIANT)));
+} catch {
+  // very early startup — fall back to default userData
+}
+if (process.platform === "win32") {
+  app.setAppUserModelId(APP_ID);
+}
+// Chromium on Linux looks up Icon= from the .desktop file named by CHROME_DESKTOP
+// (must match StartupWMClass / our per-variant .desktop entry).
+if (process.platform === "linux") {
+  process.env.CHROME_DESKTOP = DESKTOP_META.fileName;
+}
+
 const WEB_DEV_URL = process.env.LYRA_WEB_URL ?? "http://localhost:3001";
-const PEER_PORT = Number(process.env.LYRA_PORT ?? LYRA_DEFAULT_PORT);
+const PEER_PORT = Number(
+  process.env.LYRA_PORT ?? variantDefaultPort(VARIANT) ?? LYRA_DEFAULT_PORT,
+);
 const USE_TLS = process.env.LYRA_TLS === "1" || process.env.LYRA_TLS === "true";
 
 type TrustedPeer = {
@@ -93,6 +170,135 @@ let pairingOffer: { codeHash: string; token: string; expiresAt: number } | null 
 /** User-selected download directory (empty = system Downloads) */
 let downloadDirectory: string | null = null;
 
+/** Active scrcpy processes keyed by Lyra device id (Sefirah-style). */
+const scrcpyProcesses = new Map<string, ChildProcess>();
+
+/** Dedicated mirror viewer windows keyed by device id. */
+const mirrorWindows = new Map<string, BrowserWindow>();
+
+/** Pending host decisions for screen_share_request (sessionId → resolve). */
+const pendingScreenShare = new Map<
+  string,
+  (decision: import("@lyra-sync-app/protocol").ScreenShareAcceptPayload | { reject: true; reason: string }) => void
+>();
+
+function broadcastToUi(channel: string, payload: unknown) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(channel, payload);
+  }
+  for (const win of mirrorWindows.values()) {
+    if (!win.isDestroyed()) win.webContents.send(channel, payload);
+  }
+}
+
+function resolveScrcpyBinary(preferred?: string): string | null {
+  const candidates = [
+    preferred,
+    process.env.LYRA_SCRCPY_PATH,
+    "scrcpy",
+    "/usr/bin/scrcpy",
+    "/usr/local/bin/scrcpy",
+    path.join(os.homedir(), "bin/scrcpy"),
+  ].filter(Boolean) as string[];
+  for (const c of candidates) {
+    if (c === "scrcpy") return c; // rely on PATH
+    try {
+      accessSync(c, fsConstants.X_OK);
+      return c;
+    } catch {
+      // try next
+    }
+  }
+  return "scrcpy";
+}
+
+function resolveAdbBinary(): string | null {
+  const candidates = [
+    process.env.LYRA_ADB_PATH,
+    process.env.ANDROID_HOME ? path.join(process.env.ANDROID_HOME, "platform-tools", "adb") : null,
+    process.env.ANDROID_SDK_ROOT
+      ? path.join(process.env.ANDROID_SDK_ROOT, "platform-tools", "adb")
+      : null,
+    "adb",
+    "/usr/bin/adb",
+    path.join(os.homedir(), "Android/Sdk/platform-tools/adb"),
+    path.join(os.homedir(), "Library/Android/sdk/platform-tools/adb"),
+  ].filter(Boolean) as string[];
+  for (const c of candidates) {
+    if (c === "adb") return c;
+    try {
+      accessSync(c, fsConstants.X_OK);
+      return c;
+    } catch {
+      // next
+    }
+  }
+  return "adb";
+}
+
+/**
+ * Wire getDisplayMedia for Chromium in Electron.
+ * Without setDisplayMediaRequestHandler, navigator.mediaDevices.getDisplayMedia fails.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function installDisplayCaptureHandlers(ses: any) {
+  // Trusted first-party shell — allow media/display/clipboard used by Lyra features.
+  ses.setPermissionCheckHandler((_wc: unknown, permission: string) => {
+    if (permission === "serial" || permission === "hid" || permission === "usb") {
+      return false;
+    }
+    return true;
+  });
+
+  ses.setPermissionRequestHandler(
+    (_wc: unknown, permission: string, callback: (granted: boolean) => void) => {
+      if (permission === "serial" || permission === "hid" || permission === "usb") {
+        callback(false);
+        return;
+      }
+      callback(true);
+    },
+  );
+
+  ses.setDisplayMediaRequestHandler(
+    async (
+      _request: unknown,
+      callback: (streams: {
+        video?: { id: string; name: string };
+        audio?: string;
+      }) => void,
+    ) => {
+      try {
+        const sources = await desktopCapturer.getSources({
+          types: ["screen", "window"],
+          thumbnailSize: { width: 320, height: 180 },
+          fetchWindowIcons: true,
+        });
+        if (!sources.length) {
+          console.warn("[lyra] desktopCapturer: no sources");
+          callback({});
+          return;
+        }
+        // Prefer a full screen; fall back to first window
+        const screenSrc =
+          sources.find((s: { id: string }) => s.id.startsWith("screen:")) ?? sources[0]!;
+        callback({
+          video: screenSrc,
+          ...(process.platform === "win32" ? { audio: "loopbackWithMute" } : {}),
+        });
+      } catch (e) {
+        console.warn(
+          "[lyra] setDisplayMediaRequestHandler failed",
+          e instanceof Error ? e.message : e,
+        );
+        callback({});
+      }
+    },
+    // macOS 15+ system picker when available
+    { useSystemPicker: true },
+  );
+}
+
 function resolveDownloadDir(): string {
   if (downloadDirectory && existsSync(downloadDirectory)) return downloadDirectory;
   try {
@@ -127,7 +333,7 @@ function broadcastStatus() {
 async function ensureIdentity() {
   if (identity && privateKey) return;
   const created = await createDeviceIdentity({
-    name: process.env.LYRA_NAME ?? "Lyra Desktop",
+    name: process.env.LYRA_NAME ?? variantDeviceName(VARIANT),
     platform:
       process.platform === "darwin"
         ? "macos"
@@ -196,120 +402,200 @@ async function startNetworking() {
   await ensureIdentity();
   if (!identity) return;
 
+  // Prefer LYRA_PORT, then fall back so two desktop instances / peer-server CLI
+  // on one machine don't permanently steal the default 53317 slot.
+  const portCandidates = [
+    PEER_PORT,
+    PEER_PORT + 2,
+    PEER_PORT + 4,
+    PEER_PORT + 10,
+    PEER_PORT + 20,
+    0, // ephemeral last resort
+  ];
+
   try {
-    peer = await startPeerServer({
-      identity,
-      port: PEER_PORT,
-      tls: USE_TLS,
-      // Prefer paired shared secrets; allow first-contact only when no trust map hit
-      allowFirstContactAuth: true,
-      resolvePeerAuth: ({ deviceId, fingerprint }) => {
-        const byId = trustedPeers.get(deviceId);
-        if (byId) {
-          return {
-            sharedSecret: byId.authSecret,
-            expectedFingerprint: byId.fingerprint,
-            expectedDeviceId: byId.deviceId,
-          };
-        }
-        for (const t of trustedPeers.values()) {
-          if (t.fingerprint === fingerprint) {
-            return {
-              sharedSecret: t.authSecret,
-              expectedFingerprint: t.fingerprint,
-              expectedDeviceId: t.deviceId,
-            };
-          }
-        }
-        // First contact allowed for pairing handshake
-        return {};
-      },
-      getPairingOffer: () => {
-        if (!pairingOffer || pairingOffer.expiresAt < Date.now()) return null;
-        return pairingOffer;
-      },
-      onEnvelope: async (envelope) => {
-        mainWindow?.webContents.send("lyra:envelope", {
-          type: envelope.type,
-          fromDeviceId: envelope.fromDeviceId,
-        });
-        return undefined;
-      },
-      handlers: {
-        onOpenUrl: (url) => {
-          void shell.openExternal(url);
-          return true;
-        },
-        onClipboardPush: (item) => {
-          mainWindow?.webContents.send("lyra:clipboard-push", item);
-        },
-        onPairRequest: (payload) => {
-          mainWindow?.webContents.send("lyra:pair-request", payload);
-        },
-        onUnpair: (deviceId) => {
-          trustedPeers.delete(deviceId);
-          mainWindow?.webContents.send("lyra:unpaired", { deviceId });
-        },
-        onFsList: async (fsPath) => {
-          try {
-            return await listOsFiles(fsPath);
-          } catch (e) {
-            console.warn("[fs_list]", e instanceof Error ? e.message : e);
-            return [];
-          }
-        },
-        onFsRead: (fsPath, offset, maxBytes) => readOsFileChunk(fsPath, offset, maxBytes),
-        onFsDelete: (fsPath) => deleteOsPath(fsPath),
-        onFsRename: (fsPath, newName) => renameOsPath(fsPath, newName),
-        onTransferComplete: async (state) => {
-          const destDir = resolveDownloadDir();
-          try {
-            mkdirSync(destDir, { recursive: true });
-          } catch {
-            // continue with best-effort write
-          }
-          const savedPaths: string[] = [];
-          try {
-            // Prefer disk-backed path; fall back to in-memory chunks
-            let blob: Buffer | null = null;
-            if (state.diskPath && existsSync(state.diskPath)) {
-              blob = await readFile(state.diskPath);
-            } else if (state.chunks?.length) {
-              blob = Buffer.concat(state.chunks.map((c) => Buffer.from(c)));
+    let lastListenError: unknown = null;
+    peer = null;
+    for (const tryPort of portCandidates) {
+      try {
+        peer = await startPeerServer({
+          identity,
+          port: tryPort,
+          tls: USE_TLS,
+          // Prefer paired shared secrets; allow first-contact only when no trust map hit
+          allowFirstContactAuth: true,
+          resolvePeerAuth: ({ deviceId, fingerprint }) => {
+            const byId = trustedPeers.get(deviceId);
+            if (byId) {
+              return {
+                sharedSecret: byId.authSecret,
+                expectedFingerprint: byId.fingerprint,
+                expectedDeviceId: byId.deviceId,
+              };
             }
-            if (blob && state.files.length > 0) {
-              let offset = 0;
-              for (const file of state.files) {
-                const size = Math.min(file.size, Math.max(0, blob.length - offset));
-                const safeName = path.basename(file.name).replace(/[^\w.\- ()[\]]+/g, "_") || "file";
-                let dest = path.join(destDir, safeName);
-                // Avoid overwrite: append counter
-                let n = 1;
-                while (existsSync(dest)) {
-                  const ext = path.extname(safeName);
-                  const base = path.basename(safeName, ext);
-                  dest = path.join(destDir, `${base} (${n})${ext}`);
-                  n++;
-                }
-                writeFileSync(dest, blob.subarray(offset, offset + size));
-                savedPaths.push(dest);
-                offset += size;
+            for (const t of trustedPeers.values()) {
+              if (t.fingerprint === fingerprint) {
+                return {
+                  sharedSecret: t.authSecret,
+                  expectedFingerprint: t.fingerprint,
+                  expectedDeviceId: t.deviceId,
+                };
               }
             }
-          } catch (e) {
-            console.warn("[transfer] save failed", e instanceof Error ? e.message : e);
-          }
-          mainWindow?.webContents.send("lyra:transfer-complete", {
-            transferId: state.transferId,
-            receivedBytes: state.receivedBytes,
-            files: state.files,
-            diskPath: state.diskPath,
-            savedPaths,
-            downloadDir: destDir,
-          });
-        },
-      },
-    });
+            // First contact allowed for pairing handshake
+            return {};
+          },
+          getPairingOffer: () => {
+            if (!pairingOffer || pairingOffer.expiresAt < Date.now()) return null;
+            return pairingOffer;
+          },
+          onEnvelope: async (envelope) => {
+            mainWindow?.webContents.send("lyra:envelope", {
+              type: envelope.type,
+              fromDeviceId: envelope.fromDeviceId,
+            });
+            return undefined;
+          },
+          handlers: {
+            onOpenUrl: (url) => {
+              void shell.openExternal(url);
+              return true;
+            },
+            onClipboardPush: (item) => {
+              if (item.type === "text" && item.text) {
+                try {
+                  clipboard.writeText(item.text);
+                } catch {
+                  // ignore write failures
+                }
+              }
+              mainWindow?.webContents.send("lyra:clipboard-push", item);
+            },
+            onPairRequest: (payload) => {
+              mainWindow?.webContents.send("lyra:pair-request", payload);
+            },
+            onUnpair: (deviceId) => {
+              trustedPeers.delete(deviceId);
+              mainWindow?.webContents.send("lyra:unpaired", { deviceId });
+            },
+            onFsList: async (fsPath) => {
+              try {
+                return await listOsFiles(fsPath);
+              } catch (e) {
+                console.warn("[fs_list]", e instanceof Error ? e.message : e);
+                return [];
+              }
+            },
+            onFsRead: (fsPath, offset, maxBytes) => readOsFileChunk(fsPath, offset, maxBytes),
+            onFsDelete: (fsPath) => deleteOsPath(fsPath),
+            onFsRename: (fsPath, newName) => renameOsPath(fsPath, newName),
+            // Ask the renderer to run getDisplayMedia + user consent, then stream frames.
+            onScreenShareRequest: (request, fromDeviceId) =>
+              new Promise((resolve) => {
+                const sessionId = request.sessionId;
+                // Replace any stale waiter for the same session
+                const prev = pendingScreenShare.get(sessionId);
+                if (prev) {
+                  prev({ reject: true, reason: "Superseded by a new request" });
+                }
+                pendingScreenShare.set(sessionId, resolve);
+                broadcastToUi("lyra:screen-share-request", {
+                  request,
+                  fromDeviceId,
+                });
+                // User must pick a screen within 90s
+                setTimeout(() => {
+                  if (!pendingScreenShare.has(sessionId)) return;
+                  pendingScreenShare.delete(sessionId);
+                  resolve({
+                    reject: true,
+                    reason: "Timed out waiting for screen share permission",
+                  });
+                }, 90_000);
+              }),
+            onScreenFrame: (frame, fromDeviceId) => {
+              broadcastToUi("lyra:screen-frame", { frame, fromDeviceId });
+            },
+            onScreenShareStop: (sessionId, fromDeviceId, reason) => {
+              broadcastToUi("lyra:screen-share-stop", {
+                sessionId,
+                fromDeviceId,
+                reason,
+              });
+            },
+            onTransferComplete: async (state) => {
+              const destDir = resolveDownloadDir();
+              try {
+                mkdirSync(destDir, { recursive: true });
+              } catch {
+                // continue with best-effort write
+              }
+              const savedPaths: string[] = [];
+              try {
+                // Prefer disk-backed path; fall back to in-memory chunks
+                let blob: Buffer | null = null;
+                if (state.diskPath && existsSync(state.diskPath)) {
+                  blob = await readFile(state.diskPath);
+                } else if (state.chunks?.length) {
+                  blob = Buffer.concat(state.chunks.map((c) => Buffer.from(c)));
+                }
+                if (blob && state.files.length > 0) {
+                  let offset = 0;
+                  for (const file of state.files) {
+                    const size = Math.min(file.size, Math.max(0, blob.length - offset));
+                    const safeName = path.basename(file.name).replace(/[^\w.\- ()[\]]+/g, "_") || "file";
+                    let dest = path.join(destDir, safeName);
+                    // Avoid overwrite: append counter
+                    let n = 1;
+                    while (existsSync(dest)) {
+                      const ext = path.extname(safeName);
+                      const base = path.basename(safeName, ext);
+                      dest = path.join(destDir, `${base} (${n})${ext}`);
+                      n++;
+                    }
+                    writeFileSync(dest, blob.subarray(offset, offset + size));
+                    savedPaths.push(dest);
+                    offset += size;
+                  }
+                }
+              } catch (e) {
+                console.warn("[transfer] save failed", e instanceof Error ? e.message : e);
+              }
+              mainWindow?.webContents.send("lyra:transfer-complete", {
+                transferId: state.transferId,
+                receivedBytes: state.receivedBytes,
+                files: state.files,
+                diskPath: state.diskPath,
+                savedPaths,
+                downloadDir: destDir,
+              });
+            },
+          },
+        });
+        if (tryPort !== PEER_PORT && tryPort !== 0) {
+          console.warn(
+            `[lyra] preferred port ${PEER_PORT} busy — listening on ${peer.port} instead (set LYRA_PORT to pin)`,
+          );
+        } else if (tryPort === 0) {
+          console.warn(`[lyra] using ephemeral peer port ${peer.port}`);
+        }
+        lastListenError = null;
+        break;
+      } catch (e) {
+        lastListenError = e;
+        const msg = e instanceof Error ? e.message : String(e);
+        if (/EADDRINUSE|address already in use/i.test(msg)) {
+          console.warn(`[lyra] port ${tryPort} in use, trying next…`);
+          continue;
+        }
+        throw e;
+      }
+    }
+    if (!peer) {
+      throw lastListenError instanceof Error
+        ? lastListenError
+        : new Error(`Could not bind peer port (tried ${portCandidates.join(", ")})`);
+    }
 
     status.running = true;
     status.port = peer.port;
@@ -435,11 +721,11 @@ function installLinuxDesktopIntegration(iconPath: string | undefined) {
     mkdirSync(iconDir, { recursive: true });
     mkdirSync(appDir, { recursive: true });
 
-    const destIcon = path.join(iconDir, "lyra.png");
+    const destIcon = path.join(iconDir, `${DESKTOP_META.iconName}.png`);
     copyFileSync(iconPath, destIcon);
 
-    // Gearlever stores a flat path icon — overwrite so WM_CLASS=Lyra picks rounded art.
-    const gearleverIcon = path.join(home, "AppImages", ".icons", "lyra");
+    // Gearlever stores a flat path icon — overwrite so WM_CLASS picks rounded art.
+    const gearleverIcon = path.join(home, "AppImages", ".icons", DESKTOP_META.iconName);
     try {
       mkdirSync(path.dirname(gearleverIcon), { recursive: true });
       copyFileSync(iconPath, gearleverIcon);
@@ -451,7 +737,11 @@ function installLinuxDesktopIntegration(iconPath: string | undefined) {
       ? process.env.APPIMAGE || process.execPath
       : process.execPath;
     // Prefer existing Gearlever AppImage if present for the launcher entry.
-    const appImageGuess = path.join(home, "AppImages", "lyra.appimage");
+    const appImageGuess = path.join(
+      home,
+      "AppImages",
+      VARIANT === "production" ? "lyra.appimage" : `lyra-${variantSlug()}.appimage`,
+    );
     const launchExec = existsSync(appImageGuess)
       ? `env DESKTOPINTEGRATION=1 "${appImageGuess}" --no-sandbox %U`
       : app.isPackaged
@@ -460,21 +750,27 @@ function installLinuxDesktopIntegration(iconPath: string | undefined) {
 
     const desktop = `[Desktop Entry]
 Type=Application
-Name=Lyra
+Name=${APP_DISPLAY_NAME}
 Comment=Privacy-first device network — clipboard, files, and remote browse
-Icon=lyra
+Icon=${DESKTOP_META.iconName}
 Exec=${launchExec}
 Terminal=false
 Categories=Network;
-StartupWMClass=Lyra
+StartupWMClass=${DESKTOP_META.wmClass}
 StartupNotify=true
 `;
-    writeFileSync(path.join(appDir, "lyra.desktop"), desktop, "utf8");
-    process.env.CHROME_DESKTOP = "lyra.desktop";
-    console.log("[lyra] installed Linux desktop icon →", destIcon);
+    writeFileSync(path.join(appDir, DESKTOP_META.fileName), desktop, "utf8");
+    process.env.CHROME_DESKTOP = DESKTOP_META.fileName;
+    console.log("[lyra] installed Linux desktop icon →", destIcon, `(${APP_DISPLAY_NAME})`);
   } catch (err) {
     console.warn("[lyra] Linux desktop integration failed", err);
   }
+}
+
+function variantSlug(): string {
+  if (VARIANT === "development") return "dev";
+  if (VARIANT === "preview") return "preview";
+  return "prod";
 }
 
 function installApplicationMenu() {
@@ -554,12 +850,21 @@ function createWindow() {
     },
   });
 
+  // Enable getDisplayMedia (screen / window share) for this session
+  installDisplayCaptureHandlers(mainWindow.webContents.session);
+  // Also set on defaultSession so early navigations share the same policy
+  try {
+    installDisplayCaptureHandlers(session.defaultSession);
+  } catch {
+    // ignore
+  }
+
   // Keep a short title if any WM still surfaces it
-  mainWindow.setTitle("Lyra");
+  mainWindow.setTitle(APP_DISPLAY_NAME);
   applyWindowIcon(mainWindow, appIcon);
   mainWindow.webContents.on("page-title-updated", (e) => {
     e.preventDefault();
-    mainWindow?.setTitle("Lyra");
+    mainWindow?.setTitle(APP_DISPLAY_NAME);
   });
   // Dev loads the Vite UI — Chromium swaps the taskbar icon to the page favicon
   // (square logo.png). Force our rounded app icon back on every favicon update.
@@ -635,8 +940,10 @@ function createWindow() {
 }
 
 // Allow two Electron windows on one PC for local pairing tests:
-//   LYRA_ALLOW_MULTI=1 LYRA_INSTANCE=a LYRA_PORT=53317 pnpm run dev:desktop
-//   LYRA_ALLOW_MULTI=1 LYRA_INSTANCE=b LYRA_PORT=53319 pnpm run dev:desktop
+//   LYRA_ALLOW_MULTI=1 LYRA_INSTANCE=a LYRA_PORT=53317 pnpm run dev:pair-a
+//   LYRA_ALLOW_MULTI=1 LYRA_INSTANCE=b LYRA_PORT=53319 pnpm run dev:pair-b
+// Variants (dev/preview/prod) already isolate userData + ports, so they can
+// run side-by-side without LYRA_ALLOW_MULTI.
 const allowMulti =
   process.env.LYRA_ALLOW_MULTI === "1" || process.env.LYRA_ALLOW_MULTI === "true";
 const instanceId = (process.env.LYRA_INSTANCE ?? "").trim();
@@ -647,6 +954,7 @@ if (instanceId) {
   app.setPath("userData", path.join(base, `instance-${instanceId}`));
 }
 
+// Single-instance lock is per userData path → each variant gets its own lock.
 const gotLock = allowMulti ? true : app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
@@ -663,9 +971,12 @@ if (!gotLock) {
 }
 
 app.whenReady().then(async () => {
+  console.log(
+    `[lyra] ${APP_DISPLAY_NAME} · variant=${VARIANT} · port=${PEER_PORT} · userData=${app.getPath("userData")}`,
+  );
   if (allowMulti || instanceId) {
     console.log(
-      `[lyra] multi-instance mode instance=${instanceId || "default"} port=${PEER_PORT} name=${process.env.LYRA_NAME ?? "Lyra Desktop"}`,
+      `[lyra] multi-instance mode instance=${instanceId || "default"} name=${process.env.LYRA_NAME ?? variantDeviceName(VARIANT)}`,
     );
   }
 
@@ -902,8 +1213,397 @@ app.whenReady().then(async () => {
     if (!ts.ok) return { ok: false as const, error: ts.error, peers: [] };
     const peers = tailscalePeersToProbeTargets(ts.peers, peer?.port ?? PEER_PORT);
     mainWindow?.webContents.send("lyra:tailscale-peers", peers);
-    return { ok: true as const, peers, backendState: ts.backendState };
+    return {
+      ok: true as const,
+      peers,
+      backendState: ts.backendState,
+      self: ts.self
+        ? { host: ts.self.host, tailscaleIp: ts.self.tailscaleIp }
+        : undefined,
+    };
   });
+
+  ipcMain.handle(
+    "lyra:start-scrcpy",
+    async (
+      _e,
+      opts: {
+        deviceId: string;
+        serial?: string;
+        scrcpyPath?: string;
+        extraArgs?: string;
+      },
+    ) => {
+      const deviceId = opts?.deviceId;
+      if (!deviceId) return { ok: false as const, error: "deviceId required" };
+
+      // Stop previous process for this device
+      const prev = scrcpyProcesses.get(deviceId);
+      if (prev && !prev.killed) {
+        try {
+          prev.kill("SIGTERM");
+        } catch {
+          // ignore
+        }
+        scrcpyProcesses.delete(deviceId);
+      }
+
+      const bin = resolveScrcpyBinary(opts.scrcpyPath);
+      if (!bin) {
+        return {
+          ok: false as const,
+          error: "scrcpy not found — install scrcpy or set path in Settings",
+        };
+      }
+
+      const args: string[] = [];
+      if (opts.serial) {
+        // Wireless / Tailscale: --tcpip=HOST:PORT or -s SERIAL
+        if (opts.serial.includes(".") || opts.serial.includes(":")) {
+          args.push(`--tcpip=${opts.serial}`);
+        } else {
+          args.push("-s", opts.serial);
+        }
+      }
+      // Separate scrcpy window sized like a phone, stay-awake, decent quality
+      args.push(
+        "--window-title=Lyra Mirror",
+        "--max-size=1024",
+        "--video-bit-rate=8M",
+        "--window-width=400",
+        "--window-height=860",
+        "--stay-awake",
+      );
+      if (opts.extraArgs?.trim()) {
+        args.push(...opts.extraArgs.trim().split(/\s+/).filter(Boolean));
+      }
+
+      try {
+        const child = spawn(bin, args, {
+          detached: false,
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        scrcpyProcesses.set(deviceId, child);
+        let stderr = "";
+        child.stderr?.on("data", (chunk: Buffer) => {
+          stderr += chunk.toString("utf8");
+          if (stderr.length > 4000) stderr = stderr.slice(-2000);
+        });
+        child.on("exit", (code) => {
+          scrcpyProcesses.delete(deviceId);
+          mainWindow?.webContents.send("lyra:scrcpy-exit", {
+            deviceId,
+            code,
+            stderr: stderr.slice(0, 500),
+          });
+        });
+        // Give it a moment to fail fast if binary missing
+        await new Promise((r) => setTimeout(r, 400));
+        if (child.exitCode != null && child.exitCode !== 0) {
+          scrcpyProcesses.delete(deviceId);
+          return {
+            ok: false as const,
+            error: stderr.trim() || `scrcpy exited with code ${child.exitCode}`,
+          };
+        }
+        console.log("[lyra] scrcpy started", bin, args.join(" "), "pid", child.pid);
+        return { ok: true as const, pid: child.pid };
+      } catch (e) {
+        return {
+          ok: false as const,
+          error: e instanceof Error ? e.message : "Failed to start scrcpy",
+        };
+      }
+    },
+  );
+
+  ipcMain.handle("lyra:stop-scrcpy", (_e, deviceId: string) => {
+    const child = scrcpyProcesses.get(deviceId);
+    if (child && !child.killed) {
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        // ignore
+      }
+    }
+    scrcpyProcesses.delete(deviceId);
+    return { ok: true as const };
+  });
+
+  ipcMain.handle(
+    "lyra:check-adb",
+    async (_e, opts?: { serial?: string }) => {
+      const adb = resolveAdbBinary();
+      const scrcpy = resolveScrcpyBinary();
+      const { execFile } = await import("node:child_process");
+      const { promisify } = await import("node:util");
+      const execFileAsync = promisify(execFile);
+      try {
+        const { stdout } = await execFileAsync(adb, ["devices"], {
+          timeout: 4000,
+          env: process.env,
+        });
+        const devices = stdout
+          .split("\n")
+          .slice(1)
+          .map((l) => l.trim())
+          .filter((l) => l && !l.startsWith("*"))
+          .map((l) => l.split(/\s+/)[0]!)
+          .filter(Boolean);
+        const serial = opts?.serial?.trim();
+        if (serial) {
+          const match = devices.some(
+            (d) => d === serial || d.startsWith(serial.split(":")[0]!),
+          );
+          if (!match) {
+            return {
+              ok: false as const,
+              adbPath: adb,
+              scrcpyPath: scrcpy,
+              devices,
+              error: `Device not in adb devices (wanted ${serial})`,
+              hint: "Enable Wireless debugging, then: adb connect HOST:PORT (or adb tcpip 5555 over USB once)",
+            };
+          }
+        }
+        if (devices.length === 0) {
+          return {
+            ok: false as const,
+            adbPath: adb,
+            scrcpyPath: scrcpy,
+            devices,
+            error: "No ADB devices connected",
+            hint: "USB: plug in + allow debugging. Wireless: adb connect 100.x.x.x:PORT over Tailscale",
+          };
+        }
+        return {
+          ok: true as const,
+          adbPath: adb,
+          scrcpyPath: scrcpy,
+          devices,
+        };
+      } catch (e) {
+        return {
+          ok: false as const,
+          adbPath: adb,
+          scrcpyPath: scrcpy,
+          devices: [] as string[],
+          error: e instanceof Error ? e.message : "adb failed",
+          hint: "Install Android platform-tools and ensure adb is on PATH",
+        };
+      }
+    },
+  );
+
+  ipcMain.handle(
+    "lyra:open-mirror-window",
+    async (
+      _e,
+      opts: {
+        deviceId: string;
+        title: string;
+        url: string;
+        width: number;
+        height: number;
+        minWidth?: number;
+        minHeight?: number;
+        aspectRatio?: number;
+        isPhone?: boolean;
+        resizable?: boolean;
+        backgroundColor?: string;
+      },
+    ) => {
+      const deviceId = opts?.deviceId;
+      if (!deviceId || !opts?.url) {
+        return { ok: false as const, error: "deviceId and url required" };
+      }
+
+      const width = Math.round(opts.width || 400);
+      const height = Math.round(opts.height || 800);
+
+      const existing = mirrorWindows.get(deviceId);
+      if (existing && !existing.isDestroyed()) {
+        // Refit + focus — same device opened again
+        try {
+          existing.setSize(width, height, true);
+          if (typeof opts.aspectRatio === "number" && opts.aspectRatio > 0) {
+            existing.setAspectRatio(opts.aspectRatio);
+          }
+        } catch {
+          // ignore
+        }
+        existing.focus();
+        existing.show();
+        return { ok: true as const };
+      }
+
+      const isMac = process.platform === "darwin";
+      const appIcon = loadAppIconImage();
+      const bg = opts.backgroundColor ?? "#1c1c1e";
+
+      // Xcode Simulator–like: compact window, no maximize affordance for phones
+      const win = new BrowserWindow({
+        width,
+        height,
+        minWidth: opts.minWidth ?? (opts.isPhone ? 240 : 400),
+        minHeight: opts.minHeight ?? (opts.isPhone ? 400 : 280),
+        maxWidth: opts.isPhone ? 900 : undefined,
+        maxHeight: opts.isPhone ? 1600 : undefined,
+        title: opts.title || "Lyra Mirror",
+        show: false,
+        backgroundColor: bg,
+        autoHideMenuBar: true,
+        resizable: opts.resizable !== false,
+        maximizable: !opts.isPhone,
+        fullscreenable: false,
+        ...(appIcon ? { icon: appIcon } : {}),
+        ...(isMac
+          ? {
+              frame: true,
+              titleBarStyle: "hiddenInset" as const,
+              trafficLightPosition: { x: 12, y: 10 },
+            }
+          : { frame: false }),
+        webPreferences: {
+          preload: path.join(__dirname, "preload.cjs"),
+          contextIsolation: true,
+          nodeIntegration: false,
+          sandbox: true,
+          partition: undefined,
+        },
+      });
+
+      installDisplayCaptureHandlers(win.webContents.session);
+      applyWindowIcon(win, appIcon);
+      if (typeof opts.aspectRatio === "number" && opts.aspectRatio > 0) {
+        try {
+          // Lock resize to device shell aspect (phone silhouette)
+          win.setAspectRatio(opts.aspectRatio);
+        } catch {
+          // not supported on all platforms
+        }
+      }
+
+      win.once("ready-to-show", () => {
+        win.show();
+        win.focus();
+      });
+      win.on("closed", () => {
+        mirrorWindows.delete(deviceId);
+      });
+
+      const isDev = !app.isPackaged;
+      try {
+        if (isDev) {
+          await win.loadURL(opts.url);
+        } else if (opts.url.startsWith("http://") || opts.url.startsWith("https://")) {
+          await win.loadURL(opts.url);
+        } else {
+          const indexHtml = resolvePackagedWebIndex();
+          if (!indexHtml) {
+            return { ok: false as const, error: "Packaged UI missing" };
+          }
+          const hash = opts.url.includes("#")
+            ? opts.url.slice(opts.url.indexOf("#") + 1)
+            : `/mirror/${deviceId}`;
+          await win.loadFile(indexHtml, {
+            hash: hash.startsWith("/") ? hash : `/${hash}`,
+          });
+        }
+      } catch (e) {
+        win.destroy();
+        return {
+          ok: false as const,
+          error: e instanceof Error ? e.message : "Failed to load mirror window",
+        };
+      }
+
+      mirrorWindows.set(deviceId, win);
+      return { ok: true as const };
+    },
+  );
+
+  ipcMain.handle(
+    "lyra:resize-mirror-window",
+    (
+      _e,
+      opts: {
+        deviceId: string;
+        width: number;
+        height: number;
+        aspectRatio?: number;
+      },
+    ) => {
+      const win = mirrorWindows.get(opts?.deviceId);
+      if (!win || win.isDestroyed()) {
+        return { ok: false as const, error: "No mirror window" };
+      }
+      const width = Math.round(opts.width);
+      const height = Math.round(opts.height);
+      if (width < 100 || height < 100) {
+        return { ok: false as const, error: "Invalid size" };
+      }
+      try {
+        if (typeof opts.aspectRatio === "number" && opts.aspectRatio > 0) {
+          win.setAspectRatio(opts.aspectRatio);
+        }
+        // Animate size change slightly so scale steps feel intentional
+        win.setSize(width, height, true);
+        return { ok: true as const };
+      } catch (e) {
+        return {
+          ok: false as const,
+          error: e instanceof Error ? e.message : "resize failed",
+        };
+      }
+    },
+  );
+
+  ipcMain.handle("lyra:close-mirror-window", (_e, deviceId: string) => {
+    const win = mirrorWindows.get(deviceId);
+    if (win && !win.isDestroyed()) {
+      win.close();
+    }
+    mirrorWindows.delete(deviceId);
+    return { ok: true as const };
+  });
+
+  ipcMain.handle(
+    "lyra:screen-share-decision",
+    (
+      _e,
+      payload: {
+        sessionId: string;
+        accepted: boolean;
+        reason?: string;
+        width?: number;
+        height?: number;
+        fps?: number;
+        mode?: "p2p" | "demo" | "scrcpy" | "unavailable";
+        mimeType?: "image/jpeg" | "image/webp" | "image/png";
+      },
+    ) => {
+      const resolve = pendingScreenShare.get(payload.sessionId);
+      if (!resolve) return { ok: false as const, error: "No pending request" };
+      pendingScreenShare.delete(payload.sessionId);
+      if (payload.accepted) {
+        resolve({
+          sessionId: payload.sessionId,
+          width: payload.width ?? 720,
+          height: payload.height ?? 405,
+          fps: payload.fps ?? 12,
+          mode: payload.mode ?? "p2p",
+          mimeType: payload.mimeType ?? "image/jpeg",
+        });
+      } else {
+        resolve({
+          reject: true,
+          reason: payload.reason ?? "User declined",
+        });
+      }
+      return { ok: true as const };
+    },
+  );
 
   /** LocalSend-style: fire UDP multicast announce burst (user Refresh discovery). */
   ipcMain.handle("lyra:announce-discovery", () => {
@@ -933,5 +1633,21 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
+  for (const child of scrcpyProcesses.values()) {
+    try {
+      child.kill("SIGTERM");
+    } catch {
+      // ignore
+    }
+  }
+  scrcpyProcesses.clear();
+  for (const win of mirrorWindows.values()) {
+    try {
+      if (!win.isDestroyed()) win.destroy();
+    } catch {
+      // ignore
+    }
+  }
+  mirrorWindows.clear();
   void stopNetworking();
 });

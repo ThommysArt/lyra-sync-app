@@ -1,7 +1,7 @@
 import { LyraProvider as BaseLyraProvider, useLyraSelector, useLyraState, useLyraStore } from "@lyra-sync-app/hooks";
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ActivityIndicator, View } from "react-native";
+import { ActivityIndicator, Platform, View } from "react-native";
 import * as Network from "expo-network";
 
 import { ACCENT, PAGE_BG } from "@/lib/constants";
@@ -10,6 +10,13 @@ import {
   createSecureLyraStorage,
   migratePrivateKeyToSecureStore,
 } from "@/lib/secure-storage";
+import {
+  attachNativePeerToStore,
+  isExpoGoRuntime,
+  startNativePeerServer,
+  type NativePeerHandle,
+} from "@/lib/peer-server";
+import { installNativePeerHttpTransport } from "@/lib/tcp-http-client";
 
 export { useLyraSelector, useLyraState, useLyraStore };
 
@@ -17,6 +24,11 @@ export function LyraProvider({ children }: { children: ReactNode }) {
   const { isDark } = useAppTheme();
   const storage = useMemo(() => createSecureLyraStorage(), []);
   const [storageReady, setStorageReady] = useState(false);
+
+  // Peer ops use TCP sockets (not RN fetch) for reliable cleartext POST on LAN/Tailscale
+  useEffect(() => {
+    return installNativePeerHttpTransport();
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -34,15 +46,220 @@ export function LyraProvider({ children }: { children: ReactNode }) {
     };
   }, [storage]);
 
-  /** Seed /24 LAN scan for pairing-code lookup when possible */
+  /**
+   * Seed /24 LAN scan for pairing-code lookup, then start this device's peer
+   * HTTP server so other peers (desktop) can reach the phone.
+   */
   const onStoreReady = useCallback((store: import("@lyra-sync-app/core").LyraStore) => {
-    void Network.getIpAddressAsync()
-      .then((ip) => {
-        if (ip && ip !== "0.0.0.0") store.setLocalLanHint(ip);
-      })
-      .catch(() => {
-        // ignore — pairing still works with manual/discovered hosts
-      });
+    let cancelled = false;
+    let detachPeer: (() => void) | null = null;
+    let peerHandle: NativePeerHandle | null = null;
+
+    // Recheck mutual trust shortly after startup (detect remote unpair)
+    const trustTimer = setTimeout(() => {
+      if (!cancelled) void store.recheckPairedTrust();
+    }, 2000);
+
+    const refreshLocalIp = () =>
+      Network.getIpAddressAsync()
+        .then((ip) => {
+          if (ip && ip !== "0.0.0.0" && ip !== "127.0.0.1") {
+            store.setLocalLanHint(ip);
+          }
+        })
+        .catch(() => {
+          // ignore — pairing still works with manual/discovered hosts
+        });
+    void refreshLocalIp();
+    // Re-check IP when network changes (Wi‑Fi ↔ Tailscale)
+    const netSub = Network.addNetworkStateListener?.(() => {
+      void refreshLocalIp();
+    });
+
+    const startPeer = async () => {
+      // Wait for identity hydrate
+      const waitIdentity = async () => {
+        for (let i = 0; i < 40; i++) {
+          if (cancelled) return null;
+          const id = store.getState().identity;
+          if (id) return id;
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        return store.getState().identity;
+      };
+
+      const identity = await waitIdentity();
+      if (!identity || cancelled) return;
+
+      if (isExpoGoRuntime()) {
+        store.setPeerServerStatus({
+          running: false,
+          port: null,
+          url: null,
+          lanHost: store.getState().localLanHint,
+          discoveryActive: false,
+          lastError:
+            "Expo Go cannot host a peer server. Install a dev/preview build to pair as host and receive pushes.",
+        });
+        return;
+      }
+
+      // Expo web in browser — no TCP listen
+      if (Platform.OS === "web") {
+        store.setPeerServerStatus({
+          running: false,
+          port: null,
+          url: null,
+          lanHost: store.getState().localLanHint,
+          discoveryActive: false,
+          lastError: null,
+        });
+        return;
+      }
+
+      try {
+        const preferred = store.getState().settings.peerListenPort ?? 53317;
+        const peer = await startNativePeerServer({
+          identity,
+          port: preferred,
+          advertiseHost: store.getState().localLanHint,
+          resolvePeerAuth: ({ deviceId, fingerprint }) => {
+            const devices = store.getState().devices;
+            const byId = devices.find((d) => d.id === deviceId && d.authSecret);
+            if (byId?.authSecret) {
+              return {
+                sharedSecret: byId.authSecret,
+                expectedFingerprint: byId.fingerprint,
+                expectedDeviceId: byId.id,
+              };
+            }
+            const byFp = devices.find((d) => d.fingerprint === fingerprint && d.authSecret);
+            if (byFp?.authSecret) {
+              return {
+                sharedSecret: byFp.authSecret,
+                expectedFingerprint: byFp.fingerprint,
+                expectedDeviceId: byFp.id,
+              };
+            }
+            // First contact for pairing
+            return {};
+          },
+          handlers: {
+            onPairRequest: (payload) => {
+              store.enqueuePairRequest(payload, "wire");
+            },
+            onClipboardPush: (item) => {
+              store.receiveClipboardItem(item as import("@lyra-sync-app/protocol").ClipboardItem);
+              // Mirror into OS clipboard when auto-accept is on
+              const auto =
+                store.getState().settings.autoAcceptClipboard ||
+                store.getState().settings.clipboardSyncEnabled;
+              if (auto && item.type === "text" && item.text) {
+                void import("expo-clipboard").then((Clipboard) =>
+                  Clipboard.setStringAsync(item.text!).catch(() => undefined),
+                );
+              }
+            },
+            onUnpair: (deviceId) => {
+              const still = store.getState().devices.find((d) => d.id === deviceId);
+              if (still) store.unpairDevice(deviceId, { silent: true });
+            },
+            onOpenUrl: async (url) => {
+              try {
+                const Linking = await import("expo-linking");
+                await Linking.openURL(url);
+                return true;
+              } catch {
+                return false;
+              }
+            },
+            onTransferComplete: (state) => {
+              void (async () => {
+                let savedPaths: string[] | undefined;
+                try {
+                  const { saveReceivedTransferFiles, ensureDefaultDownloadDir } =
+                    await import("@/lib/download-location");
+                  const dir =
+                    store.getState().settings.downloadDirectory ||
+                    (await ensureDefaultDownloadDir())?.path;
+                  if (state.chunks?.length && state.files?.length) {
+                    const { savedPaths: paths, errors } = await saveReceivedTransferFiles(
+                      dir,
+                      state.files,
+                      state.chunks,
+                    );
+                    if (paths.length) savedPaths = paths;
+                    if (errors.length) {
+                      console.warn("[lyra] save transfer errors", errors);
+                    }
+                  }
+                } catch (e) {
+                  console.warn(
+                    "[lyra] save transfer failed",
+                    e instanceof Error ? e.message : e,
+                  );
+                }
+                store.recordReceivedTransfer({
+                  transferId: state.transferId,
+                  files: state.files,
+                  receivedBytes: state.receivedBytes,
+                  deviceName: "Peer",
+                  savedPaths,
+                });
+              })();
+            },
+          },
+        });
+
+        if (cancelled) {
+          await peer?.stop();
+          return;
+        }
+
+        if (!peer) {
+          store.setPeerServerStatus({
+            running: false,
+            port: null,
+            url: null,
+            lanHost: store.getState().localLanHint,
+            discoveryActive: false,
+            lastError:
+              "Peer server unavailable on this runtime. Use a native dev/preview build (not Expo Go web).",
+          });
+          return;
+        }
+
+        peerHandle = peer;
+        detachPeer = attachNativePeerToStore(store, peer);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn("[lyra] native peer server failed", msg);
+        store.setPeerServerStatus({
+          running: false,
+          port: null,
+          url: null,
+          lanHost: store.getState().localLanHint,
+          discoveryActive: false,
+          lastError: msg,
+        });
+      }
+    };
+
+    void startPeer();
+
+    return () => {
+      cancelled = true;
+      clearTimeout(trustTimer);
+      try {
+        netSub?.remove?.();
+      } catch {
+        // ignore
+      }
+      detachPeer?.();
+      detachPeer = null;
+      void peerHandle?.stop();
+      peerHandle = null;
+    };
   }, []);
 
   const fallback = (
@@ -70,7 +287,7 @@ export function LyraProvider({ children }: { children: ReactNode }) {
         process.env.EXPO_PUBLIC_LYRA_SEED_DEMO === "1" ||
         process.env.EXPO_PUBLIC_LYRA_SEED_DEMO === "true"
       }
-      platformHint="native"
+      platformHint={Platform.OS === "ios" ? "ios" : Platform.OS === "android" ? "android" : "native"}
       onStoreReady={onStoreReady}
       fallback={fallback}
     >

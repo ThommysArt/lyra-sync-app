@@ -493,17 +493,31 @@ export async function startPeerServer(options: PeerServerOptions): Promise<PeerS
           }
         }
 
-        // For pair_request, fill missing host from the TCP peer so mutual pairing can call back
+        // TCP source is ground truth for callback (multi-homed joiners advertise wrong hosts)
         if (envelope.type === "pair_request" && envelope.payload && typeof envelope.payload === "object") {
-          const p = envelope.payload as { host?: string };
-          if (!p.host || p.host === "127.0.0.1" || p.host === "0.0.0.0" || p.host === "localhost") {
-            const remote = req.socket.remoteAddress?.replace(/^::ffff:/, "");
-            if (remote && remote !== "127.0.0.1" && remote !== "::1") {
-              envelope = {
-                ...envelope,
-                payload: { ...p, host: remote },
-              };
+          const p = envelope.payload as { host?: string; tailscaleHost?: string };
+          const remote = req.socket.remoteAddress
+            ?.replace(/^::ffff:/, "")
+            .replace(/%.*$/, "")
+            .trim();
+          if (remote && remote !== "127.0.0.1" && remote !== "::1" && remote !== "0.0.0.0") {
+            const advertised = p.host?.trim();
+            const same = advertised === remote;
+            const isTs = (h: string) =>
+              /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(h) || h.endsWith(".ts.net");
+            let host = remote;
+            let tailscaleHost = p.tailscaleHost;
+            if (advertised && !same) {
+              if (isTs(advertised) && !isTs(remote)) tailscaleHost = advertised;
+              else if (isTs(remote) && !isTs(advertised)) {
+                host = advertised;
+                tailscaleHost = remote;
+              }
             }
+            envelope = {
+              ...envelope,
+              payload: { ...p, host, ...(tailscaleHost ? { tailscaleHost } : {}) },
+            };
           }
         }
 

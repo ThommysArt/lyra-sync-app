@@ -1,7 +1,12 @@
 /**
- * Dev launcher: compile main, then spawn Electron pointing at Vite web.
+ * Dev launcher: compile main (with variant baked in), then spawn Electron.
  *
  * Prerequisites: `pnpm run dev:web` on :3001 (or set LYRA_WEB_URL).
+ *
+ * Variants (side-by-side):
+ *   LYRA_VARIANT=development  → Lyra Dev     :53317  (default for `pnpm dev`)
+ *   LYRA_VARIANT=preview      → Lyra Preview :53327
+ *   LYRA_VARIANT=production   → Lyra         :53337
  */
 import { spawn } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
@@ -9,7 +14,15 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 
-import { buildElectronMain } from "./build-electron.ts";
+import { buildElectronMain } from "./build-electron";
+import {
+  resolveDesktopVariant,
+  variantAppName,
+  variantDefaultPort,
+  variantDeviceName,
+  variantDesktopEntry,
+  variantSlug,
+} from "./variant";
 
 const require = createRequire(import.meta.url);
 const appRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -47,6 +60,20 @@ function needsNoSandbox(electronBin: string): boolean {
 }
 
 async function main() {
+  // Default local `pnpm dev` to development so it doesn't collide with a packaged prod AppImage
+  if (!process.env.LYRA_VARIANT && !process.env.APP_VARIANT) {
+    process.env.LYRA_VARIANT = "development";
+  }
+  const variant = resolveDesktopVariant(process.env.LYRA_VARIANT ?? process.env.APP_VARIANT);
+  process.env.LYRA_VARIANT = variant;
+
+  if (!process.env.LYRA_PORT) {
+    process.env.LYRA_PORT = String(variantDefaultPort(variant));
+  }
+  if (!process.env.LYRA_NAME) {
+    process.env.LYRA_NAME = variantDeviceName(variant);
+  }
+
   await buildElectronMain();
 
   let electronBin: string;
@@ -68,19 +95,29 @@ async function main() {
   }
   args.push(".");
 
+  const desktop = variantDesktopEntry(variant);
+
   // Parent shells (agents, CI wrappers) sometimes set ELECTRON_RUN_AS_NODE=1 which
   // makes the Electron binary behave as plain Node — strip it so the GUI shell runs.
   const env: NodeJS.ProcessEnv = {
     ...process.env,
+    LYRA_VARIANT: variant,
+    APP_VARIANT: variant,
+    LYRA_PORT: process.env.LYRA_PORT,
+    LYRA_NAME: process.env.LYRA_NAME,
     LYRA_WEB_URL: process.env.LYRA_WEB_URL ?? "http://localhost:3001",
     ELECTRON_DISABLE_SECURITY_WARNINGS: "true",
-    // GNOME/KDE: resolve Icon= from ~/.local/share/applications/lyra.desktop
-    CHROME_DESKTOP: "lyra.desktop",
+    // GNOME/KDE: resolve Icon= from per-variant .desktop
+    CHROME_DESKTOP: desktop.fileName,
   };
   delete env.ELECTRON_RUN_AS_NODE;
   if (noSandbox) {
     env.ELECTRON_DISABLE_SANDBOX = "1";
   }
+
+  console.log(
+    `[lyra desktop] starting ${variantAppName(variant)} (${variantSlug(variant)}) · peer :${env.LYRA_PORT}`,
+  );
 
   const child = spawn(electronBin, args, {
     cwd: appRoot,

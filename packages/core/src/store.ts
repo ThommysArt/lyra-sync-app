@@ -6,7 +6,6 @@ import {
   findPeerByPairingCode,
   isLikelyTailscaleHost,
   probePeer,
-  probePeers,
   scanLanForPeers,
   type ProbeResult,
 } from "@lyra-sync-app/net";
@@ -18,6 +17,7 @@ import type {
   FileEntry,
   PairedDevice,
   PairingPayload,
+  ScreenSession,
   Transfer,
   TransferStatus,
 } from "@lyra-sync-app/protocol";
@@ -36,16 +36,27 @@ import {
   hashPairingCode,
 } from "./identity";
 import {
+  applyReachableEndpoint,
+  deviceEndpointCandidates,
   isLivePeer,
+  resolveDeviceHost,
   wireListRemoteFiles,
   wireOpenUrl,
   wirePushClipboard,
+  wireRequestScreenShare,
   wireSendFiles,
   wireReadRemoteFile,
   wireSendPairRequest,
+  wireStopScreenShare,
   wireTrustHandshake,
   wireUnpairNotify,
+  wireVerifyPairTrust,
 } from "./peer-ops";
+import {
+  base64ToDataUrl,
+  dataUrlToBase64,
+  generateDemoScreenFrame,
+} from "./screen-frames";
 
 export type IncomingPairingRequest = {
   id: string;
@@ -140,6 +151,28 @@ export type LyraState = {
    * expand /24 candidates when looking up a pairing code.
    */
   localLanHint: string | null;
+  /** Active screen-mirror sessions keyed by deviceId (viewer side) or sessionId. */
+  screenSessions: Record<string, ScreenSession>;
+  /**
+   * Discovered Tailscale peers from desktop `scanTailscale` / MagicDNS
+   * (not necessarily added as devices yet).
+   */
+  tailscalePeerHints: Array<{
+    host: string;
+    port?: number;
+    name?: string;
+    online?: boolean;
+    tailscaleIp?: string;
+  }>;
+  /** Local Tailscale status summary when available. */
+  tailscaleStatus: {
+    ok: boolean;
+    backendState?: string;
+    selfHost?: string;
+    selfIp?: string;
+    error?: string;
+    updatedAt: number;
+  } | null;
 };
 
 export type LyraStore = {
@@ -188,12 +221,60 @@ export type LyraStore = {
   /**
    * Manually add a peer by host/IP (and optional port). Used when multicast
    * discovery cannot see the device (different subnet, Tailscale, etc.).
+   * Host may include `:port` (e.g. `100.x.x.x:53319`).
    */
   addManualPeer: (input: {
     host: string;
     port?: number;
     name?: string;
+    /** When true / auto-detected, mark connectionType as tailscale. */
+    asTailscale?: boolean;
   }) => { ok: true; device: PairedDevice } | { ok: false; error: string };
+  /**
+   * Re-verify paired peers still trust us (detect remote unpair).
+   * Skips unreachable peers. Called on startup and discovery refresh.
+   */
+  recheckPairedTrust: () => Promise<{ revoked: number; checked: number }>;
+  /**
+   * Update reachability addresses for a known device (LAN + optional Tailscale IP).
+   */
+  updateDeviceAddress: (
+    deviceId: string,
+    patch: {
+      host?: string | null;
+      port?: number | null;
+      tailscaleHost?: string | null;
+      preferredAddress?: PairedDevice["preferredAddress"];
+      adbSerial?: string | null;
+    },
+  ) => { ok: true } | { ok: false; error: string };
+  /** Start viewing a device screen (demo, P2P, or scrcpy-assisted). */
+  startScreenMirror: (
+    deviceId: string,
+    opts?: { mode?: "auto" | "demo" | "p2p" | "scrcpy" },
+  ) => Promise<{ ok: true; sessionId: string } | { ok: false; error: string }>;
+  stopScreenMirror: (deviceId: string) => Promise<void>;
+  /** Ingest a frame from the wire (viewer) or local capture. */
+  ingestScreenFrame: (
+    deviceId: string,
+    frame: {
+      sessionId: string;
+      seq: number;
+      width: number;
+      height: number;
+      mimeType: "image/jpeg" | "image/webp" | "image/png";
+      dataBase64?: string;
+      dataUrl?: string;
+      capturedAt: number;
+    },
+  ) => void;
+  /**
+   * Replace screen session map (multi-window BroadcastChannel sync).
+   * Used so a dedicated mirror popup sees demo/P2P frames from the main window.
+   */
+  applyScreenSessions: (sessions: Record<string, ScreenSession>) => void;
+  /** Record Tailscale discovery status for Settings UI. */
+  setTailscaleStatus: (status: NonNullable<LyraState["tailscaleStatus"]>) => void;
   /**
    * Establish mutual authSecret for a manual/probed peer (dual-confirm path on remote).
    * Local side stores secret immediately after probe identity exchange; remote still must confirm.
@@ -373,8 +454,14 @@ function createInitialState(): LyraState {
     },
     lastProbeSummary: null,
     remoteFsCache: {},
+    screenSessions: {},
+    tailscalePeerHints: [],
+    tailscaleStatus: null,
   };
 }
+
+/** Timers for demo / local frame generators (module scope so stop can clear). */
+const screenFrameTimers = new Map<string, ReturnType<typeof setInterval>>();
 
 function notify(
   set: (fn: (s: LyraState) => LyraState) => void,
@@ -495,6 +582,12 @@ async function finalizePairDevice(
   });
 
   const now = Date.now();
+  const host = input.payload.host?.trim() || undefined;
+  const tsHost =
+    (input.payload as { tailscaleHost?: string }).tailscaleHost?.trim() ||
+    (host && isLikelyTailscaleHost(host) ? host : undefined);
+  const lanHost = host && !isLikelyTailscaleHost(host) ? host : undefined;
+  const port = input.payload.port && input.payload.port > 0 ? input.payload.port : LYRA_DEFAULT_PORT;
   const device: PairedDevice = {
     id: input.payload.deviceId,
     name: input.payload.name || "Paired device",
@@ -505,16 +598,17 @@ async function finalizePairDevice(
     pairedAt: now,
     lastSeenAt: now,
     online: true,
-    connectionType: input.payload.host
-      ? input.payload.host.startsWith("100.")
-        ? "tailscale"
-        : "local"
-      : "local",
+    connectionType: tsHost && lanHost ? "both" : tsHost ? "tailscale" : "local",
     autoAcceptTransfers: s.settings.autoAcceptTransfers,
     autoAcceptClipboard: s.settings.autoAcceptClipboard,
     showInMainList: true,
-    host: input.payload.host,
-    port: input.payload.port,
+    host: lanHost || host,
+    port,
+    tailscaleHost: tsHost,
+    preferredAddress: tsHost && !lanHost ? "tailscale" : "auto",
+    // Connection that just completed pairing is the best first try for callback
+    lastReachableHost: host,
+    lastReachablePort: port,
     authSecret,
   };
 
@@ -606,6 +700,11 @@ function localLanHostFromState(s: LyraState): string | undefined {
       // ignore
     }
   }
+  // Mobile / browser LAN hint from expo-network or desktop bridge
+  if (s.localLanHint) {
+    const h = s.localLanHint.trim();
+    if (h && h !== "127.0.0.1" && h !== "localhost" && h !== "0.0.0.0") return h;
+  }
   return undefined;
 }
 
@@ -637,6 +736,44 @@ function trimClipboardHistory(
   return next.slice(0, settings.clipboardHistoryLimit);
 }
 
+/**
+ * Parse "host", "host:port", or "[ipv6]:port" into parts.
+ * Does not treat bare IPv6 as host:port (no brackets + multiple colons).
+ */
+export function parseHostPortInput(
+  raw: string,
+  defaultPort: number = LYRA_DEFAULT_PORT,
+): { host: string; port: number } | { error: string } {
+  const trimmed = raw.trim();
+  if (!trimmed) return { error: "Host or IP is required" };
+
+  // [ipv6]:port
+  const bracket = /^\[([^\]]+)\](?::(\d+))?$/.exec(trimmed);
+  if (bracket) {
+    const host = bracket[1]!;
+    const port = bracket[2] ? Number(bracket[2]) : defaultPort;
+    if (!Number.isFinite(port) || port <= 0 || port > 65535) {
+      return { error: "Invalid port" };
+    }
+    return { host, port };
+  }
+
+  // host:port where host has no colons (IPv4 / hostname)
+  const colon = trimmed.lastIndexOf(":");
+  if (colon > 0 && !trimmed.includes("://")) {
+    const maybePort = trimmed.slice(colon + 1);
+    if (/^\d{1,5}$/.test(maybePort)) {
+      const port = Number(maybePort);
+      if (port > 0 && port <= 65535) {
+        return { host: trimmed.slice(0, colon), port };
+      }
+      return { error: "Invalid port" };
+    }
+  }
+
+  return { host: trimmed, port: defaultPort };
+}
+
 function applyProbeToDevice(d: PairedDevice, result: ProbeResult, now: number): PairedDevice {
   if (!result.ok) {
     return {
@@ -646,29 +783,59 @@ function applyProbeToDevice(d: PairedDevice, result: ProbeResult, now: number): 
       lastProbeLatencyMs: result.latencyMs,
     };
   }
-  const connectionType =
-    result.connectionHint === "tailscale"
-      ? d.connectionType === "local"
-        ? "both"
-        : "tailscale"
-      : d.connectionType === "tailscale"
-        ? "both"
-        : d.connectionType === "manual"
-          ? "manual"
-          : "local";
+  const isTs =
+    result.connectionHint === "tailscale" || isLikelyTailscaleHost(result.host);
+  const withEndpoint = applyReachableEndpoint(d, {
+    host: result.host,
+    port: result.port,
+    protocol: "http",
+  });
   return {
-    ...d,
+    ...withEndpoint,
     online: true,
     lastSeenAt: now,
     lastProbeLatencyMs: result.latencyMs,
-    host: result.host,
-    port: result.port,
-    connectionType,
+    connectionType: isTs
+      ? d.host && !isLikelyTailscaleHost(d.host)
+        ? "both"
+        : withEndpoint.connectionType
+      : withEndpoint.connectionType,
     // Prefer live identity fields when probing a real peer
     name: d.nickname ? d.name : result.name || d.name,
     fingerprint: result.fingerprint || d.fingerprint,
     platform: (result.platform as PairedDevice["platform"]) || d.platform,
   };
+}
+
+/** Probe every LAN/Tailscale/port candidate until one answers /lyra/info. */
+async function probeDeviceCandidates(
+  device: PairedDevice,
+  opts?: { timeoutMs?: number },
+): Promise<ProbeResult> {
+  const candidates = deviceEndpointCandidates(device);
+  if (candidates.length === 0) {
+    return {
+      ok: false,
+      host: device.host || device.tailscaleHost || "",
+      port: device.port ?? LYRA_DEFAULT_PORT,
+      online: false,
+      error: "No host",
+      latencyMs: 0,
+    };
+  }
+  let last: ProbeResult | null = null;
+  for (const ep of candidates) {
+    const r = await probePeer(
+      { host: ep.host, port: ep.port, protocol: ep.protocol },
+      {
+        timeoutMs: opts?.timeoutMs ?? 1600,
+        preferTailscale: isLikelyTailscaleHost(ep.host),
+      },
+    );
+    last = r;
+    if (r.ok) return r;
+  }
+  return last!;
 }
 
 function defaultSeedDemo(explicit?: boolean): boolean {
@@ -711,7 +878,7 @@ function stripDemoMesh(input: {
 export function createLyraStore(options?: {
   storage?: StorageLike | null;
   seedDemo?: boolean;
-  platformHint?: "web" | "native";
+  platformHint?: "web" | "native" | "android" | "ios";
 }): LyraStore {
   let state = createInitialState();
   const listeners = new Set<() => void>();
@@ -789,10 +956,19 @@ export function createLyraStore(options?: {
     }
 
     if (!identity || !privateKey) {
+      const hint = options?.platformHint;
+      const isMobile =
+        hint === "native" || hint === "android" || hint === "ios";
+      const platform =
+        hint === "ios"
+          ? "ios"
+          : hint === "android" || hint === "native"
+            ? "android"
+            : "web";
       const created = await createDeviceIdentity({
-        name: options?.platformHint === "native" ? "My Phone" : "My Computer",
-        platform: options?.platformHint === "native" ? "android" : "web",
-        type: options?.platformHint === "native" ? "mobile" : "desktop",
+        name: isMobile ? "My Phone" : "My Computer",
+        platform,
+        type: isMobile ? "mobile" : "desktop",
       });
       if (!created.ok) {
         throw created.error;
@@ -983,9 +1159,9 @@ export function createLyraStore(options?: {
         const hint = s0.localLanHint ? ` Your IP looks like ${s0.localLanHint}.` : "";
         const msg =
           "No device found with that code." +
-          " The other device must be showing its code in the desktop app (peer server running)" +
-          " — Expo Go cannot host a code." +
-          " Try Refresh discovery, or enter the desktop’s LAN IP below." +
+          " The other device must be showing its code with its peer server running" +
+          " (desktop app, native preview build, or `pnpm peer-server`)." +
+          " Expo Go cannot host a code. Try Refresh discovery, or enter the host’s LAN / Tailscale IP below." +
           hint;
         notify(set, msg, "error");
         return { ok: false as const, error: msg };
@@ -1152,6 +1328,35 @@ export function createLyraStore(options?: {
 
         if (device) {
           notify(set, `Paired with ${device.name}`, "success");
+          // Immediately verify we can call the peer back (mobile→desktop path)
+          if (device.host || device.tailscaleHost) {
+            void store.probePeerAddress({
+              host: device.lastReachableHost || device.host || device.tailscaleHost!,
+              port: device.lastReachablePort || device.port,
+            }).then((result) => {
+              if (result.ok) {
+                set((st) => ({
+                  ...st,
+                  devices: st.devices.map((d) =>
+                    d.id === device!.id
+                      ? applyReachableEndpoint(d, {
+                          host: result.host,
+                          port: result.port,
+                          protocol: "http",
+                        })
+                      : d,
+                  ),
+                }));
+                persist();
+              } else {
+                notify(
+                  set,
+                  `Paired, but cannot reach ${device.name} yet (${result.error}). Check its address in device details.`,
+                  "info",
+                );
+              }
+            });
+          }
         } else {
           notify(set, "Could not complete pairing — try again", "error");
         }
@@ -1294,28 +1499,84 @@ export function createLyraStore(options?: {
           privateKey: s.privateKey,
         });
       }
+      // Drop cached auth sessions so we do not reuse stale tokens
+      if (device) {
+        void import("@lyra-sync-app/net").then(({ clearPeerSessionFor, clearPeerSessionCache }) => {
+          const ep = {
+            host: resolveDeviceHost(device) || device.host || "127.0.0.1",
+            port: device.port ?? LYRA_DEFAULT_PORT,
+          };
+          try {
+            clearPeerSessionFor(ep, device.id);
+          } catch {
+            clearPeerSessionCache();
+          }
+        });
+      }
       set((st) => ({
         ...st,
         devices: st.devices.filter((d) => d.id !== deviceId),
         selectedDeviceId: st.selectedDeviceId === deviceId ? null : st.selectedDeviceId,
       }));
       persist();
-      notify(set, "Device unpaired", "info");
+      if (!opts?.silent) {
+        notify(set, "Device unpaired", "info");
+      }
+    },
+    recheckPairedTrust: async () => {
+      const s = getState();
+      if (!s.identity || !s.privateKey) return { revoked: 0, checked: 0 };
+      const paired = s.devices.filter((d) => d.authSecret && isLivePeer(d));
+      let revoked = 0;
+      let checked = 0;
+      for (const device of paired) {
+        checked++;
+        try {
+          const res = await wireVerifyPairTrust({
+            device,
+            identity: s.identity!,
+            privateKey: s.privateKey!,
+          });
+          if (!res.ok) {
+            // Unreachable — keep local pair
+            continue;
+          }
+          if (!res.stillTrusted) {
+            revoked++;
+            const name = device.nickname || device.name;
+            store.unpairDevice(device.id, { silent: true });
+            notify(
+              set,
+              `${name} is no longer paired (removed on the other device)`,
+              "info",
+            );
+          }
+        } catch {
+          // ignore individual failures
+        }
+      }
+      return { revoked, checked };
     },
     addManualPeer: (input) => {
       const s = getState();
       if (!s.identity) return { ok: false as const, error: "Not ready" };
-      const host = input.host.trim();
-      if (!host) return { ok: false as const, error: "Host or IP is required" };
+      const defaultPort =
+        input.port && input.port > 0
+          ? input.port
+          : (s.settings.peerListenPort ?? LYRA_DEFAULT_PORT);
+      const parsed = parseHostPortInput(input.host, defaultPort);
+      if ("error" in parsed) return { ok: false as const, error: parsed.error };
+      const { host, port } = parsed;
 
       // Basic host validation: hostname, IPv4, or IPv6-ish
       if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]*$/.test(host) && !host.includes(":")) {
         return { ok: false as const, error: "Invalid host" };
       }
 
-      const port = input.port && input.port > 0 ? input.port : 53317;
       const existing = s.devices.find(
-        (d) => d.host === host && (d.port ?? 53317) === port,
+        (d) =>
+          (d.host === host || d.tailscaleHost === host) &&
+          (d.port ?? LYRA_DEFAULT_PORT) === port,
       );
       if (existing) {
         return { ok: false as const, error: "A peer with that address already exists" };
@@ -1323,6 +1584,7 @@ export function createLyraStore(options?: {
 
       const now = Date.now();
       const name = (input.name?.trim() || `Peer ${host}`).slice(0, 64);
+      const isTs = Boolean(input.asTailscale) || isLikelyTailscaleHost(host);
       // Nearby / address-only — not trusted until Pair completes.
       const device: PairedDevice = {
         id: generateId("manual"),
@@ -1334,18 +1596,20 @@ export function createLyraStore(options?: {
         pairedAt: now,
         lastSeenAt: now,
         online: true,
-        connectionType: "manual",
+        connectionType: isTs ? "tailscale" : "manual",
         autoAcceptTransfers: s.settings.autoAcceptTransfers,
         autoAcceptClipboard: s.settings.autoAcceptClipboard,
         showInMainList: false,
         host,
         port,
+        tailscaleHost: isTs ? host : undefined,
+        preferredAddress: isTs ? "tailscale" : "auto",
         status: {
           deviceId: "",
           batteryLevel: null,
           isCharging: null,
-          networkType: "unknown",
-          networkName: null,
+          networkType: isTs ? "tailscale" : "unknown",
+          networkName: isTs ? "Tailscale" : null,
           freeStorageBytes: null,
           updatedAt: now,
         },
@@ -1357,8 +1621,363 @@ export function createLyraStore(options?: {
         devices: [device, ...st.devices],
       }));
       persist();
-      notify(set, `Nearby peer saved — tap Pair to trust ${name}`, "info");
+      notify(
+        set,
+        isTs
+          ? `Tailscale peer saved (${host}:${port}) — Pair to trust ${name}`
+          : `Nearby peer saved (${host}:${port}) — tap Pair to trust ${name}`,
+        "info",
+      );
       return { ok: true as const, device };
+    },
+    updateDeviceAddress: (deviceId, patch) => {
+      const s = getState();
+      const device = s.devices.find((d) => d.id === deviceId);
+      if (!device) return { ok: false as const, error: "Device not found" };
+
+      const nextHost =
+        patch.host === null ? undefined : patch.host !== undefined ? patch.host.trim() : device.host;
+      const nextTs =
+        patch.tailscaleHost === null
+          ? undefined
+          : patch.tailscaleHost !== undefined
+            ? patch.tailscaleHost.trim()
+            : device.tailscaleHost;
+      const nextPort =
+        patch.port === null
+          ? undefined
+          : patch.port !== undefined
+            ? patch.port
+            : device.port;
+
+      if (nextHost && !/^[a-zA-Z0-9][a-zA-Z0-9._:-]*$/.test(nextHost) && !nextHost.includes(":")) {
+        return { ok: false as const, error: "Invalid host" };
+      }
+      if (
+        nextTs &&
+        !/^[a-zA-Z0-9][a-zA-Z0-9._:-]*$/.test(nextTs) &&
+        !nextTs.includes(":")
+      ) {
+        return { ok: false as const, error: "Invalid Tailscale host" };
+      }
+      if (nextTs && !isLikelyTailscaleHost(nextTs) && !nextTs.includes(".")) {
+        // Soft warning path: still allow MagicDNS short names
+      }
+
+      let connectionType = device.connectionType;
+      const hasLan = Boolean(nextHost && !isLikelyTailscaleHost(nextHost));
+      const hasTs = Boolean(nextTs || (nextHost && isLikelyTailscaleHost(nextHost)));
+      if (hasLan && hasTs) connectionType = "both";
+      else if (hasTs) connectionType = "tailscale";
+      else if (hasLan) connectionType = connectionType === "manual" ? "manual" : "local";
+
+      set((st) => ({
+        ...st,
+        devices: st.devices.map((d) =>
+          d.id === deviceId
+            ? {
+                ...d,
+                host: nextHost || undefined,
+                port: nextPort,
+                tailscaleHost: nextTs || undefined,
+                preferredAddress: patch.preferredAddress ?? d.preferredAddress ?? "auto",
+                adbSerial:
+                  patch.adbSerial === null
+                    ? undefined
+                    : patch.adbSerial !== undefined
+                      ? patch.adbSerial.trim() || undefined
+                      : d.adbSerial,
+                connectionType,
+              }
+            : d,
+        ),
+      }));
+      persist();
+      notify(set, "Device addresses updated", "success");
+      return { ok: true as const };
+    },
+    startScreenMirror: async (deviceId, opts) => {
+      const s = getState();
+      const device = s.devices.find((d) => d.id === deviceId);
+      if (!device) return { ok: false as const, error: "Device not found" };
+
+      // Stop any existing session for this device first
+      await store.stopScreenMirror(deviceId);
+
+      const sessionId = generateId("scr");
+      const now = Date.now();
+      const want = opts?.mode ?? "auto";
+      const isDemo = device.id.startsWith("demo_") || want === "demo";
+      const fps = s.settings.screenShareFps ?? 12;
+      const maxEdge = s.settings.screenShareMaxEdge ?? 720;
+
+      let mode: ScreenSession["mode"] = "demo";
+      if (!isDemo && want === "scrcpy") mode = "scrcpy";
+      else if (!isDemo && want === "p2p") mode = "p2p";
+      else if (!isDemo && isLivePeer(device) && device.authSecret) mode = "p2p";
+      else if (!isDemo && (device.platform === "android" || device.type === "mobile")) {
+        // Prefer scrcpy path when no trusted P2P stream available
+        mode = want === "auto" ? "scrcpy" : "demo";
+      } else if (isDemo) mode = "demo";
+      else mode = "demo";
+
+      const session: ScreenSession = {
+        sessionId,
+        deviceId,
+        role: "viewer",
+        status: "requesting",
+        mode,
+        fps,
+        frameCount: 0,
+        startedAt: now,
+        updatedAt: now,
+      };
+      set((st) => ({
+        ...st,
+        screenSessions: { ...st.screenSessions, [deviceId]: session },
+      }));
+
+      if (mode === "demo" || isDemo) {
+        const isPhone = device.type === "mobile" || device.platform === "android" || device.platform === "ios";
+        const w = isPhone ? Math.min(maxEdge, 390) : Math.min(maxEdge, 960);
+        const h = isPhone ? Math.round(w * (844 / 390)) : Math.round(w * (600 / 960));
+        const pushFrame = () => {
+          const cur = getState().screenSessions[deviceId];
+          if (!cur || cur.sessionId !== sessionId || cur.status === "ended") return;
+          const frame = generateDemoScreenFrame({
+            platform: device.platform as "android",
+            width: w,
+            height: h,
+            now: Date.now(),
+            deviceName: device.nickname || device.name,
+            battery: device.status?.batteryLevel ?? 72,
+          });
+          const b64 = dataUrlToBase64(frame.dataUrl);
+          store.ingestScreenFrame(deviceId, {
+            sessionId,
+            seq: (cur.frameCount ?? 0) + 1,
+            width: frame.width,
+            height: frame.height,
+            mimeType: "image/jpeg",
+            dataUrl: frame.dataUrl,
+            dataBase64: b64?.dataBase64,
+            capturedAt: Date.now(),
+          });
+        };
+        set((st) => ({
+          ...st,
+          screenSessions: {
+            ...st.screenSessions,
+            [deviceId]: {
+              ...session,
+              status: "active",
+              mode: "demo",
+              width: w,
+              height: h,
+              updatedAt: Date.now(),
+            },
+          },
+        }));
+        pushFrame();
+        const timer = setInterval(pushFrame, Math.max(80, Math.round(1000 / fps)));
+        screenFrameTimers.set(deviceId, timer);
+        notify(set, `Mirroring ${device.nickname || device.name} (preview)`, "success");
+        return { ok: true as const, sessionId };
+      }
+
+      if (mode === "scrcpy") {
+        // Desktop shell launches scrcpy; UI shows framed status + last demo still until external opens
+        set((st) => ({
+          ...st,
+          screenSessions: {
+            ...st.screenSessions,
+            [deviceId]: {
+              ...session,
+              status: "active",
+              mode: "scrcpy",
+              updatedAt: Date.now(),
+            },
+          },
+        }));
+        // Provide a soft preview frame so the bezel isn't empty
+        const frame = generateDemoScreenFrame({
+          platform: "android",
+          width: 390,
+          height: 844,
+          deviceName: device.nickname || device.name,
+          battery: device.status?.batteryLevel ?? 80,
+        });
+        store.ingestScreenFrame(deviceId, {
+          sessionId,
+          seq: 1,
+          width: 390,
+          height: 844,
+          mimeType: "image/jpeg",
+          dataUrl: frame.dataUrl,
+          capturedAt: Date.now(),
+        });
+        notify(
+          set,
+          "Scrcpy mirror — desktop will launch external viewer when available",
+          "info",
+        );
+        return { ok: true as const, sessionId };
+      }
+
+      // P2P path
+      if (!s.identity || !s.privateKey) {
+        set((st) => ({
+          ...st,
+          screenSessions: {
+            ...st.screenSessions,
+            [deviceId]: {
+              ...session,
+              status: "error",
+              error: "Not ready",
+              updatedAt: Date.now(),
+            },
+          },
+        }));
+        return { ok: false as const, error: "Not ready" };
+      }
+      if (!device.authSecret) {
+        // Fall back to demo for untrusted peers
+        return store.startScreenMirror(deviceId, { mode: "demo" });
+      }
+
+      const res = await wireRequestScreenShare({
+        device,
+        identity: s.identity,
+        privateKey: s.privateKey,
+        sessionId,
+        maxEdge,
+        fps,
+      });
+      if (!res.ok) {
+        // Graceful fallback to high-quality demo bezel so the feature always demos well
+        notify(set, `Live share unavailable (${res.error}) — showing preview`, "info");
+        return store.startScreenMirror(deviceId, { mode: "demo" });
+      }
+      set((st) => ({
+        ...st,
+        screenSessions: {
+          ...st.screenSessions,
+          [deviceId]: {
+            ...session,
+            status: "active",
+            mode: res.accept.mode === "demo" ? "demo" : "p2p",
+            width: res.accept.width,
+            height: res.accept.height,
+            fps: res.accept.fps ?? fps,
+            updatedAt: Date.now(),
+          },
+        },
+      }));
+      notify(set, `Screen share active with ${device.nickname || device.name}`, "success");
+      return { ok: true as const, sessionId };
+    },
+    stopScreenMirror: async (deviceId) => {
+      const timer = screenFrameTimers.get(deviceId);
+      if (timer) {
+        clearInterval(timer);
+        screenFrameTimers.delete(deviceId);
+      }
+      const s = getState();
+      const session = s.screenSessions[deviceId];
+      if (!session) return;
+
+      if (
+        session.mode === "p2p" &&
+        s.identity &&
+        s.privateKey &&
+        session.status === "active"
+      ) {
+        const device = s.devices.find((d) => d.id === deviceId);
+        if (device && isLivePeer(device) && device.authSecret) {
+          void wireStopScreenShare({
+            device,
+            identity: s.identity,
+            privateKey: s.privateKey,
+            sessionId: session.sessionId,
+            reason: "viewer_stopped",
+          });
+        }
+      }
+
+      set((st) => {
+        const next = { ...st.screenSessions };
+        const cur = next[deviceId];
+        if (cur) {
+          next[deviceId] = {
+            ...cur,
+            status: "ended",
+            updatedAt: Date.now(),
+            lastFrameDataUrl: undefined,
+          };
+        }
+        return { ...st, screenSessions: next };
+      });
+    },
+    ingestScreenFrame: (deviceId, frame) => {
+      const dataUrl =
+        frame.dataUrl ??
+        (frame.dataBase64
+          ? base64ToDataUrl(frame.mimeType, frame.dataBase64)
+          : undefined);
+      if (!dataUrl) return;
+      const now = Date.now();
+      set((st) => {
+        let key = deviceId;
+        let cur = st.screenSessions[deviceId];
+        if (!cur || cur.sessionId !== frame.sessionId) {
+          const found = Object.entries(st.screenSessions).find(
+            ([, s]) => s.sessionId === frame.sessionId,
+          );
+          if (found) {
+            key = found[0];
+            cur = found[1];
+          } else {
+            // First frame may arrive in a mirror window before session state syncs
+            cur = {
+              sessionId: frame.sessionId,
+              deviceId,
+              role: "viewer",
+              status: "active",
+              mode: "p2p",
+              fps: 0,
+              frameCount: 0,
+              startedAt: now,
+              updatedAt: now,
+            };
+          }
+        }
+        const elapsed = Math.max(1, now - cur.startedAt);
+        const frameCount = (cur.frameCount ?? 0) + 1;
+        const fps = frameCount / (elapsed / 1000);
+        return {
+          ...st,
+          screenSessions: {
+            ...st.screenSessions,
+            [key]: {
+              ...cur,
+              status: "active",
+              lastFrameDataUrl: dataUrl,
+              lastFrameAt: now,
+              width: frame.width,
+              height: frame.height,
+              frameCount,
+              fps: Math.round(fps * 10) / 10,
+              updatedAt: now,
+            },
+          },
+        };
+      });
+    },
+    applyScreenSessions: (sessions) => {
+      set((st) => ({ ...st, screenSessions: { ...sessions } }));
+    },
+    setTailscaleStatus: (status) => {
+      set((st) => ({ ...st, tailscaleStatus: status }));
     },
     refreshDiscovery: async () => {
       const s0 = getState();
@@ -1376,62 +1995,111 @@ export function createLyraStore(options?: {
         // ignore
       }
 
-      // 2) Re-probe already known hosts
-      const probeTargets = s0.devices.filter((d) => Boolean(d.host));
-      let probeResults: ProbeResult[] = [];
+      // 2) Re-probe known devices across LAN + Tailscale + port fallbacks.
+      //    Previously only d.host:port was tried — stale LAN IPs marked everyone offline
+      //    even when Tailscale still worked (common mobile/desktop asymmetry).
+      const probeTargets = s0.devices.filter(
+        (d) => Boolean(d.host || d.tailscaleHost) && !d.id.startsWith("demo_"),
+      );
       if (probeTargets.length > 0) {
-        probeResults = await probePeers(
-          probeTargets.map((d) => ({
-            host: d.host!,
-            port: d.port ?? port,
-          })),
-          {
-            timeoutMs: 1500,
-            concurrency: 16,
-            preferTailscale: s0.settings.tailscaleEnabled,
-          },
-        );
-      }
+        const concurrency = 6;
+        let cursor = 0;
+        const results = new Map<string, ProbeResult>();
 
-      const byHostPort = new Map<string, ProbeResult>();
-      for (let i = 0; i < probeTargets.length; i++) {
-        const d = probeTargets[i]!;
-        const key = `${d.host}:${d.port ?? port}`;
-        byHostPort.set(key, probeResults[i]!);
-      }
-
-      set((st) => ({
-        ...st,
-        devices: st.devices.map((d) => {
-          if (d.host) {
-            const key = `${d.host}:${d.port ?? port}`;
-            const result = byHostPort.get(key);
-            if (result) return applyProbeToDevice(d, result, now);
+        async function worker() {
+          while (cursor < probeTargets.length) {
+            const i = cursor++;
+            const device = probeTargets[i]!;
+            const result = await probeDeviceCandidates(device, { timeoutMs: 1400 });
+            results.set(device.id, result);
           }
-          return d;
-        }),
-      }));
+        }
+
+        await Promise.all(
+          Array.from(
+            { length: Math.min(concurrency, probeTargets.length) },
+            () => worker(),
+          ),
+        );
+
+        set((st) => ({
+          ...st,
+          devices: st.devices.map((d) => {
+            const result = results.get(d.id);
+            if (!result) return d;
+            return applyProbeToDevice(d, result, now);
+          }),
+        }));
+      }
 
       // 3) LocalSend HttpScanDiscovery: walk local /24 for /lyra/info
+      //    Known devices are already multi-endpoint probed above — only expand
+      //    a few seed /24s so mobile does not walk thousands of hosts.
+      //    Note: Tailscale CGNAT is /10 — expanding only a /24 of our 100.x IP
+      //    will miss peers on other 100.x.y segments (common). For 100.x seeds we
+      //    do NOT expand; we only probe exact known hosts (paired / hints).
       const seeds = new Set<string>();
+      const exactOnly = new Set<string>(); // never expand these to /24
       const lan = localLanHostFromState(getState()) ?? getState().localLanHint;
-      if (lan) seeds.add(lan);
+      const slash24Seen = new Set<string>();
+      const considerSeed = (raw: string | null | undefined, expand: boolean) => {
+        const h = raw?.trim();
+        if (!h) return;
+        if (!expand || isLikelyTailscaleHost(h)) {
+          exactOnly.add(h);
+          seeds.add(h);
+          return;
+        }
+        const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+        if (m) {
+          const key = `${m[1]}.${m[2]}.${m[3]}`;
+          if (slash24Seen.has(key)) return;
+          if (slash24Seen.size >= 3) return;
+          slash24Seen.add(key);
+        }
+        seeds.add(h);
+      };
+      // Prefer Wi‑Fi-looking seeds for /24 expansion when possible
+      considerSeed(lan, true);
       for (const d of getState().devices) {
-        if (d.host) seeds.add(d.host);
+        considerSeed(d.host, true);
+        considerSeed(d.tailscaleHost, false);
+        considerSeed(d.lastReachableHost, !isLikelyTailscaleHost(d.lastReachableHost ?? ""));
+      }
+      for (const h of getState().tailscalePeerHints) {
+        considerSeed(h.host, false);
       }
       // Common home/lab prefixes when we have no local IP yet (browser)
       if (seeds.size === 0) {
         for (const guess of ["192.168.0.1", "192.168.1.1", "10.0.0.1"]) seeds.add(guess);
       }
 
+      // Multi-port scan: settings port + default + one common variant offset
+      const scanPorts = [
+        ...new Set(
+          [port, LYRA_DEFAULT_PORT, port + 2, 53327].filter((p) => p > 0 && p <= 65535),
+        ),
+      ].slice(0, 3);
+
       let scannedNew = 0;
       try {
+        // Never HTTP-probe our own peer server — aborted self-scans race native
+        // TCP write/destroy and crash Android (No socket with id).
+        const skipEndpoints: Array<{ host: string; port?: number }> = [];
+        const ownHost = localLanHostFromState(getState()) ?? getState().localLanHint;
+        const ownPort = getState().peerServer.port ?? port;
+        if (ownHost) skipEndpoints.push({ host: ownHost, port: ownPort ?? port });
+        skipEndpoints.push({ host: "127.0.0.1", port: ownPort ?? port });
+        skipEndpoints.push({ host: "localhost", port: ownPort ?? port });
+
         const found = await scanLanForPeers({
           seedHosts: [...seeds],
+          ports: scanPorts,
           port,
-          timeoutMs: 450,
-          concurrency: 50,
+          timeoutMs: 700,
+          concurrency: 40,
           localDeviceId: s0.identity?.id,
+          skipEndpoints,
         });
         for (const peer of found) {
           const before = getState().devices.length;
@@ -1451,26 +2119,42 @@ export function createLyraStore(options?: {
           });
           if (getState().devices.length > before) scannedNew++;
           else {
-            // Refresh existing
+            // Refresh existing — preserve distinct LAN vs Tailscale addresses
             set((st) => ({
               ...st,
-              devices: st.devices.map((d) =>
-                d.id === peer.identity.id ||
-                d.fingerprint === peer.identity.fingerprint ||
-                (d.host === peer.host && (d.port ?? port) === peer.port)
-                  ? {
-                      ...d,
-                      online: true,
-                      lastSeenAt: Date.now(),
-                      host: peer.host,
-                      port: peer.port,
-                      name: d.nickname ? d.name : peer.identity.name || d.name,
-                      fingerprint: peer.identity.fingerprint || d.fingerprint,
-                      publicKey: peer.identity.publicKey || d.publicKey,
-                      platform: (peer.identity.platform as PairedDevice["platform"]) || d.platform,
-                    }
-                  : d,
-              ),
+              devices: st.devices.map((d) => {
+                const match =
+                  d.id === peer.identity.id ||
+                  d.fingerprint === peer.identity.fingerprint ||
+                  (d.host === peer.host && (d.port ?? port) === peer.port) ||
+                  d.tailscaleHost === peer.host;
+                if (!match) return d;
+                return applyProbeToDevice(
+                  {
+                    ...d,
+                    name: d.nickname ? d.name : peer.identity.name || d.name,
+                    fingerprint: peer.identity.fingerprint || d.fingerprint,
+                    publicKey: peer.identity.publicKey || d.publicKey,
+                    platform:
+                      (peer.identity.platform as PairedDevice["platform"]) || d.platform,
+                  },
+                  {
+                    ok: true,
+                    host: peer.host,
+                    port: peer.port,
+                    online: true,
+                    latencyMs: 0,
+                    deviceId: peer.identity.id,
+                    name: peer.identity.name,
+                    fingerprint: peer.identity.fingerprint,
+                    platform: peer.identity.platform,
+                    connectionHint: isLikelyTailscaleHost(peer.host)
+                      ? "tailscale"
+                      : "local",
+                  },
+                  Date.now(),
+                );
+              }),
             }));
           }
         }
@@ -1479,6 +2163,12 @@ export function createLyraStore(options?: {
       }
 
       persist();
+      // Re-check mutual trust for paired peers (detect remote unpair)
+      try {
+        await store.recheckPairedTrust();
+      } catch {
+        // best-effort
+      }
       const online = getState().devices.filter((d) => d.online).length;
       const nearby = getState().devices.filter((d) => !d.authSecret).length;
       set((st) => ({
@@ -1533,35 +2223,131 @@ export function createLyraStore(options?: {
         return [];
       }
       // Desktop shell may inject MagicDNS peers via ingestTailscalePeers before this runs
-      const candidates = s.devices.filter(
-        (d) =>
-          (d.host && isLikelyTailscaleHost(d.host)) ||
+      const candidates = s.devices.filter((d) => {
+        const host = resolveDeviceHost(d);
+        return (
+          Boolean(d.tailscaleHost) ||
+          (host && isLikelyTailscaleHost(host)) ||
           d.connectionType === "tailscale" ||
-          d.connectionType === "both",
+          d.connectionType === "both"
+        );
+      });
+      // Also probe raw hints not yet saved as devices
+      const hintTargets = s.tailscalePeerHints.filter(
+        (h) =>
+          h.host &&
+          !candidates.some(
+            (d) => d.host === h.host || d.tailscaleHost === h.host,
+          ),
       );
-      if (candidates.length === 0) {
+      if (candidates.length === 0 && hintTargets.length === 0) {
         notify(
           set,
-          "No Tailscale peers — run desktop shell (MagicDNS) or add a 100.x / *.ts.net address",
+          "No Tailscale peers — add a 100.x / *.ts.net address, or Scan Tailscale",
           "info",
         );
         return [];
       }
-      const results = await probePeers(
-        candidates.map((d) => ({
-          host: d.host!,
-          port: d.port ?? s.settings.peerListenPort,
+      const basePort = s.settings.peerListenPort ?? LYRA_DEFAULT_PORT;
+      // Prefer stored port, then common fallbacks (EADDRINUSE port steal on multi-instance)
+      const portFallbacks = (preferred?: number) => {
+        const set = new Set<number>([
+          preferred && preferred > 0 ? preferred : basePort,
+          basePort,
+          basePort + 2,
+          basePort + 4,
+          basePort + 10,
+          LYRA_DEFAULT_PORT,
+        ]);
+        return [...set];
+      };
+
+      type Target = { host: string; ports: number[]; deviceId: string | null };
+      const probeList: Target[] = [
+        ...candidates.map((d) => ({
+          host: d.tailscaleHost || resolveDeviceHost(d) || d.host!,
+          ports: portFallbacks(d.port),
+          deviceId: d.id as string | null,
         })),
-        { timeoutMs: 3000, preferTailscale: true },
-      );
+        ...hintTargets.map((h) => ({
+          host: h.host,
+          ports: portFallbacks(h.port),
+          deviceId: null as string | null,
+        })),
+      ];
+
+      const results: ProbeResult[] = [];
       const now = Date.now();
+      for (const target of probeList) {
+        let best: ProbeResult | null = null;
+        for (const port of target.ports) {
+          const r = await probePeer(
+            { host: target.host, port },
+            { timeoutMs: 1800, preferTailscale: true },
+          );
+          if (r.ok) {
+            best = r;
+            break;
+          }
+          best = r;
+        }
+        results.push(best!);
+        // Promote working port onto the device / hint
+        if (best?.ok) {
+          if (target.deviceId) {
+            set((st) => ({
+              ...st,
+              devices: st.devices.map((d) =>
+                d.id === target.deviceId
+                  ? applyProbeToDevice(
+                      {
+                        ...d,
+                        port: best!.port,
+                        tailscaleHost: d.tailscaleHost || target.host,
+                      },
+                      best!,
+                      now,
+                    )
+                  : d,
+              ),
+            }));
+          } else {
+            // Auto-add reachable Tailscale peers as nearby
+            const exists = getState().devices.some(
+              (d) =>
+                (d.host === best!.host || d.tailscaleHost === best!.host) &&
+                (d.port ?? LYRA_DEFAULT_PORT) === best!.port,
+            );
+            if (!exists) {
+              store.addManualPeer({
+                host: best.host,
+                port: best.port,
+                name: best.name,
+                asTailscale: true,
+              });
+              // Re-apply online/identity from probe
+              set((st) => ({
+                ...st,
+                devices: st.devices.map((d) =>
+                  d.host === best!.host && (d.port ?? LYRA_DEFAULT_PORT) === best!.port
+                    ? applyProbeToDevice(d, best!, now)
+                    : d,
+                ),
+              }));
+            }
+          }
+        } else if (target.deviceId) {
+          set((st) => ({
+            ...st,
+            devices: st.devices.map((d) =>
+              d.id === target.deviceId ? applyProbeToDevice(d, best!, now) : d,
+            ),
+          }));
+        }
+      }
+
       set((st) => ({
         ...st,
-        devices: st.devices.map((d) => {
-          const idx = candidates.findIndex((c) => c.id === d.id);
-          if (idx < 0) return d;
-          return applyProbeToDevice(d, results[idx]!, now);
-        }),
         lastProbeSummary: `Tailscale probe · ${results.filter((r) => r.ok).length}/${results.length} up`,
       }));
       persist();
@@ -1575,26 +2361,45 @@ export function createLyraStore(options?: {
       let added = 0;
       const port = s.settings.peerListenPort ?? LYRA_DEFAULT_PORT;
       const now = Date.now();
+      // Always surface hints in UI even when already device-mapped
+      set((st) => ({
+        ...st,
+        tailscalePeerHints: peers
+          .filter((p) => p.host?.trim())
+          .map((p) => ({
+            host: p.host!.trim(),
+            port: p.port ?? port,
+            name: p.name,
+            online: p.online,
+            tailscaleIp: isLikelyTailscaleHost(p.host!.trim()) ? p.host!.trim() : undefined,
+          })),
+      }));
       for (const p of peers) {
         const host = p.host?.trim();
         if (!host) continue;
         const exists = s.devices.some(
-          (d) => d.host === host && (d.port ?? port) === (p.port ?? port),
+          (d) =>
+            (d.host === host || d.tailscaleHost === host) &&
+            (d.port ?? port) === (p.port ?? port),
         );
         if (exists) {
           // Refresh reachability for existing nearby/trusted entries
           set((st) => ({
             ...st,
             devices: st.devices.map((d) =>
-              d.host === host && (d.port ?? port) === (p.port ?? port)
+              d.host === host || d.tailscaleHost === host
                 ? {
                     ...d,
                     online: p.online !== false,
                     lastSeenAt: now,
+                    tailscaleHost: d.tailscaleHost || (isLikelyTailscaleHost(host) ? host : d.tailscaleHost),
+                    host: d.host || host,
                     connectionType:
                       d.connectionType === "local" || d.connectionType === "manual"
                         ? "both"
-                        : d.connectionType,
+                        : d.connectionType === "tailscale"
+                          ? "tailscale"
+                          : d.connectionType,
                   }
                 : d,
             ),
@@ -1617,6 +2422,8 @@ export function createLyraStore(options?: {
           autoAcceptClipboard: s.settings.autoAcceptClipboard,
           showInMainList: false,
           host,
+          tailscaleHost: isLikelyTailscaleHost(host) ? host : undefined,
+          preferredAddress: "tailscale",
           port: p.port ?? port,
         };
         set((st) => ({ ...st, devices: [device, ...st.devices] }));
@@ -1691,12 +2498,15 @@ export function createLyraStore(options?: {
           devices: st.devices.map((d) =>
             d.id === trusted.id
               ? {
-                  ...d,
-                  host,
-                  port,
+                  ...applyReachableEndpoint(
+                    {
+                      ...d,
+                      name: d.nickname ? d.name : announce.identity.name || d.name,
+                    },
+                    { host, port, protocol: "http" },
+                  ),
                   online: true,
                   lastSeenAt: now,
-                  name: d.nickname ? d.name : announce.identity.name || d.name,
                 }
               : d,
           ),
@@ -1709,7 +2519,8 @@ export function createLyraStore(options?: {
         (d) =>
           d.id === announce.identity.id ||
           d.fingerprint === announce.identity.fingerprint ||
-          (d.host === host && (d.port ?? LYRA_DEFAULT_PORT) === port),
+          (d.host === host && (d.port ?? LYRA_DEFAULT_PORT) === port) ||
+          d.tailscaleHost === host,
       );
       if (existing) {
         set((st) => ({
@@ -1717,21 +2528,22 @@ export function createLyraStore(options?: {
           devices: st.devices.map((d) =>
             d.id === existing.id
               ? {
-                  ...d,
-                  // Prefer real peer identity id once discovered (unless already trusted under another id)
-                  id: d.authSecret ? d.id : announce.identity.id,
-                  name: announce.identity.name || d.name,
-                  type: announce.identity.type ?? d.type,
-                  platform: announce.identity.platform ?? d.platform,
-                  fingerprint: announce.identity.fingerprint || d.fingerprint,
-                  publicKey: announce.identity.publicKey || d.publicKey,
-                  host,
-                  port,
+                  ...applyReachableEndpoint(
+                    {
+                      ...d,
+                      // Prefer real peer identity id once discovered (unless already trusted under another id)
+                      id: d.authSecret ? d.id : announce.identity.id,
+                      name: announce.identity.name || d.name,
+                      type: announce.identity.type ?? d.type,
+                      platform: announce.identity.platform ?? d.platform,
+                      fingerprint: announce.identity.fingerprint || d.fingerprint,
+                      publicKey: announce.identity.publicKey || d.publicKey,
+                      showInMainList: d.authSecret ? d.showInMainList : false,
+                    },
+                    { host, port, protocol: "http" },
+                  ),
                   online: true,
                   lastSeenAt: now,
-                  connectionType: d.connectionType === "tailscale" ? "both" : "local",
-                  // Stay nearby until trusted
-                  showInMainList: d.authSecret ? d.showInMainList : false,
                 }
               : d,
           ),
@@ -1739,6 +2551,7 @@ export function createLyraStore(options?: {
         return;
       }
 
+      const isTs = isLikelyTailscaleHost(host);
       const device: PairedDevice = {
         id: announce.identity.id,
         name: announce.identity.name || host,
@@ -1749,12 +2562,14 @@ export function createLyraStore(options?: {
         pairedAt: now,
         lastSeenAt: now,
         online: true,
-        connectionType: "local",
+        connectionType: isTs ? "tailscale" : "local",
         autoAcceptTransfers: s.settings.autoAcceptTransfers,
         autoAcceptClipboard: s.settings.autoAcceptClipboard,
         showInMainList: false,
         host,
         port,
+        tailscaleHost: isTs ? host : undefined,
+        preferredAddress: isTs ? "tailscale" : "auto",
       };
       set((st) => ({ ...st, devices: [device, ...st.devices] }));
       // Quiet ingest — no toast spam on every announce
@@ -1794,52 +2609,83 @@ export function createLyraStore(options?: {
       if (!device || !s.identity || !s.privateKey) {
         return { ok: false as const, error: "Device not ready" };
       }
-      if (!device.host) return { ok: false as const, error: "Device has no host" };
+      if (!resolveDeviceHost(device)) {
+        return { ok: false as const, error: "Device has no host" };
+      }
       if (device.authSecret) {
         notify(set, "Already trusted", "info");
         return { ok: true as const };
       }
       const token = generateId("tok");
+      const localHost = localLanHostFromState(s) ?? s.localLanHint ?? undefined;
+      const localPort = s.peerServer.port ?? s.settings.peerListenPort;
+      notify(set, `Waiting for ${device.name} to accept pairing…`, "info");
       const res = await wireTrustHandshake({
         device,
         identity: s.identity,
         privateKey: s.privateKey,
         pairingToken: token,
+        localHost: localHost ?? undefined,
+        localPort: localPort ?? undefined,
       });
       if (!res.ok) {
         notify(set, `Trust failed: ${res.error}`, "error");
         return res;
       }
-      // Refresh identity from live peer
-      const probe = await probePeer({
-        host: device.host,
-        port: device.port ?? s.settings.peerListenPort,
-      });
+      const remote = res.remote;
+      const reachHost = res.host || resolveDeviceHost(device) || device.host;
+      const reachPort = res.port ?? device.port ?? s.settings.peerListenPort ?? LYRA_DEFAULT_PORT;
+      const isTs =
+        Boolean(device.tailscaleHost) ||
+        device.connectionType === "tailscale" ||
+        (reachHost ? isLikelyTailscaleHost(reachHost) : false);
       set((st) => ({
         ...st,
-        devices: st.devices.map((d) =>
-          d.id === deviceId
-            ? {
-                ...d,
-                authSecret: res.authSecret,
-                fingerprint: probe.ok ? probe.fingerprint : d.fingerprint,
-                name: probe.ok && !d.nickname ? probe.name : d.name,
-                platform: probe.ok
-                  ? (probe.platform as PairedDevice["platform"])
-                  : d.platform,
-                online: probe.ok ? true : d.online,
-                lastSeenAt: Date.now(),
-                showInMainList: true,
-              }
-            : d,
-        ),
+        devices: st.devices
+          .filter((d) => {
+            // Drop duplicate nearby entries that match the real remote id
+            if (d.id === deviceId) return true;
+            if (d.id === remote.id) return false;
+            if (d.fingerprint === remote.fingerprint) return false;
+            return true;
+          })
+          .map((d) =>
+            d.id === deviceId
+              ? {
+                  ...d,
+                  // Promote manual_* id to the peer's real identity id
+                  id: remote.id,
+                  authSecret: res.authSecret,
+                  fingerprint: remote.fingerprint || d.fingerprint,
+                  publicKey: remote.publicKey || d.publicKey,
+                  name: d.nickname ? d.name : remote.name || d.name,
+                  type: remote.type || d.type,
+                  platform: (remote.platform as PairedDevice["platform"]) || d.platform,
+                  host: isTs && device.tailscaleHost ? device.host || reachHost : reachHost,
+                  port: reachPort,
+                  tailscaleHost:
+                    device.tailscaleHost ||
+                    (isTs && reachHost ? reachHost : d.tailscaleHost),
+                  preferredAddress: isTs ? "tailscale" : d.preferredAddress ?? "auto",
+                  connectionType: isTs
+                    ? device.host && device.tailscaleHost
+                      ? "both"
+                      : "tailscale"
+                    : d.connectionType === "manual"
+                      ? "local"
+                      : d.connectionType,
+                  online: true,
+                  lastSeenAt: Date.now(),
+                  showInMainList: true,
+                  status: d.status
+                    ? { ...d.status, deviceId: remote.id }
+                    : d.status,
+                }
+              : d,
+          ),
       }));
       persist();
-      notify(
-        set,
-        `Trusted ${device.name} locally — confirm on the other device if prompted`,
-        "success",
-      );
+      notify(set, `Paired with ${remote.name || device.name}`, "success");
       return { ok: true as const };
     },
     applyRemoteStatus: (deviceId, status) => {
@@ -1944,6 +2790,7 @@ export function createLyraStore(options?: {
       const targets =
         targetDeviceIds ??
         s.devices.filter((d) => d.online && d.showInMainList).map((d) => d.id);
+      const live = s.devices.filter((d) => targets.includes(d.id) && isLivePeer(d) && d.authSecret);
       const item: ClipboardItem = {
         id: generateId("clip"),
         type: "text",
@@ -1952,6 +2799,12 @@ export function createLyraStore(options?: {
         sourceDeviceName: s.identity.name,
         createdAt: Date.now(),
         pinned: false,
+        deliveryStatus: live.length > 0 ? "sending" : targets.length > 0 ? "failed" : "local",
+        deliveryError:
+          live.length === 0 && targets.length > 0
+            ? "No reachable paired peer"
+            : undefined,
+        deliveredTo: [],
       };
       set((st) => ({
         ...st,
@@ -1960,29 +2813,81 @@ export function createLyraStore(options?: {
       }));
       persist();
 
-      // Real wire push to live peers with host + auth
-      const live = s.devices.filter((d) => targets.includes(d.id) && isLivePeer(d) && d.authSecret);
-      for (const device of live) {
-        void wirePushClipboard({
-          device,
-          identity: s.identity!,
-          privateKey: s.privateKey!,
-          item,
-        }).then((res) => {
-          if (!res.ok) {
-            notify(set, `Clipboard to ${device.name} failed: ${res.error}`, "error");
-          }
-        });
+      if (live.length === 0) {
+        notify(
+          set,
+          targets.length > 0
+            ? "Saved to history — no reachable paired peer (check host/Tailscale)"
+            : "Saved to clipboard history",
+          targets.length > 0 ? "info" : "success",
+        );
+        return;
       }
 
-      const count = targets.length;
       notify(
         set,
-        count > 0
-          ? `Clipboard sent to ${count} device${count === 1 ? "" : "s"}${live.length ? " (wire)" : ""}`
-          : "Saved to clipboard history",
-        "success",
+        `Sending clipboard to ${live.length} device${live.length === 1 ? "" : "s"}…`,
+        "info",
       );
+
+      void (async () => {
+        let okCount = 0;
+        const deliveredTo: string[] = [];
+        let lastError: string | undefined;
+        for (const device of live) {
+          // Use freshest device record (host may update mid-flight)
+          const current =
+            getState().devices.find((d) => d.id === device.id) ?? device;
+          const res = await wirePushClipboard({
+            device: current,
+            identity: s.identity!,
+            privateKey: s.privateKey!,
+            item,
+          });
+          if (res.ok) {
+            okCount++;
+            deliveredTo.push(device.id);
+            if (res.endpoint) {
+              set((st) => ({
+                ...st,
+                devices: st.devices.map((d) =>
+                  d.id === device.id ? applyReachableEndpoint(d, res.endpoint!) : d,
+                ),
+              }));
+            }
+          } else {
+            lastError = res.error;
+            notify(
+              set,
+              `Clipboard to ${device.nickname || device.name} failed: ${res.error}`,
+              "error",
+            );
+          }
+        }
+        set((st) => ({
+          ...st,
+          clipboardHistory: st.clipboardHistory.map((c) =>
+            c.id === item.id
+              ? {
+                  ...c,
+                  deliveryStatus: okCount > 0 ? ("sent" as const) : ("failed" as const),
+                  deliveryError: okCount > 0 ? undefined : lastError,
+                  deliveredTo,
+                }
+              : c,
+          ),
+        }));
+        persist();
+        if (okCount > 0) {
+          notify(
+            set,
+            `Clipboard sent to ${okCount} device${okCount === 1 ? "" : "s"} (wire)`,
+            "success",
+          );
+        } else if (live.length > 0) {
+          notify(set, "Clipboard could not reach any peer", "error");
+        }
+      })();
     },
     pushClipboardImage: (imageData, targetDeviceIds, options) => {
       const s = getState();
@@ -2006,21 +2911,45 @@ export function createLyraStore(options?: {
       }));
       persist();
       const live = s.devices.filter((d) => targets.includes(d.id) && isLivePeer(d) && d.authSecret);
-      for (const device of live) {
-        void wirePushClipboard({
-          device,
-          identity: s.identity!,
-          privateKey: s.privateKey!,
-          item,
-        });
+      if (live.length === 0) {
+        notify(
+          set,
+          targets.length > 0
+            ? "Image saved — no reachable paired peer"
+            : "Image saved to history",
+          targets.length > 0 ? "info" : "success",
+        );
+        return;
       }
-      notify(
-        set,
-        targets.length > 0
-          ? `Image clipboard sent to ${targets.length} device(s)`
-          : "Image saved to history",
-        "success",
-      );
+      notify(set, `Sending image to ${live.length} device(s)…`, "info");
+      void (async () => {
+        let okCount = 0;
+        for (const device of live) {
+          const res = await wirePushClipboard({
+            device,
+            identity: s.identity!,
+            privateKey: s.privateKey!,
+            item,
+          });
+          if (res.ok) {
+            okCount++;
+            if (res.endpoint) {
+              set((st) => ({
+                ...st,
+                devices: st.devices.map((d) =>
+                  d.id === device.id ? applyReachableEndpoint(d, res.endpoint!) : d,
+                ),
+              }));
+            }
+          } else {
+            notify(set, `Image to ${device.nickname || device.name} failed: ${res.error}`, "error");
+          }
+        }
+        persist();
+        if (okCount > 0) {
+          notify(set, `Image clipboard sent to ${okCount} device(s)`, "success");
+        }
+      })();
     },
     receiveClipboardItem: (item) => {
       const s = getState();
@@ -2289,6 +3218,14 @@ export function createLyraStore(options?: {
               persist();
               notify(set, `Transfer failed: ${res.error}`, "error");
               return;
+            }
+            if (res.endpoint) {
+              set((st) => ({
+                ...st,
+                devices: st.devices.map((d) =>
+                  d.id === device.id ? applyReachableEndpoint(d, res.endpoint!) : d,
+                ),
+              }));
             }
             const verify =
               tx.verifyIntegrity ?? getState().settings.verifyTransferIntegrity;

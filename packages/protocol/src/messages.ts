@@ -42,6 +42,13 @@ export const MessageTypeSchema = z.enum([
   "fs_mutate_ack",
   "open_url",
   "open_url_ack",
+  /** Viewer asks source to start streaming screen frames (Sefirah/scrcpy-inspired). */
+  "screen_share_request",
+  "screen_share_accept",
+  "screen_share_reject",
+  "screen_share_stop",
+  /** JPEG/WebP frame payload from source → viewer. */
+  "screen_frame",
   "ping",
   "pong",
 ]);
@@ -114,6 +121,9 @@ export type PairConfirmPayload = z.infer<typeof PairConfirmPayloadSchema>;
 
 export const ClipboardPushPayloadSchema = ClipboardItemSchema.omit({
   pinned: true,
+  deliveryStatus: true,
+  deliveryError: true,
+  deliveredTo: true,
 }).extend({
   pinned: z.boolean().optional(),
 });
@@ -253,3 +263,51 @@ export const OpenUrlAckPayloadSchema = z.object({
   error: z.string().optional(),
 });
 export type OpenUrlAckPayload = z.infer<typeof OpenUrlAckPayloadSchema>;
+
+/** Viewer → source: start a screen share session. */
+export const ScreenShareRequestPayloadSchema = z.object({
+  sessionId: z.string().min(1),
+  /** Preferred max long-edge pixels (default 720). */
+  maxEdge: z.number().int().positive().max(1920).default(720),
+  /** Preferred frames per second (soft cap). */
+  fps: z.number().int().positive().max(30).default(12),
+  /** JPEG quality 0–1 when source encodes JPEG. */
+  quality: z.number().min(0.1).max(1).default(0.72),
+});
+export type ScreenShareRequestPayload = z.infer<typeof ScreenShareRequestPayloadSchema>;
+
+export const ScreenShareAcceptPayloadSchema = z.object({
+  sessionId: z.string().min(1),
+  width: z.number().int().positive().optional(),
+  height: z.number().int().positive().optional(),
+  fps: z.number().int().positive().optional(),
+  /** Source capability notes for UI. */
+  mode: z.enum(["p2p", "scrcpy", "demo", "unavailable"]).default("p2p"),
+  mimeType: z.enum(["image/jpeg", "image/webp", "image/png"]).default("image/jpeg"),
+});
+export type ScreenShareAcceptPayload = z.infer<typeof ScreenShareAcceptPayloadSchema>;
+
+export const ScreenShareRejectPayloadSchema = z.object({
+  sessionId: z.string().min(1),
+  reason: z.string().min(1),
+});
+export type ScreenShareRejectPayload = z.infer<typeof ScreenShareRejectPayloadSchema>;
+
+export const ScreenShareStopPayloadSchema = z.object({
+  sessionId: z.string().min(1),
+  reason: z.string().optional(),
+});
+export type ScreenShareStopPayload = z.infer<typeof ScreenShareStopPayloadSchema>;
+
+export const ScreenFramePayloadSchema = z.object({
+  sessionId: z.string().min(1),
+  /** Monotonic frame sequence. */
+  seq: z.number().int().nonnegative(),
+  width: z.number().int().positive(),
+  height: z.number().int().positive(),
+  mimeType: z.enum(["image/jpeg", "image/webp", "image/png"]).default("image/jpeg"),
+  /** Base64 image body (no data-URL prefix). */
+  dataBase64: z.string().min(1),
+  capturedAt: z.number().int().nonnegative(),
+});
+export type ScreenFramePayload = z.infer<typeof ScreenFramePayloadSchema>;

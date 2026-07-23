@@ -9,7 +9,7 @@ import * as Clipboard from "expo-clipboard";
 import * as DocumentPicker from "expo-document-picker";
 import { Stack, useLocalSearchParams } from "expo-router";
 import { useEffect, useState } from "react";
-import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
+import { Image, Pressable, ScrollView, Text, TextInput, View } from "react-native";
 
 import { IosSwitch } from "@/components/ui/ios-switch";
 import { useAppTheme } from "@/contexts/app-theme-context";
@@ -21,8 +21,12 @@ export default function DeviceDetailScreen() {
   const store = useLyraStore();
   const { isDark } = useAppTheme();
   const device = useLyraSelector((s) => s.devices.find((d) => d.id === id));
+  const screenSession = useLyraSelector((s) => (id ? s.screenSessions[id] : undefined));
   const [path, setPath] = useState("/");
   const [nickname, setNickname] = useState(device?.nickname ?? "");
+  const [lanHost, setLanHost] = useState(device?.host ?? "");
+  const [tsHost, setTsHost] = useState(device?.tailscaleHost ?? "");
+  const [mirrorBusy, setMirrorBusy] = useState(false);
   const cacheKey = `${id}::${path}`;
   const entries = useLyraSelector((s) => s.remoteFsCache[cacheKey] ?? []);
 
@@ -88,6 +92,71 @@ export default function DeviceDetailScreen() {
             }}
             value={nickname}
           />
+          <Text style={{ color: muted, fontFamily: fonts.semiBold, fontSize: 12, marginTop: 16 }}>
+            LAN host / IP
+          </Text>
+          <TextInput
+            onChangeText={setLanHost}
+            placeholder="192.168.1.42"
+            placeholderTextColor={muted}
+            autoCapitalize="none"
+            autoCorrect={false}
+            style={{
+              borderColor: isDark ? "rgba(255,255,255,0.1)" : "rgba(0,0,0,0.08)",
+              borderRadius: 8,
+              borderWidth: 1,
+              color: ink,
+              fontFamily: fonts.medium,
+              marginTop: 6,
+              paddingHorizontal: 14,
+              paddingVertical: 10,
+            }}
+            value={lanHost}
+          />
+          <Text style={{ color: muted, fontFamily: fonts.semiBold, fontSize: 12, marginTop: 12 }}>
+            Tailscale IP / MagicDNS
+          </Text>
+          <TextInput
+            onChangeText={setTsHost}
+            placeholder="100.83.145.32"
+            placeholderTextColor={muted}
+            autoCapitalize="none"
+            autoCorrect={false}
+            style={{
+              borderColor: isDark ? "rgba(255,255,255,0.1)" : "rgba(0,0,0,0.08)",
+              borderRadius: 8,
+              borderWidth: 1,
+              color: ink,
+              fontFamily: fonts.medium,
+              marginTop: 6,
+              paddingHorizontal: 14,
+              paddingVertical: 10,
+            }}
+            value={tsHost}
+          />
+          <Pressable
+            onPress={() => {
+              store.updateDeviceAddress(device.id, {
+                host: lanHost.trim() || null,
+                tailscaleHost: tsHost.trim() || null,
+              });
+              const probe = tsHost.trim() || lanHost.trim();
+              if (probe) void store.probePeerAddress({ host: probe, port: device.port });
+            }}
+            style={{
+              alignSelf: "flex-start",
+              backgroundColor: isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)",
+              borderRadius: 8,
+              marginTop: 10,
+              paddingHorizontal: 14,
+              paddingVertical: 8,
+            }}
+          >
+            <Text style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 13 }}>
+              Save addresses
+            </Text>
+          </Pressable>
+
           <Pressable
             onPress={() => store.renameDevice(device.id, nickname)}
             style={{
@@ -118,6 +187,109 @@ export default function DeviceDetailScreen() {
             ink={ink}
             accent={accent}
           />
+        </View>
+
+        <View style={{ backgroundColor: card, borderRadius: 14, padding: 16, gap: 12 }}>
+          <Text style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 16 }}>Screen mirror</Text>
+          <Text style={{ color: muted, fontFamily: fonts.regular, fontSize: 12 }}>
+            Preview cast of a peer. Demo frames always work. Live desktop capture needs the desktop
+            app to allow screen share; high-quality Android mirror uses scrcpy + wireless debugging
+            from desktop (enable Developer options → Wireless debugging, adb connect over Tailscale).
+          </Text>
+          <View
+            style={{
+              alignSelf: "center",
+              backgroundColor: "#0a0a0a",
+              borderColor: "#3f3f46",
+              borderRadius: 36,
+              borderWidth: 10,
+              height: 360,
+              overflow: "hidden",
+              width: 180,
+            }}
+          >
+            {screenSession?.lastFrameDataUrl ? (
+              <Image
+                source={{ uri: screenSession.lastFrameDataUrl }}
+                style={{ height: "100%", width: "100%" }}
+                resizeMode="cover"
+              />
+            ) : (
+              <View style={{ alignItems: "center", flex: 1, justifyContent: "center", padding: 16 }}>
+                <Text style={{ color: "#71717a", fontFamily: fonts.medium, fontSize: 12, textAlign: "center" }}>
+                  Start mirror to cast
+                </Text>
+              </View>
+            )}
+          </View>
+          {screenSession &&
+          (screenSession.status === "active" || screenSession.status === "requesting") ? (
+            <Pressable
+              disabled={mirrorBusy}
+              onPress={() => {
+                setMirrorBusy(true);
+                void store.stopScreenMirror(device.id).finally(() => setMirrorBusy(false));
+              }}
+              style={{
+                alignItems: "center",
+                backgroundColor: "#dc2626",
+                borderRadius: 8,
+                paddingVertical: 10,
+              }}
+            >
+              <Text style={{ color: "#fff", fontFamily: fonts.semiBold, fontSize: 13 }}>
+                Stop mirror
+              </Text>
+            </Pressable>
+          ) : (
+            <View style={{ flexDirection: "row", gap: 8 }}>
+              <Pressable
+                disabled={mirrorBusy}
+                onPress={() => {
+                  setMirrorBusy(true);
+                  void store
+                    .startScreenMirror(device.id, { mode: "auto" })
+                    .finally(() => setMirrorBusy(false));
+                }}
+                style={{
+                  alignItems: "center",
+                  backgroundColor: accent,
+                  borderRadius: 8,
+                  flex: 1,
+                  paddingVertical: 10,
+                }}
+              >
+                <Text style={{ color: "#fff", fontFamily: fonts.semiBold, fontSize: 13 }}>
+                  Start mirror
+                </Text>
+              </Pressable>
+              <Pressable
+                disabled={mirrorBusy}
+                onPress={() => {
+                  setMirrorBusy(true);
+                  void store
+                    .startScreenMirror(device.id, { mode: "demo" })
+                    .finally(() => setMirrorBusy(false));
+                }}
+                style={{
+                  alignItems: "center",
+                  backgroundColor: isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)",
+                  borderRadius: 8,
+                  flex: 1,
+                  paddingVertical: 10,
+                }}
+              >
+                <Text style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 13 }}>
+                  Preview
+                </Text>
+              </Pressable>
+            </View>
+          )}
+          {screenSession?.status === "active" ? (
+            <Text style={{ color: muted, fontFamily: fonts.regular, fontSize: 11, textAlign: "center" }}>
+              {screenSession.mode} · {screenSession.fps ?? "—"} fps · {screenSession.frameCount} frames
+            </Text>
+          ) : null}
         </View>
 
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>

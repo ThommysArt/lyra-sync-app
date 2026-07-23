@@ -115,37 +115,75 @@ export default function ClipboardScreen() {
             </Pressable>
           </View>
 
-          {history.map((item) => (
-            <View key={item.id} style={{ backgroundColor: card, borderRadius: 12, padding: 14 }}>
-              <Text style={{ color: ink, fontFamily: fonts.regular, fontSize: 15 }}>
-                {item.text || "[Image]"}
-              </Text>
-              <Text style={{ color: muted, fontFamily: fonts.medium, fontSize: 12, marginTop: 8 }}>
-                {item.sourceDeviceName} · {formatRelativeTime(item.createdAt)}
-                {item.pinned ? " · Pinned" : ""}
-              </Text>
-              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
-                <Action
-                  label="Copy"
-                  onPress={() => {
-                    if (item.text) void Clipboard.setStringAsync(item.text);
-                  }}
-                  ink={ink}
-                />
-                <Action
-                  label={item.pinned ? "Unpin" : "Pin"}
-                  onPress={() => store.pinClipboardItem(item.id, !item.pinned)}
-                  ink={ink}
-                />
-                <Action
-                  label="Resend"
-                  onPress={() => store.resendClipboardItem(item.id, onlineIds)}
-                  ink={ink}
-                />
-                <Action label="Delete" onPress={() => store.removeClipboardItem(item.id)} ink={ink} />
+          {history.map((item) => {
+            const status = item.deliveryStatus;
+            const statusLabel =
+              status === "sending"
+                ? "Sending…"
+                : status === "sent"
+                  ? `Sent${item.deliveredTo?.length ? ` · ${item.deliveredTo.length}` : ""}`
+                  : status === "failed"
+                    ? "Failed — resend"
+                    : status === "local"
+                      ? "Local only"
+                      : null;
+            const statusColor =
+              status === "sent"
+                ? "#34C759"
+                : status === "failed"
+                  ? "#ef4444"
+                  : status === "sending"
+                    ? accent
+                    : muted;
+            return (
+              <View key={item.id} style={{ backgroundColor: card, borderRadius: 12, padding: 14 }}>
+                <Text style={{ color: ink, fontFamily: fonts.regular, fontSize: 15 }}>
+                  {item.text || "[Image]"}
+                </Text>
+                <Text style={{ color: muted, fontFamily: fonts.medium, fontSize: 12, marginTop: 8 }}>
+                  {item.sourceDeviceName} · {formatRelativeTime(item.createdAt)}
+                  {item.pinned ? " · Pinned" : ""}
+                </Text>
+                {statusLabel ? (
+                  <Text
+                    style={{
+                      color: statusColor,
+                      fontFamily: fonts.semiBold,
+                      fontSize: 12,
+                      marginTop: 6,
+                    }}
+                  >
+                    {statusLabel}
+                    {item.deliveryError && status === "failed" ? ` · ${item.deliveryError}` : ""}
+                  </Text>
+                ) : null}
+                <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
+                  <Action
+                    label="Copy"
+                    onPress={() => {
+                      if (item.text) void Clipboard.setStringAsync(item.text);
+                    }}
+                    ink={ink}
+                  />
+                  <Action
+                    label={item.pinned ? "Unpin" : "Pin"}
+                    onPress={() => store.pinClipboardItem(item.id, !item.pinned)}
+                    ink={ink}
+                  />
+                  <Action
+                    label="Resend"
+                    onPress={() => store.resendClipboardItem(item.id, onlineIds)}
+                    ink={ink}
+                  />
+                  <Action
+                    label="Delete"
+                    onPress={() => store.removeClipboardItem(item.id)}
+                    ink={ink}
+                  />
+                </View>
               </View>
-            </View>
-          ))}
+            );
+          })}
         </View>
       </ScrollView>
     </View>
