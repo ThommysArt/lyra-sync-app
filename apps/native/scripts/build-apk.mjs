@@ -78,6 +78,10 @@ const variant = resolveVariant();
 const version = readVersion();
 const slug = variantSlug(variant);
 process.env.APP_VARIANT = variant;
+// expo-constants createExpoConfig requires NODE_ENV (Gradle invokes node without Expo CLI)
+if (!process.env.NODE_ENV) {
+  process.env.NODE_ENV = buildType === "debug" ? "development" : "production";
+}
 
 console.log(`\n[lyra] Building ${variant} APK · version ${version} · ${buildType}\n`);
 
@@ -86,7 +90,12 @@ if (!skipPrebuild) {
   run(
     "pnpm",
     ["exec", "expo", "prebuild", "--platform", "android", "--clean", "--non-interactive"],
-    { env: { APP_VARIANT: variant } },
+    {
+      env: {
+        APP_VARIANT: variant,
+        NODE_ENV: process.env.NODE_ENV,
+      },
+    },
   );
 } else if (!existsSync(androidRoot)) {
   console.error("[lyra] android/ missing — run without --skip-prebuild first");
@@ -122,6 +131,7 @@ run("./gradlew", [gradleTask], {
   cwd: androidRoot,
   env: {
     APP_VARIANT: variant,
+    NODE_ENV: process.env.NODE_ENV,
     EXPO_PUBLIC_LYRA_ENV:
       process.env.EXPO_PUBLIC_LYRA_ENV ||
       (variant === "development" ? "development" : variant === "preview" ? "preview" : "production"),

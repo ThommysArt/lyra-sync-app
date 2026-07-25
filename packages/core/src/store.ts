@@ -711,15 +711,30 @@ function localLanHostFromState(s: LyraState): string | undefined {
 function collectPairingCandidates(s: LyraState): { host: string; port?: number }[] {
   const port = s.settings.peerListenPort ?? LYRA_DEFAULT_PORT;
   const seeds: { host: string; port?: number }[] = [];
-  for (const d of s.devices) {
-    if (d.host) seeds.push({ host: d.host, port: d.port ?? port });
-  }
-  seeds.push({ host: "127.0.0.1", port });
-  seeds.push({ host: "localhost", port });
+  const seen = new Set<string>();
+  const add = (host: string | null | undefined, p?: number) => {
+    const h = host?.trim();
+    if (!h) return;
+    const key = `${h}:${p ?? port}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    seeds.push({ host: h, port: p ?? port });
+  };
 
-  // Prefer LAN IP from peer server / native hint for /24 expansion
+  for (const d of s.devices) {
+    add(d.host, d.port ?? port);
+    add(d.tailscaleHost, d.port ?? port);
+    add(d.lastReachableHost, d.lastReachablePort ?? d.port ?? port);
+  }
+  add("127.0.0.1", port);
+  add("localhost", port);
+
+  // Prefer LAN IP from peer server / native hint for /24 expansion.
+  // Do not invent random home /24s here — code-join without a real LAN hint
+  // should not walk 192.168.1.0/24 on every failed attempt (~tens of seconds).
+  // refreshDiscovery still seeds common gateways when IP is Tailscale-only.
   const lan = localLanHostFromState(s) ?? s.localLanHint ?? undefined;
-  if (lan) seeds.push({ host: lan, port });
+  add(lan, port);
 
   return seeds;
 }
@@ -1138,19 +1153,53 @@ export function createLyraStore(options?: {
         console.info("[lyra pair] seed probe", seeds.length, "candidates", match ? "HIT" : "MISS");
       }
 
-      // 3) Full /24 HTTP scan (LocalSend-style)
+      // 3) Full /24 HTTP scan (LocalSend-style) with multi-port (variants + steal)
       if (!match) {
         const seeds = collectPairingCandidates(s0);
         if (manualHost) seeds.unshift({ host: manualHost, port });
         if (s0.localLanHint) seeds.unshift({ host: s0.localLanHint, port });
-        const expanded = expandLanCandidates(seeds, port);
-        console.info("[lyra pair] LAN /24 scan", expanded.length, "hosts");
+        // Phone on Tailscale often reports only 100.x — still walk common Wi‑Fi /24s
+        // for code join (one intentional action; refreshDiscovery does the same).
+        if (s0.localLanHint && isLikelyTailscaleHost(s0.localLanHint)) {
+          seeds.unshift({ host: "192.168.1.1", port });
+          seeds.unshift({ host: "192.168.0.1", port });
+        }
+        const expandedHosts = expandLanCandidates(seeds, port);
+        const pairPorts = [
+          ...new Set(
+            [port, LYRA_DEFAULT_PORT, port + 2, LYRA_DEFAULT_PORT + 2, LYRA_DEFAULT_PORT + 4, 53327].filter(
+              (p) => p > 0 && p <= 65535,
+            ),
+          ),
+        ].slice(0, 5);
+        // Exact seeds: full port matrix. Expanded /24: primary + multi-instance ports only.
+        const candidates: { host: string; port: number }[] = [];
+        const seen = new Set<string>();
+        const push = (host: string, p: number) => {
+          const key = `${host}:${p}`;
+          if (seen.has(key)) return;
+          seen.add(key);
+          candidates.push({ host, port: p });
+        };
+        const seedHosts = new Set(seeds.map((s) => s.host));
+        for (const s of seeds) {
+          for (const p of pairPorts) push(s.host, p);
+        }
+        const expandPairPorts = [
+          ...new Set([port, LYRA_DEFAULT_PORT, LYRA_DEFAULT_PORT + 2, LYRA_DEFAULT_PORT + 4]),
+        ].slice(0, 4);
+        for (const ep of expandedHosts) {
+          // Don't re-blow exact seeds (already full matrix)
+          if (seedHosts.has(ep.host)) continue;
+          for (const p of expandPairPorts) push(ep.host, p);
+        }
+        console.info("[lyra pair] LAN /24 scan", candidates.length, "endpoints");
         match = await findPeerByPairingCode({
           codeHash,
-          candidates: expanded,
+          candidates,
           localDeviceId: s0.identity.id,
-          timeoutMs: 700,
-          concurrency: 48,
+          timeoutMs: 500,
+          concurrency: 32,
         });
         console.info("[lyra pair] LAN scan", match ? "HIT" : "MISS");
       }
@@ -2038,10 +2087,14 @@ export function createLyraStore(options?: {
       //    Note: Tailscale CGNAT is /10 — expanding only a /24 of our 100.x IP
       //    will miss peers on other 100.x.y segments (common). For 100.x seeds we
       //    do NOT expand; we only probe exact known hosts (paired / hints).
+      //    CRITICAL: if the only local IP is Tailscale (100.x), still seed common
+      //    home LAN ranges — otherwise expandLanCandidates yields only our own
+      //    100.x (skipped) and discovery finds nothing on Wi‑Fi.
       const seeds = new Set<string>();
       const exactOnly = new Set<string>(); // never expand these to /24
       const lan = localLanHostFromState(getState()) ?? getState().localLanHint;
       const slash24Seen = new Set<string>();
+      let hasExpandableLanSeed = false;
       const considerSeed = (raw: string | null | undefined, expand: boolean) => {
         const h = raw?.trim();
         if (!h) return;
@@ -2056,6 +2109,7 @@ export function createLyraStore(options?: {
           if (slash24Seen.has(key)) return;
           if (slash24Seen.size >= 3) return;
           slash24Seen.add(key);
+          hasExpandableLanSeed = true;
         }
         seeds.add(h);
       };
@@ -2069,17 +2123,43 @@ export function createLyraStore(options?: {
       for (const h of getState().tailscalePeerHints) {
         considerSeed(h.host, false);
       }
-      // Common home/lab prefixes when we have no local IP yet (browser)
-      if (seeds.size === 0) {
-        for (const guess of ["192.168.0.1", "192.168.1.1", "10.0.0.1"]) seeds.add(guess);
+      // No private LAN seed yet (browser / Tailscale-only phone IP): still try
+      // the two most common home /24s so Wi‑Fi peers can be found. Cap at 2 —
+      // each expands to ~254 hosts × expandPorts.
+      if (!hasExpandableLanSeed) {
+        seeds.add("192.168.1.1");
+        seeds.add("192.168.0.1");
       }
 
-      // Multi-port scan: settings port + default + one common variant offset
+      // Full matrix for exact seeds/gateways; /24 expand uses a smaller set.
+      // Include multi-instance offsets (desktop often lands on +2/+4 when 53317 busy).
       const scanPorts = [
         ...new Set(
-          [port, LYRA_DEFAULT_PORT, port + 2, 53327].filter((p) => p > 0 && p <= 65535),
+          [
+            port,
+            LYRA_DEFAULT_PORT,
+            port + 2,
+            port + 4,
+            LYRA_DEFAULT_PORT + 2,
+            LYRA_DEFAULT_PORT + 4,
+            53327,
+            53337,
+          ].filter((p) => p > 0 && p <= 65535),
         ),
-      ].slice(0, 3);
+      ].slice(0, 6);
+      // Full /24 ports: cover multi-instance steal (+2/+4) and preview. Cap at 4 so
+      // ~1000 probes stay under ~15–25s on native (8 concurrent TCP slots).
+      const expandPorts = [
+        ...new Set(
+          [
+            port,
+            LYRA_DEFAULT_PORT,
+            LYRA_DEFAULT_PORT + 2,
+            LYRA_DEFAULT_PORT + 4,
+            53327,
+          ].filter((p) => p > 0 && p <= 65535),
+        ),
+      ].slice(0, 4);
 
       let scannedNew = 0;
       try {
@@ -2095,9 +2175,12 @@ export function createLyraStore(options?: {
         const found = await scanLanForPeers({
           seedHosts: [...seeds],
           ports: scanPorts,
+          expandPorts,
           port,
-          timeoutMs: 700,
-          concurrency: 40,
+          // Transport starts timeout after socket slot — safe under native concurrency limit
+          timeoutMs: 600,
+          // Keep moderate: native TCP caps ~8 in-flight; higher is fine (queue is free)
+          concurrency: 24,
           localDeviceId: s0.identity?.id,
           skipEndpoints,
         });
@@ -2171,16 +2254,24 @@ export function createLyraStore(options?: {
       }
       const online = getState().devices.filter((d) => d.online).length;
       const nearby = getState().devices.filter((d) => !d.authSecret).length;
+      const summary = `LAN scan · ${online} online · ${nearby} nearby · +${scannedNew} new · seeds ${seeds.size} · ports ${scanPorts.join(",")}`;
+      console.info("[lyra discover]", summary, {
+        seeds: [...seeds],
+        expandPorts,
+        ownHost: localLanHostFromState(getState()) ?? getState().localLanHint,
+      });
       set((st) => ({
         ...st,
-        lastProbeSummary: `LAN scan · ${online} online · ${nearby} nearby · +${scannedNew} new`,
+        lastProbeSummary: summary,
       }));
       notify(
         set,
         scannedNew > 0
           ? `Found ${scannedNew} nearby device(s) — Pair to trust`
-          : `Discovery refreshed · ${online} online · ${nearby} nearby`,
-        scannedNew > 0 ? "success" : "info",
+          : online > 0
+            ? `Discovery refreshed · ${online} online · ${nearby} nearby`
+            : `No peers found on LAN (seeds: ${[...seeds].slice(0, 3).join(", ") || "none"}). Check Wi‑Fi, peer port, or add by IP.`,
+        scannedNew > 0 ? "success" : online > 0 ? "info" : "info",
       );
     },
     probePeerAddress: async (input) => {

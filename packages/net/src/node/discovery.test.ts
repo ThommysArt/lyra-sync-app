@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import type { DeviceIdentity } from "@lyra-sync-app/protocol";
+import { LYRA_DEFAULT_PORT, type DeviceIdentity } from "@lyra-sync-app/protocol";
 
 import { listLocalIPv4Addresses, startDiscovery } from "./discovery";
 import { scanLanForPeers } from "../probe";
@@ -101,6 +101,32 @@ describe("LAN discovery (LocalSend patterns)", () => {
       const info = await fetchPeerInfo({ host: "127.0.0.1", port: server.port });
       assert.equal(info.ok, true);
       if (info.ok) assert.equal(info.identity.id, idA.id);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("HTTP scan finds peer on multi-instance port via seed host", async () => {
+    // Simulates desktop on 53319 while mobile defaults to 53317
+    const server = await startPeerServer({
+      identity: idA,
+      port: 0,
+      host: "127.0.0.1",
+    });
+    try {
+      const found = await scanLanForPeers({
+        seedHosts: ["127.0.0.1"],
+        port: LYRA_DEFAULT_PORT,
+        ports: [LYRA_DEFAULT_PORT, server.port, LYRA_DEFAULT_PORT + 2],
+        expandPorts: [LYRA_DEFAULT_PORT],
+        timeoutMs: 500,
+        concurrency: 8,
+        localDeviceId: "other",
+      });
+      assert.ok(
+        found.some((f) => f.identity.id === idA.id && f.port === server.port),
+        `expected to find ${idA.id} on ${server.port}, got ${JSON.stringify(found)}`,
+      );
     } finally {
       await server.close();
     }

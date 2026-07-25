@@ -2,12 +2,22 @@
  * Ensure Android release/debug both allow cleartext HTTP for LAN + Tailscale peers.
  * Expo's `android.usesCleartextTraffic` only reliably lands on debug variants after prebuild;
  * this plugin writes main manifest + network_security_config.xml.
+ *
+ * Resolve @expo/config-plugins via expo (pnpm does not hoist it to apps/native).
  */
+const configPlugins = (() => {
+  try {
+    return require("@expo/config-plugins");
+  } catch {
+    const expoPkg = require.resolve("expo/package.json");
+    return require(require.resolve("@expo/config-plugins", { paths: [expoPkg] }));
+  }
+})();
 const {
   withAndroidManifest,
   withDangerousMod,
   AndroidConfig,
-} = require("@expo/config-plugins");
+} = configPlugins;
 const fs = require("node:fs");
 const path = require("node:path");
 

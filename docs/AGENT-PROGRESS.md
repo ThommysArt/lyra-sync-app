@@ -1,8 +1,63 @@
 # Lyra — Agent Progress Report
 
-**Last updated:** 2026-07-23 (mobile discovery + peer wire path)  
-**Status:** Dev/preview/prod side-by-side · mobile↔desktop wire path fixed · unit green  
+**Last updated:** 2026-07-24 (mobile→desktop pair long-poll + TCP transport)  
+**Status:** Dev/preview/prod side-by-side · mobile outbound pair path fixed · unit green  
 **Plan:** [`docs/GAP-FIX-PLAN.md`](./GAP-FIX-PLAN.md) · **Packaging:** [`docs/PACKAGING.md`](./PACKAGING.md)
+
+---
+
+## 2026-07-24 — Phone cannot discover/pair (desktop sees phone)
+
+### Symptoms
+- Desktop Pair A: discovery + Tailscale scan **see the phone**
+- Phone: discovery/Tailscale find **nothing** (no error toast)
+- Manual LAN/Tailscale add then Pair → **“Timed out waiting for accept”** even though host never showed a banner
+
+### Root causes
+1. **Pair long-poll killed at ~15s** — native TCP transport used a hard 15s timeout whenever `AbortSignal` was set. `sendPairRequest` waits up to 120s for Accept, so the socket was destroyed long before the host could accept. Errors were **mislabeled** as “waiting for accept”.
+2. **TCP module default export** — Metro may expose `react-native-tcp-socket` as `{ default: { Socket, … } }`; bare `.Socket` lookup could fall through / fail, leaving **fetch** for cleartext (unreliable on Android).
+3. **Transport not shared across Metro copies** of `@lyra-sync-app/net` — fixed via `globalThis` singleton.
+4. **Trust used a single host** — now probes full LAN/Tailscale/port candidate matrix.
+
+### Fixes
+- Long-poll `timeoutMs = waitMs + 10s`; safety net 180s when only signal
+- Resolve Socket/createConnection via `mod.default ?? mod`
+- Prefer `interface: "wifi"` for private LAN IPs on Android (Tailscale default route)
+- Honest errors: early timeout = “could not reach peer”; late = “waiting for accept”
+- Request logging on desktop Node peer server + native peer server + pair_request banners
+- Discovery toast includes seeds/ports when 0 peers found
+
+### Rebuild
+```bash
+pnpm run build:dev && pnpm run install:dev
+# restart pair-a desktop so main-process logging is live
+```
+
+### Trace
+- Phone logcat: `[lyra tcp]`, `[lyra trust]`, `[lyra pair]`, `[lyra discover]`
+- Desktop terminal: `[lyra peer] POST /lyra/message … pair_request`, `[lyra] pair_request UI ←`
+
+---
+
+## 2026-07-24 — Mobile discovery still broken (root cause + fix)
+
+### Why Refresh / Scan Tailscale still found 0 devices
+1. **Timeout burned while waiting for a TCP slot** — native transport caps concurrent sockets (`MAX_IN_FLIGHT ≈ 8`), but LAN scan fired AbortController at t=0 with concurrency 40. Most `/lyra/info` probes aborted *before* they ever connected, so almost the entire /24 was skipped.
+2. **Tailscale-only local IP killed LAN expansion** — `expo-network` often returns the Tailscale `100.x` address. That seed is exact-only (no /24 expand) and is also self-skipped → **zero scan candidates** when no paired peers exist yet. Common home LAN guesses only ran when `seeds.size === 0`, which was false.
+3. **Port matrix missed multi-instance desktops** — LocalSend holds `53317`; Lyra Dev often binds `53319`/`53321`. Scan only tried 3 ports and full /24 missed `+4`.
+
+### Fixes
+- Transport-level `timeoutMs` starts **after** a socket slot is acquired; queue wait no longer aborts probes
+- Native TCP slot wait respects AbortSignal without consuming the request budget
+- `scanLanForPeers`: exact seeds + gateways get full port matrix; /24 uses expand ports including `53317/19/21/27`
+- `refreshDiscovery`: if no private LAN seed, always add `192.168.1.1` / `192.168.0.1` / `10.0.0.1` for /24 walk
+- Pairing code join uses multi-port candidates; endpoint matrix includes variant + steal ports
+- Live verified: seed `192.168.1.50` finds desktop `192.168.1.152:53321` (~8s)
+
+### Rebuild required (mobile)
+```bash
+pnpm run build:dev && pnpm run install:dev
+```
 
 ---
 

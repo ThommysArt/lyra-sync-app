@@ -112,7 +112,8 @@ export function deviceEndpointCandidates(
     push(hostField);
   }
 
-  // Keep the matrix small: multi-endpoint auth has a ~2.5s timeout each
+  // Keep the matrix small but cover variants + multi-instance offsets
+  // (desktop often binds 53319/53321 when 53317 is taken by LocalSend etc.)
   const lastPort = device.lastReachablePort;
   const ports = [
     ...new Set(
@@ -122,10 +123,14 @@ export function deviceEndpointCandidates(
         LYRA_DEFAULT_PORT,
         port + 2,
         port + 4,
+        LYRA_DEFAULT_PORT + 2,
+        LYRA_DEFAULT_PORT + 4,
+        53327,
+        53337,
         ...(opts?.extraPorts ?? []),
       ].filter((p) => typeof p === "number" && p > 0 && p <= 65535),
     ),
-  ].slice(0, 4);
+  ].slice(0, 6);
   const out: PeerUrl[] = [];
   // Prefer sticky host:port combo first
   if (device.lastReachableHost && device.lastReachablePort) {
@@ -558,12 +563,36 @@ export async function wireTrustHandshake(input: {
     }
   | { ok: false; error: string }
 > {
-  const host = resolveDeviceHost(input.device);
-  if (!host) return { ok: false, error: "Peer has no host" };
-  const port = input.device.port ?? LYRA_DEFAULT_PORT;
   const { deriveMutualAuthSecret, fetchPeerInfo } = await import("@lyra-sync-app/net");
-  const info = await fetchPeerInfo({ host, port });
-  if (!info.ok) return { ok: false, error: info.error };
+  // Try every LAN/Tailscale/port candidate — single stale host must not block Pair
+  const candidates = deviceEndpointCandidates(input.device);
+  if (candidates.length === 0) return { ok: false, error: "Peer has no host" };
+
+  let liveHost = "";
+  let livePort: number = LYRA_DEFAULT_PORT;
+  let info: Awaited<ReturnType<typeof fetchPeerInfo>> | null = null;
+  const probeErrors: string[] = [];
+  for (const ep of candidates) {
+    const h = ep.host.trim();
+    const p = ep.port ?? LYRA_DEFAULT_PORT;
+    console.info(`[lyra trust] probing ${h}:${p} before pair_request`);
+    const r = await fetchPeerInfo({ host: h, port: p }, { timeoutMs: 4_000 });
+    if (r.ok) {
+      info = r;
+      liveHost = h;
+      livePort = p;
+      console.info(`[lyra trust] probe ok · ${r.identity.name} @ ${h}:${p}`);
+      break;
+    }
+    probeErrors.push(`${h}:${p} → ${r.error}`);
+    console.warn(`[lyra trust] probe failed ${h}:${p}`, r.error);
+  }
+  if (!info || !info.ok) {
+    return {
+      ok: false,
+      error: `Peer unreachable (tried ${candidates.length} endpoint(s)): ${probeErrors.slice(0, 3).join("; ")}`,
+    };
+  }
   const authSecret = await deriveMutualAuthSecret({
     pairingToken: input.pairingToken,
     localFingerprint: input.identity.fingerprint,
@@ -572,9 +601,10 @@ export async function wireTrustHandshake(input: {
     remotePublicKey: info.identity.publicKey,
   });
   // Dual-confirm: wait for host Accept (pair_confirm) before treating as trusted
+  console.info(`[lyra trust] sending pair_request → ${liveHost}:${livePort} (wait for Accept)`);
   const wire = await wireSendPairRequest({
-    host,
-    port,
+    host: liveHost,
+    port: livePort,
     identity: input.identity,
     payload: {
       version: 1,
@@ -617,8 +647,8 @@ export async function wireTrustHandshake(input: {
       ...remote,
       publicKey: confirm.publicKey || remote.publicKey,
     },
-    host: confirm.host || host,
-    port: confirm.port ?? port,
+    host: confirm.host || liveHost,
+    port: confirm.port ?? livePort,
   };
 }
 

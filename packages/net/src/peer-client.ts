@@ -20,7 +20,12 @@ import { createEnvelope, parseEnvelope } from "./envelope";
 import { getHttpTransport } from "./http-transport";
 import { isSealedString, openSealedJson, sealJson } from "./seal";
 
-export { setHttpTransport, type HttpTransport } from "./http-transport";
+export {
+  setHttpTransport,
+  getHttpTransport,
+  hasCustomHttpTransport,
+  type HttpTransport,
+} from "./http-transport";
 
 /** Marker object for AES-GCM sealed payloads (post-pairing encryption default). */
 export const SEALED_PAYLOAD_KEY = "__lyra_sealed" as const;
@@ -75,7 +80,7 @@ export function peerBaseUrl(endpoint: PeerUrl): string {
 async function postJson<T = unknown>(
   url: string,
   body: unknown,
-  init?: { headers?: Record<string, string>; signal?: AbortSignal },
+  init?: { headers?: Record<string, string>; signal?: AbortSignal; timeoutMs?: number },
 ): Promise<{ ok: true; data: T; status: number } | { ok: false; error: string; status: number }> {
   try {
     const http = getHttpTransport();
@@ -88,6 +93,7 @@ async function postJson<T = unknown>(
       },
       body: JSON.stringify(body),
       signal: init?.signal,
+      timeoutMs: init?.timeoutMs,
     });
     const text = await res.text();
     let data: unknown = null;
@@ -115,7 +121,7 @@ async function postJson<T = unknown>(
 
 async function getJson<T = unknown>(
   url: string,
-  init?: { signal?: AbortSignal },
+  init?: { signal?: AbortSignal; timeoutMs?: number },
 ): Promise<{ ok: true; data: T; status: number } | { ok: false; error: string; status: number }> {
   try {
     const http = getHttpTransport();
@@ -123,6 +129,7 @@ async function getJson<T = unknown>(
       method: "GET",
       headers: { accept: "application/json" },
       signal: init?.signal,
+      timeoutMs: init?.timeoutMs,
     });
     const text = await res.text();
     let data: unknown = null;
@@ -173,7 +180,7 @@ export type PeerPairingOffer = {
 /** GET /lyra/info — unauthenticated peer hello. */
 export async function fetchPeerInfo(
   endpoint: PeerUrl,
-  opts?: { signal?: AbortSignal },
+  opts?: { signal?: AbortSignal; timeoutMs?: number },
 ): Promise<
   | {
       ok: true;
@@ -217,6 +224,8 @@ export async function sendEnvelope(
     signal?: AbortSignal;
     /** When set, encrypt payload with AES-GCM (post-pairing default). */
     sealSecret?: string;
+    /** Request budget (pair long-poll must pass waitMs + buffer). */
+    timeoutMs?: number;
   },
 ): Promise<{ ok: true; envelope?: Envelope } | { ok: false; error: string }> {
   const base = peerBaseUrl(endpoint);
@@ -235,6 +244,7 @@ export async function sendEnvelope(
   const res = await postJson(`${base}/lyra/message`, outbound, {
     headers: opts?.sessionToken ? { authorization: `Bearer ${opts.sessionToken}` } : undefined,
     signal: opts?.signal,
+    timeoutMs: opts?.timeoutMs,
   });
   if (!res.ok) return { ok: false, error: res.error };
   if (res.data && typeof res.data === "object" && res.data !== null) {
@@ -579,6 +589,7 @@ export async function sendPairRequest(input: {
   /** How long to wait for the host user to accept (ms). Default 120_000. */
   waitForConfirmMs?: number;
 }): Promise<{ ok: true; envelope?: Envelope } | { ok: false; error: string }> {
+  const endpointLabel = peerBaseUrl(input.endpoint);
   const envelope = createEnvelope({
     type: "pair_request",
     fromDeviceId: input.fromIdentity.id,
@@ -607,25 +618,58 @@ export async function sendPairRequest(input: {
     signal = controller.signal;
   }
 
+  const started = Date.now();
+  console.info(
+    `[lyra pair] POST pair_request → ${endpointLabel} (wait ${Math.round(waitMs / 1000)}s for Accept)`,
+  );
+
   try {
+    // timeoutMs must cover the full Accept long-poll. Previously the native TCP
+    // transport hard-killed at ~15s whenever a signal was present, so the host
+    // never had time to Accept and the joiner always saw a false "waiting" timeout.
     const res = await sendEnvelope(input.endpoint, envelope, {
       sessionToken: input.sessionToken,
       signal,
+      timeoutMs: waitMs + 10_000,
     });
-    if (
-      !res.ok &&
-      /abort|timed out|timeout/i.test(res.error)
-    ) {
-      return {
-        ok: false,
-        error: "Timed out waiting for the other device to accept",
-      };
+    const elapsed = Date.now() - started;
+    if (!res.ok) {
+      console.warn(`[lyra pair] pair_request failed after ${elapsed}ms:`, res.error);
+      if (/abort|timed out|timeout/i.test(res.error)) {
+        // Early failure = could not hold/reach peer; late = host never accepted
+        if (elapsed < Math.min(20_000, waitMs * 0.25)) {
+          return {
+            ok: false,
+            error: `Could not reach peer at ${endpointLabel} (${res.error}). Check Wi‑Fi/Tailscale and that the other device’s peer server is running.`,
+          };
+        }
+        return {
+          ok: false,
+          error: `Timed out waiting for the other device to accept (${Math.round(elapsed / 1000)}s). If no pair banner appeared on the other device, the request never arrived.`,
+        };
+      }
+      return res;
     }
+    console.info(
+      `[lyra pair] pair_request reply after ${elapsed}ms:`,
+      res.envelope?.type ?? "ok",
+    );
     return res;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
+    const elapsed = Date.now() - started;
+    console.warn(`[lyra pair] pair_request threw after ${elapsed}ms:`, msg);
     if (/abort|timed out|timeout/i.test(msg)) {
-      return { ok: false, error: "Timed out waiting for the other device to accept" };
+      if (elapsed < Math.min(20_000, waitMs * 0.25)) {
+        return {
+          ok: false,
+          error: `Could not reach peer at ${endpointLabel} (${msg})`,
+        };
+      }
+      return {
+        ok: false,
+        error: `Timed out waiting for the other device to accept (${Math.round(elapsed / 1000)}s)`,
+      };
     }
     return { ok: false, error: msg };
   } finally {

@@ -472,6 +472,11 @@ async function startNetworking() {
               mainWindow?.webContents.send("lyra:clipboard-push", item);
             },
             onPairRequest: (payload) => {
+              console.log(
+                `[lyra] pair_request UI ← ${(payload as { name?: string }).name ?? "?"} ` +
+                  `${(payload as { deviceId?: string }).deviceId ?? ""} ` +
+                  `@ ${(payload as { host?: string }).host ?? "?"}:${(payload as { port?: number }).port ?? "?"}`,
+              );
               mainWindow?.webContents.send("lyra:pair-request", payload);
             },
             onUnpair: (deviceId) => {

@@ -324,6 +324,9 @@ export async function startPeerServer(options: PeerServerOptions): Promise<PeerS
 
   const requestListener = async (req: IncomingMessage, res: ServerResponse) => {
     const cors = options.cors;
+    const started = Date.now();
+    const remote =
+      req.socket.remoteAddress?.replace(/^::ffff:/, "").replace(/%.*$/, "") ?? "?";
     if (req.method === "OPTIONS") {
       sendJson(res, req, 204, {}, cors);
       return;
@@ -331,6 +334,26 @@ export async function startPeerServer(options: PeerServerOptions): Promise<PeerS
 
     const protocol = tlsMaterial ? "https" : "http";
     const url = new URL(req.url ?? "/", `${protocol}://${req.headers.host ?? "localhost"}`);
+    const logDone = (status: number, note?: string) => {
+      const path = url.pathname;
+      // Always log pair/auth/message; sample /lyra/info probes (discovery floods)
+      const interesting =
+        path !== "/lyra/info" && path !== "/lyra/health"
+          ? true
+          : req.method !== "GET" || Boolean(note);
+      if (interesting || Math.random() < 0.05) {
+        console.log(
+          `[lyra peer] ${req.method} ${path} ← ${remote} → ${status} ${Date.now() - started}ms` +
+            (note ? ` · ${note}` : ""),
+        );
+      }
+    };
+
+    // Wrap sendJson for consistent access logging on early returns
+    const respond = (status: number, body: unknown, note?: string) => {
+      logDone(status, note);
+      sendJson(res, req, status, body, cors);
+    };
 
     try {
       if (req.method === "GET" && url.pathname === "/lyra/info") {
@@ -344,36 +367,29 @@ export async function startPeerServer(options: PeerServerOptions): Promise<PeerS
                 expiresAt: pairingOffer.expiresAt,
               }
             : undefined;
-        // Helpful when debugging "code not found" — only logs when an offer is active
         if (pairing) {
           console.log(
             "[lyra peer] /lyra/info pairing offer",
             pairing.codeHash.slice(0, 12),
             "→",
-            req.socket.remoteAddress,
+            remote,
           );
         }
-        sendJson(
-          res,
-          req,
-          200,
-          {
-            identity: currentIdentity,
-            status: options.getStatus?.(),
-            host: lan ?? undefined,
-            port: boundPort,
-            protocol: protocol,
-            protocolVersion: LYRA_PROTOCOL_VERSION,
-            tlsFingerprint: tlsMaterial?.fingerprintSha256,
-            pairing,
-          },
-          cors,
-        );
+        respond(200, {
+          identity: currentIdentity,
+          status: options.getStatus?.(),
+          host: lan ?? undefined,
+          port: boundPort,
+          protocol: protocol,
+          protocolVersion: LYRA_PROTOCOL_VERSION,
+          tlsFingerprint: tlsMaterial?.fingerprintSha256,
+          pairing,
+        }, pairing ? "offer" : undefined);
         return;
       }
 
       if (req.method === "GET" && url.pathname === "/lyra/health") {
-        sendJson(res, req, 200, { ok: true, deviceId: currentIdentity.id }, cors);
+        respond(200, { ok: true, deviceId: currentIdentity.id });
         return;
       }
 
@@ -384,7 +400,7 @@ export async function startPeerServer(options: PeerServerOptions): Promise<PeerS
         for (const [id, c] of challenges) {
           if (c.expiresAt < Date.now()) challenges.delete(id);
         }
-        sendJson(res, req, 200, challenge, cors);
+        respond(200, challenge, "auth challenge");
         return;
       }
 
@@ -394,18 +410,18 @@ export async function startPeerServer(options: PeerServerOptions): Promise<PeerS
         try {
           body = JSON.parse(raw);
         } catch {
-          sendJson(res, req, 400, { error: "Invalid JSON" }, cors);
+          respond(400, { error: "Invalid JSON" });
           return;
         }
         const responseParsed = AuthResponsePayloadSchema.safeParse(body);
         if (!responseParsed.success) {
-          sendJson(res, req, 400, { error: "Invalid auth response" }, cors);
+          respond(400, { error: "Invalid auth response" });
           return;
         }
         const response = responseParsed.data;
         const challenge = challenges.get(response.challengeId);
         if (!challenge) {
-          sendJson(res, req, 400, { error: "Unknown or expired challenge" }, cors);
+          respond(400, { error: "Unknown or expired challenge" });
           return;
         }
         challenges.delete(response.challengeId);
@@ -418,7 +434,7 @@ export async function startPeerServer(options: PeerServerOptions): Promise<PeerS
 
         // Explicit reject from resolver
         if (authHints === null && !allowFirstContact) {
-          sendJson(res, req, 401, { error: "Unknown peer" }, cors);
+          respond(401, { error: "Unknown peer" });
           return;
         }
 
@@ -428,7 +444,7 @@ export async function startPeerServer(options: PeerServerOptions): Promise<PeerS
 
         // When first-contact is disabled, require known fingerprint or shared secret
         if (!allowFirstContact && !hasShared && !hasExpectedFp) {
-          sendJson(res, req, 401, { error: "Pairing required" }, cors);
+          respond(401, { error: "Pairing required" });
           return;
         }
 
@@ -443,7 +459,7 @@ export async function startPeerServer(options: PeerServerOptions): Promise<PeerS
         });
 
         if (!verified.ok) {
-          sendJson(res, req, 401, { error: verified.error }, cors);
+          respond(401, { error: verified.error });
           return;
         }
 
@@ -453,7 +469,7 @@ export async function startPeerServer(options: PeerServerOptions): Promise<PeerS
         }
 
         sessions.set(verified.session.sessionToken, verified.session);
-        sendJson(res, req, 200, toAuthOkPayload(verified.session), cors);
+        respond(200, toAuthOkPayload(verified.session), `auth ok ${response.deviceId}`);
         return;
       }
 
@@ -463,12 +479,12 @@ export async function startPeerServer(options: PeerServerOptions): Promise<PeerS
         try {
           body = JSON.parse(raw);
         } catch {
-          sendJson(res, req, 400, { error: "Invalid JSON" }, cors);
+          respond(400, { error: "Invalid JSON" });
           return;
         }
         const parsed = parseEnvelope(body);
         if (!parsed.ok) {
-          sendJson(res, req, 400, { error: parsed.error }, cors);
+          respond(400, { error: parsed.error });
           return;
         }
 
@@ -488,30 +504,30 @@ export async function startPeerServer(options: PeerServerOptions): Promise<PeerS
             const opened = await openEnvelopePayload(session.sharedSecret, envelope.payload);
             envelope = { ...envelope, payload: opened };
           } catch {
-            sendJson(res, req, 400, { error: "Failed to open sealed payload" }, cors);
+            respond(400, { error: "Failed to open sealed payload" });
             return;
           }
         }
 
         // TCP source is ground truth for callback (multi-homed joiners advertise wrong hosts)
         if (envelope.type === "pair_request" && envelope.payload && typeof envelope.payload === "object") {
-          const p = envelope.payload as { host?: string; tailscaleHost?: string };
-          const remote = req.socket.remoteAddress
+          const p = envelope.payload as { host?: string; tailscaleHost?: string; name?: string };
+          const tcpRemote = req.socket.remoteAddress
             ?.replace(/^::ffff:/, "")
             .replace(/%.*$/, "")
             .trim();
-          if (remote && remote !== "127.0.0.1" && remote !== "::1" && remote !== "0.0.0.0") {
+          if (tcpRemote && tcpRemote !== "127.0.0.1" && tcpRemote !== "::1" && tcpRemote !== "0.0.0.0") {
             const advertised = p.host?.trim();
-            const same = advertised === remote;
+            const same = advertised === tcpRemote;
             const isTs = (h: string) =>
               /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(h) || h.endsWith(".ts.net");
-            let host = remote;
+            let host = tcpRemote;
             let tailscaleHost = p.tailscaleHost;
             if (advertised && !same) {
-              if (isTs(advertised) && !isTs(remote)) tailscaleHost = advertised;
-              else if (isTs(remote) && !isTs(advertised)) {
+              if (isTs(advertised) && !isTs(tcpRemote)) tailscaleHost = advertised;
+              else if (isTs(tcpRemote) && !isTs(advertised)) {
                 host = advertised;
-                tailscaleHost = remote;
+                tailscaleHost = tcpRemote;
               }
             }
             envelope = {
@@ -519,11 +535,14 @@ export async function startPeerServer(options: PeerServerOptions): Promise<PeerS
               payload: { ...p, host, ...(tailscaleHost ? { tailscaleHost } : {}) },
             };
           }
+          console.log(
+            `[lyra peer] pair_request from ${p.name ?? envelope.fromDeviceId} ← ${tcpRemote ?? remote} (long-poll until Accept)`,
+          );
         }
 
         const msgType = envelope.type;
         if (requireAuth && !PUBLIC_MESSAGE_TYPES.has(msgType) && !session) {
-          sendJson(res, req, 401, { error: "Auth required" }, cors);
+          respond(401, { error: "Auth required" }, msgType);
           return;
         }
 
@@ -532,27 +551,28 @@ export async function startPeerServer(options: PeerServerOptions): Promise<PeerS
           const reply = await options.onEnvelope(envelope, session);
           if (reply) {
             const out = await maybeSealReply(reply, session, sealReplies);
-            sendJson(res, req, 200, out, cors);
+            respond(200, out, msgType);
             return;
           }
         }
 
         // Built-in protocol handlers (clipboard, transfer chunks, fs, pair, ping…)
+        // pair_request blocks here until host Accept/Decline
         const builtin = await handlePeerEnvelope(envelope, session, handlerCtx);
         const out = await maybeSealReply(builtin, session, sealReplies);
-        sendJson(res, req, 200, out, cors);
+        const replyType =
+          out && typeof out === "object" && out !== null && "type" in out
+            ? String((out as { type: string }).type)
+            : msgType;
+        respond(200, out, replyType);
         return;
       }
 
-      sendJson(res, req, 404, { error: "Not found" }, cors);
+      respond(404, { error: "Not found" });
     } catch (e) {
-      sendJson(
-        res,
-        req,
-        500,
-        { error: e instanceof Error ? e.message : String(e) },
-        cors,
-      );
+      const err = e instanceof Error ? e.message : String(e);
+      console.warn(`[lyra peer] request error ← ${remote}:`, err);
+      respond(500, { error: err });
     }
   };
 

@@ -393,6 +393,7 @@ export function createPeerHttpCore(options: PeerHttpCoreOptions): PeerHttpCore {
             host?: string;
             port?: number;
             tailscaleHost?: string;
+            name?: string;
           };
           const remote = req.remoteAddress
             ?.replace(/^::ffff:/, "")
@@ -422,6 +423,10 @@ export function createPeerHttpCore(options: PeerHttpCoreOptions): PeerHttpCore {
               },
             };
           }
+          console.info(
+            `[lyra peer-core] pair_request from ${p.name ?? envelope.fromDeviceId}` +
+              ` ← ${remote ?? "?"} (blocking until Accept/Decline)`,
+          );
         }
 
         const msgType = envelope.type;

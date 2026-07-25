@@ -428,6 +428,8 @@ export async function startNativePeerServer(
                 ? remoteRaw.replace(/^::ffff:/, "").replace(/%.*$/, "")
                 : null;
 
+            const reqStarted = Date.now();
+            const routePath = (parsed.path.split("?")[0] || parsed.path).trim();
             void core
               .handle({
                 method: parsed.method,
@@ -438,10 +440,23 @@ export async function startNativePeerServer(
               })
               .then((res) => {
                 if (done || !isLive()) return;
+                const ms = Date.now() - reqStarted;
+                const interesting =
+                  routePath !== "/lyra/info" && routePath !== "/lyra/health"
+                    ? true
+                    : parsed.method.toUpperCase() !== "GET";
+                if (interesting || res.status >= 400) {
+                  console.info(
+                    `[lyra peer] ${parsed.method} ${routePath} ← ${remote ?? "?"} → ${res.status} ${ms}ms`,
+                  );
+                }
                 respond(buildHttpResponse(res.status, res.headers, res.body));
               })
               .catch((err) => {
-                console.warn("[lyra peer] request error", err);
+                console.warn(
+                  `[lyra peer] ${parsed.method} ${routePath} ← ${remote ?? "?"} error`,
+                  err instanceof Error ? err.message : err,
+                );
                 if (done || !isLive()) return;
                 respond(
                   buildHttpResponse(
@@ -715,17 +730,40 @@ export function attachNativePeerToStore(
     });
   }, 20_000);
 
+  // Self-test outbound peer HTTP against our own listen socket (loopback).
+  // Confirms the TCP transport can complete a real GET before LAN scans.
+  const selfTestTimer = setTimeout(() => {
+    void (async () => {
+      try {
+        const { probePeer } = await import("@lyra-sync-app/net");
+        const r = await probePeer(
+          { host: "127.0.0.1", port: peer.port },
+          { timeoutMs: 2000 },
+        );
+        console.info(
+          `[lyra peer] self-test 127.0.0.1:${peer.port} → ${r.ok ? "ok" : r.error}`,
+        );
+      } catch (e) {
+        console.warn(
+          "[lyra peer] self-test failed",
+          e instanceof Error ? e.message : e,
+        );
+      }
+    })();
+  }, 500);
+
   // Initial discovery once peer is fully up — slight delay so the listen
   // socket is ready and we don't self-scan during bind races.
   let discoveryTimer: ReturnType<typeof setTimeout> | null = null;
   if (store.getState().settings.discoveryEnabled) {
     discoveryTimer = setTimeout(() => {
       void store.refreshDiscovery();
-    }, 800);
+    }, 1200);
   }
 
   return () => {
     if (discoveryTimer) clearTimeout(discoveryTimer);
+    clearTimeout(selfTestTimer);
     clearInterval(ipTimer);
     unsub();
     store.setPairDecisionResolver?.(null);

@@ -25,6 +25,7 @@ export default function SettingsScreen() {
     s.devices.filter((d) => d.authSecret || d.id.startsWith("demo_")),
   );
   const peerServer = useLyraSelector((s) => s.peerServer);
+  const lanHint = useLyraSelector((s) => s.localLanHint ?? s.peerServer.lanHost);
   const lastProbeSummary = useLyraSelector((s) => s.lastProbeSummary);
   const hasTopBanners = useLyraSelector(
     (s) =>
@@ -130,6 +131,10 @@ export default function SettingsScreen() {
                 : settings.discoveryEnabled
                   ? "Discovery ready (HTTP probe)"
                   : "Discovery off"}
+            </Text>
+            <Text style={{ color: muted, fontFamily: fonts.regular, fontSize: 12, marginTop: 6 }}>
+              Outbound peer HTTP: TCP sockets (cleartext-safe)
+              {lanHint ? ` · local IP ${lanHint}` : ""}
             </Text>
             <View
               style={{

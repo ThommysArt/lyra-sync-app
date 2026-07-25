@@ -9,12 +9,33 @@
  * - Handlers attached before connect
  * - Never write/destroy after settle (avoids IllegalArgumentException: No socket with id)
  * - Global concurrency limit so discovery scans don't flood the native module
+ * - Request timeout starts AFTER a slot is acquired (queue wait must not burn the budget)
+ * - Pair long-polls must use a long timeoutMs (or only AbortSignal) — never a 15s hard kill
  */
 import type { HttpTransport } from "@lyra-sync-app/net";
 import { Platform } from "react-native";
 import Constants from "expo-constants";
 
-type TcpSocketModule = typeof import("react-native-tcp-socket");
+type TcpApi = {
+  Socket?: new () => {
+    on: (event: string, cb: (...args: unknown[]) => void) => void;
+    once: (event: string, cb: (...args: unknown[]) => void) => void;
+    connect: (opts: Record<string, unknown>, cb?: () => void) => unknown;
+    write: (data: string, encoding?: string) => void;
+    destroy: () => void;
+    destroyed?: boolean;
+  };
+  createConnection?: (
+    opts: Record<string, unknown>,
+    cb?: () => void,
+  ) => {
+    on: (event: string, cb: (...args: unknown[]) => void) => void;
+    once: (event: string, cb: (...args: unknown[]) => void) => void;
+    write: (data: string, encoding?: string) => void;
+    destroy: () => void;
+    destroyed?: boolean;
+  };
+};
 
 function isExpoGo(): boolean {
   if (Constants.appOwnership === "expo") return true;
@@ -22,13 +43,24 @@ function isExpoGo(): boolean {
   return env === "storeClient";
 }
 
-function loadTcp(): TcpSocketModule | null {
+function loadTcpApi(): TcpApi | null {
   if (isExpoGo()) return null;
   if (Platform.OS !== "ios" && Platform.OS !== "android") return null;
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    return require("react-native-tcp-socket") as TcpSocketModule;
-  } catch {
+    const mod = require("react-native-tcp-socket") as TcpApi & { default?: TcpApi };
+    // Metro may expose either the default export or the module namespace
+    const api = (mod?.default ?? mod) as TcpApi;
+    if (api?.Socket || typeof api?.createConnection === "function") return api;
+    console.warn("[lyra tcp] react-native-tcp-socket loaded but Socket/createConnection missing", {
+      keys: Object.keys(mod ?? {}),
+    });
+    return null;
+  } catch (e) {
+    console.warn(
+      "[lyra tcp] react-native-tcp-socket unavailable",
+      e instanceof Error ? e.message : e,
+    );
     return null;
   }
 }
@@ -88,24 +120,97 @@ function parseUrl(url: string): { host: string; port: number; path: string } {
   return { host, port, path };
 }
 
-/** Limit concurrent native sockets — RN tcp-socket crashes under scan floods. */
-const MAX_IN_FLIGHT = 6;
-let inFlight = 0;
-const waitQueue: Array<() => void> = [];
+/** RFC1918 / CGNAT private — prefer Wi‑Fi interface when Tailscale VPN is up. */
+function isPrivateLanIPv4(host: string): boolean {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host.trim());
+  if (!m) return false;
+  const a = Number(m[1]);
+  const b = Number(m[2]);
+  if (a === 10) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  return false;
+}
 
-async function withSlot<T>(fn: () => Promise<T>): Promise<T> {
-  if (inFlight >= MAX_IN_FLIGHT) {
-    await new Promise<void>((resolve) => {
-      waitQueue.push(resolve);
+function isTailscaleIPv4(host: string): boolean {
+  const m = /^100\.(\d+)\.(\d+)\.(\d+)$/.exec(host.trim());
+  if (!m) return false;
+  const second = Number(m[1]);
+  return second >= 64 && second <= 127;
+}
+
+/** Limit concurrent native sockets — RN tcp-socket crashes under scan floods. */
+export const NATIVE_HTTP_MAX_IN_FLIGHT = 8;
+let inFlight = 0;
+type Waiter = {
+  resolve: () => void;
+  reject: (e: Error) => void;
+  signal?: AbortSignal;
+  onAbort?: () => void;
+};
+const waitQueue: Waiter[] = [];
+
+let logCounter = 0;
+function logTcp(line: string, extra?: Record<string, unknown>) {
+  // Cap spam: always log errors/warns from callers; here only every Nth success path via debug
+  if (extra) {
+    console.info(`[lyra tcp] ${line}`, extra);
+  } else {
+    console.info(`[lyra tcp] ${line}`);
+  }
+}
+
+function detachWaiter(waiter: Waiter) {
+  const i = waitQueue.indexOf(waiter);
+  if (i >= 0) waitQueue.splice(i, 1);
+  if (waiter.signal && waiter.onAbort) {
+    try {
+      waiter.signal.removeEventListener("abort", waiter.onAbort);
+    } catch {
+      // ignore
+    }
+  }
+}
+
+async function withSlot<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (signal?.aborted) {
+    throw new Error("Aborted");
+  }
+
+  if (inFlight >= NATIVE_HTTP_MAX_IN_FLIGHT) {
+    await new Promise<void>((resolve, reject) => {
+      const waiter: Waiter = { resolve, reject, signal };
+      waiter.onAbort = () => {
+        detachWaiter(waiter);
+        reject(new Error("Aborted"));
+      };
+      waitQueue.push(waiter);
+      if (signal) {
+        signal.addEventListener("abort", waiter.onAbort, { once: true });
+      }
     });
   }
+
+  if (signal?.aborted) {
+    throw new Error("Aborted");
+  }
+
   inFlight++;
   try {
     return await fn();
   } finally {
     inFlight--;
     const next = waitQueue.shift();
-    if (next) next();
+    if (next) {
+      if (next.signal && next.onAbort) {
+        try {
+          next.signal.removeEventListener("abort", next.onAbort);
+        } catch {
+          // ignore
+        }
+      }
+      next.resolve();
+    }
   }
 }
 
@@ -113,13 +218,12 @@ async function withSlot<T>(fn: () => Promise<T>): Promise<T> {
  * Create an HttpTransport backed by react-native-tcp-socket, or null if unavailable.
  */
 export function createTcpHttpTransport(): HttpTransport | null {
-  const TcpSocket = loadTcp();
+  const TcpSocket = loadTcpApi();
   if (!TcpSocket) return null;
 
-  // Socket constructor is on the module default export
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const SocketCtor = (TcpSocket as any).Socket as (new () => any) | undefined;
-  if (!SocketCtor && typeof TcpSocket.createConnection !== "function") {
+  const SocketCtor = TcpSocket.Socket;
+  const createConnection = TcpSocket.createConnection;
+  if (!SocketCtor && typeof createConnection !== "function") {
     return null;
   }
 
@@ -140,6 +244,9 @@ export function createTcpHttpTransport(): HttpTransport | null {
       }
 
       const { host, port, path } = parseUrl(url);
+      const reqId = ++logCounter;
+      const started = Date.now();
+      const isLongPoll = (init?.timeoutMs ?? 0) > 30_000 || (init?.signal && !init?.timeoutMs);
 
       return new Promise((resolve, reject) => {
         let settled = false;
@@ -172,6 +279,10 @@ export function createTcpHttpTransport(): HttpTransport | null {
             }
           }
           safeDestroy();
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn(
+            `[lyra tcp] #${reqId} ${method} ${host}:${port}${path} FAIL ${Date.now() - started}ms · ${msg}`,
+          );
           reject(err instanceof Error ? err : new Error(String(err)));
         };
 
@@ -187,6 +298,12 @@ export function createTcpHttpTransport(): HttpTransport | null {
             }
           }
           safeDestroy();
+          const ms = Date.now() - started;
+          if (isLongPoll || status >= 400 || ms > 2000) {
+            logTcp(`#${reqId} ${method} ${host}:${port}${path} → ${status} ${ms}ms`, {
+              bodyBytes: responseBody.length,
+            });
+          }
           resolve({
             ok: status >= 200 && status < 300,
             status,
@@ -228,7 +345,7 @@ export function createTcpHttpTransport(): HttpTransport | null {
             finishOk(status, new TextDecoder().decode(bodyBytes));
             return;
           }
-          // No Content-Length — wait for close
+          // No Content-Length — wait for close (long-poll pair_confirm uses CL usually)
         };
 
         const writeRequest = () => {
@@ -260,12 +377,51 @@ export function createTcpHttpTransport(): HttpTransport | null {
             init.signal.addEventListener("abort", onAbort, { once: true });
           }
 
-          // Construct socket, attach listeners, THEN connect (avoids missed events)
+          // Timeout starts AFTER slot acquisition.
+          // - Explicit timeoutMs always wins (scans, probes, pair long-poll).
+          // - If only AbortSignal is set (pair wait), use a generous safety net so we
+          //   do NOT kill a 120s accept long-poll at 15s (previous bug).
+          // - Otherwise short default for opportunistic GETs.
+          const timeoutMs =
+            typeof init?.timeoutMs === "number" && init.timeoutMs > 0
+              ? init.timeoutMs
+              : init?.signal
+                ? 180_000
+                : 12_000;
+          hardTimer = setTimeout(() => {
+            if (!settled) {
+              finishErr(
+                new Error(
+                  `TCP HTTP request timed out after ${timeoutMs}ms (${method} ${host}:${port}${path})`,
+                ),
+              );
+            }
+          }, timeoutMs);
+
+          // NOTE: Do NOT set `interface: "wifi"`. On Android, selectNetwork() can throw
+          // "Interface wifi unreachable" *before* the socket is registered in the native
+          // map; the JS error handler then calls destroy() → crash:
+          // IllegalArgumentException: No socket with id N
+          const connectOpts: Record<string, unknown> = {
+            host,
+            port,
+            reuseAddress: true,
+            // Fail connect faster than full request budget when possible
+            connectTimeout: Math.min(
+              Math.max(timeoutMs, 1),
+              isLongPoll ? 15_000 : Math.min(timeoutMs, 8_000),
+            ),
+          };
+          void isPrivateLanIPv4; // retained for future multi-homed routing experiments
+          void isTailscaleIPv4;
+
           if (SocketCtor) {
             socket = new SocketCtor();
+          } else if (createConnection) {
+            socket = createConnection(connectOpts, writeRequest);
           } else {
-            // Fallback: createConnection (listeners may race on very fast connect)
-            socket = TcpSocket.createConnection({ host, port, reuseAddress: true }, writeRequest);
+            finishErr(new Error("No TCP socket constructor"));
+            return;
           }
 
           socket.on("data", (data: unknown) => {
@@ -278,8 +434,8 @@ export function createTcpHttpTransport(): HttpTransport | null {
             }
           });
 
-          socket.on("error", (err: Error) => {
-            finishErr(err ?? new Error("TCP error"));
+          socket.on("error", (err: unknown) => {
+            finishErr(err instanceof Error ? err : new Error(String(err ?? "TCP error")));
           });
 
           socket.on("close", () => {
@@ -287,7 +443,11 @@ export function createTcpHttpTransport(): HttpTransport | null {
             const raw = concat(chunks);
             const headerEnd = indexOfHeaderEnd(raw);
             if (headerEnd < 0) {
-              finishErr(new Error("Connection closed before HTTP response"));
+              finishErr(
+                new Error(
+                  `Connection closed before HTTP response (${method} ${host}:${port}${path})`,
+                ),
+              );
               return;
             }
             const head = new TextDecoder().decode(raw.subarray(0, headerEnd));
@@ -299,18 +459,13 @@ export function createTcpHttpTransport(): HttpTransport | null {
 
           if (SocketCtor) {
             socket.once("connect", writeRequest);
-            socket.connect({ host, port, reuseAddress: true });
+            socket.connect(connectOpts);
           }
-
-          const timeoutMs = init?.signal ? 20_000 : 10_000;
-          hardTimer = setTimeout(() => {
-            if (!settled) finishErr(new Error("TCP HTTP request timed out"));
-          }, timeoutMs);
         } catch (e) {
           finishErr(e);
         }
       });
-    });
+    }, init?.signal);
 
   return transport;
 }
@@ -319,21 +474,26 @@ export function createTcpHttpTransport(): HttpTransport | null {
 export function installNativePeerHttpTransport(): () => void {
   const transport = createTcpHttpTransport();
   if (!transport) {
-    console.info("[lyra] TCP HTTP transport unavailable — using fetch");
+    console.warn(
+      "[lyra] TCP HTTP transport UNAVAILABLE — peer ops use fetch (cleartext LAN/Tailscale often fails on Android)",
+    );
     return () => undefined;
   }
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { setHttpTransport } = require("@lyra-sync-app/net") as typeof import("@lyra-sync-app/net");
-    setHttpTransport(transport);
-    console.info("[lyra] peer HTTP uses react-native-tcp-socket transport");
+    const net = require("@lyra-sync-app/net") as typeof import("@lyra-sync-app/net");
+    net.setHttpTransport(transport);
+    console.info(
+      `[lyra] peer HTTP transport = react-native-tcp-socket (max ${NATIVE_HTTP_MAX_IN_FLIGHT} concurrent)`,
+    );
     return () => {
-      setHttpTransport(null);
+      net.setHttpTransport(null);
     };
-  } catch {
+  } catch (e) {
+    console.warn("[lyra] setHttpTransport sync failed, trying async", e);
     void import("@lyra-sync-app/net").then(({ setHttpTransport }) => {
       setHttpTransport(transport);
-      console.info("[lyra] peer HTTP uses react-native-tcp-socket transport (async)");
+      console.info("[lyra] peer HTTP transport = react-native-tcp-socket (async install)");
     });
     return () => {
       void import("@lyra-sync-app/net").then(({ setHttpTransport }) => {

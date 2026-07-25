@@ -65,15 +65,27 @@ export function LyraProvider({ children }: { children: ReactNode }) {
         .then((ip) => {
           if (ip && ip !== "0.0.0.0" && ip !== "127.0.0.1") {
             store.setLocalLanHint(ip);
+            // expo-network returns a single "main" interface. When that is
+            // Tailscale (100.x), refreshDiscovery also seeds common LAN /24s so
+            // Wi‑Fi peers are still scanned (see store.refreshDiscovery).
           }
         })
         .catch(() => {
           // ignore — pairing still works with manual/discovered hosts
         });
     void refreshLocalIp();
-    // Re-check IP when network changes (Wi‑Fi ↔ Tailscale)
-    const netSub = Network.addNetworkStateListener?.(() => {
+    // Re-check IP when network changes (Wi‑Fi ↔ Tailscale / Wi‑Fi toggle)
+    let netDiscoverTimer: ReturnType<typeof setTimeout> | null = null;
+    const netSub = Network.addNetworkStateListener?.((state) => {
       void refreshLocalIp();
+      // Kick discovery when we gain connectivity so devices reappear
+      if (state?.isConnected && store.getState().settings.discoveryEnabled) {
+        if (netDiscoverTimer) clearTimeout(netDiscoverTimer);
+        netDiscoverTimer = setTimeout(() => {
+          netDiscoverTimer = null;
+          void store.refreshDiscovery();
+        }, 1500);
+      }
     });
 
     const startPeer = async () => {
@@ -250,6 +262,7 @@ export function LyraProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
       clearTimeout(trustTimer);
+      if (netDiscoverTimer) clearTimeout(netDiscoverTimer);
       try {
         netSub?.remove?.();
       } catch {
