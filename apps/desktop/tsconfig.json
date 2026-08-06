@@ -1,0 +1,15 @@
+{
+  "extends": "@lyra-sync-app/config/tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist-electron",
+    "rootDir": ".",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ESNext", "DOM"],
+    "types": ["node", "electron"],
+    "jsx": "react-jsx",
+    "skipLibCheck": true,
+    "allowSyntheticDefaultImports": true
+  },
+  "include": ["electron/**/*.ts", "scripts/**/*.ts"]
+}

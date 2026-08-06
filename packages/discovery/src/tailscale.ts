@@ -59,6 +59,11 @@ export async function fetchTailscaleStatus(
 
 export type ProbeTarget = { host: string; port: number; peerId?: string; dnsName?: string };
 
+export async function scanTailscalePeers(opts?: { defaultPort?: number }): Promise<ProbeTarget[]> {
+  const status = await fetchTailscaleStatus();
+  return tailscalePeersToProbeTargets(status, opts?.defaultPort ?? 53317);
+}
+
 export function tailscalePeersToProbeTargets(
   status: TailscaleStatus | null,
   defaultPort: number,

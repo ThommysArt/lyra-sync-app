@@ -1,0 +1,43 @@
+{
+  "name": "desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "LYRA_VARIANT=development tsx scripts/dev.ts",
+    "dev:preview": "LYRA_VARIANT=preview tsx scripts/dev.ts",
+    "dev:prod": "LYRA_VARIANT=production tsx scripts/dev.ts",
+    "build": "tsx scripts/build-electron.ts",
+    "build:electron": "tsx scripts/build-electron.ts",
+    "check-types": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@lyra-sync-app/daemon": "workspace:*",
+    "@lyra-sync-app/discovery": "workspace:*",
+    "@lyra-sync-app/protocol": "workspace:*"
+  },
+  "devDependencies": {
+    "@lyra-sync-app/config": "workspace:*",
+    "@types/node": "^22.13.14",
+    "electron": "^33.0.0",
+    "tsx": "^4.22.5",
+    "typescript": "^6",
+    "vite": "^8.1.3"
+  },
+  "build": {
+    "appId": "app.lyra.desktop",
+    "productName": "Lyra",
+    "artifactName": "Lyra-${version}-${variant}.${ext}",
+    "files": [
+      "dist-electron/**/*",
+      "resources/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "../web/dist",
+        "to": "web-dist"
+      }
+    ]
+  }
+}
