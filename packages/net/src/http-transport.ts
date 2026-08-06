@@ -79,7 +79,7 @@ export function hasCustomHttpTransport(): boolean {
   return Boolean(customTransport || readGlobal());
 }
 
-async function fetchAsTransport(
+export async function fetchAsTransport(
   url: string,
   init?: HttpRequestInit,
 ): Promise<HttpResponse> {

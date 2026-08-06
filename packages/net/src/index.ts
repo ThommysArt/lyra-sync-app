@@ -14,6 +14,7 @@ export {
   setHttpTransport,
   getHttpTransport,
   hasCustomHttpTransport,
+  fetchAsTransport,
   type HttpTransport,
   type HttpRequestInit,
   type HttpResponse,

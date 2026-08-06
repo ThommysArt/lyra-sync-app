@@ -15,7 +15,7 @@
 import type { HttpTransport } from "@lyra-sync-app/net";
 import { Platform } from "react-native";
 import Constants from "expo-constants";
-import { buildHttpRequest, concatBytes, indexOfHeaderEnd, toUint8Array } from "@lyra-sync-app/net";
+import { buildHttpRequest, concatBytes, fetchAsTransport, indexOfHeaderEnd, toUint8Array } from "@lyra-sync-app/net";
 import { Lane, withPrioritySlot } from "@lyra-sync-app/net";
 
 type TcpApi = {
@@ -108,11 +108,17 @@ export function createTcpHttpTransport(): HttpTransport | null {
   }
 
   const transport: HttpTransport = (url, init) => {
+    const methodUpper = (init?.method ?? "GET").toUpperCase();
+    // Use fetch for GET (discovery probes) — faster, no TCP queue, works for cleartext GET on Android
+    // POST (pair, clipboard, transfer) stays on TCP socket to avoid cleartext POST "Network request failed" on Android
+    if (methodUpper === "GET") {
+      return fetchAsTransport(url, init);
+    }
     const laneRaw = typeof init?.lane === "number" ? init.lane : Lane.INTERACTIVE;
     const lane = laneRaw === 0 ? Lane.PAIR : laneRaw === 2 ? Lane.SCAN : Lane.INTERACTIVE;
     return withPrioritySlot(
       () => {
-        const method = (init?.method ?? "GET").toUpperCase();
+        const method = methodUpper;
         const body = init?.body ?? "";
         const headers: Record<string, string> = {
           accept: "application/json",
@@ -344,7 +350,13 @@ export function createTcpHttpTransport(): HttpTransport | null {
       },
       lane,
       init?.signal,
-    );
+    ).catch(async (tcpErr: unknown) => {
+      const msg = tcpErr instanceof Error ? tcpErr.message : String(tcpErr);
+      // Fallback to fetch for POST — helps when TCP socket fails due to routing or native crash
+      // but cleartext fetch may still succeed (e.g., after with-cleartext-traffic prebuild)
+      console.warn(`[lyra tcp] POST ${methodUpper} ${url} TCP failed (${msg}) — falling back to fetch`);
+      return fetchAsTransport(url, init);
+    });
   };
 
   return transport;
