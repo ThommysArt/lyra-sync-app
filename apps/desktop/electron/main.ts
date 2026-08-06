@@ -126,6 +126,7 @@ function setupIpc(): void {
 
   ipcMain.handle("lyra:sync-trusted-peers", (_ev: unknown, peers: typeof trustedPeers) => {
     if (Array.isArray(peers)) trustedPeers = peers;
+    peerServer?.syncTrustedPeers(trustedPeers);
     return trustedPeers.length;
   });
 

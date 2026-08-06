@@ -1,7 +1,7 @@
 import { AppSettingsSchema, type DeviceIdentity, type LyraEnvelope, type PairedDevice, type PeerEndpoint } from "@lyra-sync-app/protocol";
 import { createDeviceIdentity, generateId } from "./identity.js";
 import { STORAGE_KEY, type StorageLike, createMemoryStorage } from "./storage.js";
-import type { LyraState } from "./slices/types.js";
+import type { DiscoveredPeer, LyraState, ProbeTarget } from "./slices/types.js";
 
 export type ProbeResult = {
   ok: boolean;
@@ -38,8 +38,11 @@ export type LyraStore = {
   persist: () => Promise<void>;
   setIdentity: (id: DeviceIdentity) => void;
   updateSettings: (patch: Partial<LyraState["settings"]>) => void;
-  // stubs
-  refreshDiscovery: () => void;
+  // discovery — pure state updates, no IO (P3 adds transport)
+  refreshDiscovery: () => Promise<void>;
+  ingestDiscoveredPeer: (peer: DiscoveredPeer) => void;
+  ingestTailscaleHints: (hints: ProbeTarget[]) => void;
+  ingestTailscalePeers: (hints: ProbeTarget[]) => void;
   pushClipboard: (text: string) => void;
 };
 
@@ -53,7 +56,7 @@ function notImplemented(name: string): void {
 
 export function createLyraStore(opts: LyraStoreOptions): LyraStore {
   const storage = opts.storage ?? createMemoryStorage();
-  void opts.transport; // injected for future slices
+  void opts.transport; // injected for future slices (P3 will use)
   void opts.seedDemo;
 
   let state: LyraState = {
@@ -71,7 +74,11 @@ export function createLyraStore(opts: LyraStoreOptions): LyraStore {
     discovery: {
       peers: [],
       discovered: [],
-      refreshDiscovery: () => notImplemented("discovery.refreshDiscovery"),
+      lanPairingOffers: [],
+      tailscaleHints: [],
+      refreshDiscovery: async () => {},
+      ingestDiscoveredPeer: () => {},
+      ingestTailscaleHints: () => {},
     },
     pairing: {
       pendingToken: null,
@@ -152,8 +159,75 @@ export function createLyraStore(opts: LyraStoreOptions): LyraStore {
     void persist();
   };
 
-  const refreshDiscovery = (): void => {
-    notImplemented("refreshDiscovery");
+  // --- discovery pure slice helpers (no IO) --------------------------------
+
+  const ingestDiscoveredPeer = (peer: DiscoveredPeer): void => {
+    // dedupe discovered by identity.id
+    const exists = state.discovery.discovered.some((p) => p.identity.id === peer.identity.id && p.host === peer.host && p.port === peer.port);
+    const nextDiscovered = exists ? state.discovery.discovered : [...state.discovery.discovered, peer];
+
+    // if peer carries pairing offer, upsert into lanPairingOffers
+    let nextOffers = state.discovery.lanPairingOffers;
+    if (peer.pairing) {
+      const offer = {
+        codeHash: peer.pairing.codeHash,
+        token: peer.pairing.token,
+        expiresAt: peer.pairing.expiresAt,
+        host: peer.host,
+        port: peer.port,
+        deviceId: peer.identity.id,
+        name: peer.identity.name,
+        fingerprint: peer.identity.fingerprint,
+      };
+      const idx = nextOffers.findIndex((o) => o.deviceId === offer.deviceId && o.codeHash === offer.codeHash);
+      if (idx >= 0) {
+        nextOffers = [...nextOffers.slice(0, idx), offer, ...nextOffers.slice(idx + 1)];
+      } else {
+        nextOffers = [...nextOffers, offer];
+      }
+    }
+
+    state = {
+      ...state,
+      discovery: {
+        ...state.discovery,
+        discovered: nextDiscovered,
+        lanPairingOffers: nextOffers,
+      },
+    };
+    emit();
+  };
+
+  const ingestTailscaleHints = (hints: ProbeTarget[]): void => {
+    state = {
+      ...state,
+      discovery: {
+        ...state.discovery,
+        tailscaleHints: [...hints],
+      },
+    };
+    emit();
+  };
+
+  // alias for backwards compat with spec wording
+  const ingestTailscalePeers = ingestTailscaleHints;
+
+  const refreshDiscovery = async (): Promise<void> => {
+    // pure stub — no IO in P2; P3 will probe tailscaleHints + multicast
+    // For now just emit to allow UI to react
+    emit();
+  };
+
+  // bind slice actions to state for consumers that read getState().discovery
+  state = {
+    ...state,
+    discovery: {
+      ...state.discovery,
+      refreshDiscovery,
+      ingestDiscoveredPeer,
+      ingestTailscaleHints,
+      ingestTailscalePeers,
+    },
   };
 
   const pushClipboard = (text: string): void => {
@@ -179,6 +253,9 @@ export function createLyraStore(opts: LyraStoreOptions): LyraStore {
     setIdentity,
     updateSettings,
     refreshDiscovery,
+    ingestDiscoveredPeer,
+    ingestTailscaleHints,
+    ingestTailscalePeers,
     pushClipboard,
   };
 }

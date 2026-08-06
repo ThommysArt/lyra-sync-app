@@ -1,3 +1,5 @@
+import * as dgram from "node:dgram";
+import * as os from "node:os";
 import type { DeviceIdentity } from "@lyra-sync-app/protocol";
 import type { DiscoveredPeer } from "./types.js";
 
@@ -16,13 +18,15 @@ export type DiscoveryHandle = {
   localAddresses: string[];
 };
 
-const MULTICAST_ADDR = "239.255.255.250";
-const MULTICAST_PORT = 53317;
+export const DISCOVERY_MULTICAST_ADDR = "239.255.255.250";
+export const DISCOVERY_MULTICAST_PORT = 53317;
+// legacy aliases for backwards compat
+export const MULTICAST_ADDR = DISCOVERY_MULTICAST_ADDR;
+export const MULTICAST_PORT = DISCOVERY_MULTICAST_PORT;
 
-function _getLocalAddresses(): string[] {
+function getLocalAddresses(): string[] {
   try {
-    const nodeOs = eval("require")("os") as typeof import("node:os");
-    const ifaces = nodeOs.networkInterfaces();
+    const ifaces = os.networkInterfaces();
     const addrs: string[] = [];
     for (const list of Object.values(ifaces)) {
       if (!list) continue;
@@ -33,7 +37,6 @@ function _getLocalAddresses(): string[] {
     return [];
   }
 }
-void _getLocalAddresses;
 
 /**
  * createMulticastAnnouncer — stub for future full implementation.
@@ -45,25 +48,13 @@ export function createMulticastAnnouncer(_opts: DiscoveryOptions): { announce: (
 /**
  * startDiscovery — Node-only discovery via UDP multicast + optional bonjour.
  * Falls back to stub that logs and simulates if dgram is unavailable (e.g. web).
+ * Uses proper `import * as dgram/os` with try/catch guard for bundler safety.
  */
 export function startDiscovery(opts: DiscoveryOptions): DiscoveryHandle {
   const log = opts.onLog ?? (() => {});
-  const localAddresses = (() => {
-    try {
-      const nodeOs = eval("require")("os") as typeof import("node:os");
-      const ifaces = nodeOs.networkInterfaces();
-      const addrs: string[] = [];
-      for (const list of Object.values(ifaces)) {
-        if (!list) continue;
-        for (const info of list) if (info.family === "IPv4" && !info.internal) addrs.push(info.address);
-      }
-      return addrs;
-    } catch {
-      return [];
-    }
-  })();
+  const localAddresses = getLocalAddresses();
 
-  let socket: import("node:dgram").Socket | null = null;
+  let socket: dgram.Socket | null = null;
   let interval: ReturnType<typeof setInterval> | null = null;
   let bonjour: unknown = null;
   let service: unknown = null;
@@ -83,7 +74,7 @@ export function startDiscovery(opts: DiscoveryOptions): DiscoveryHandle {
     if (socket) {
       try {
         const buf = Buffer.from(payload, "utf8");
-        socket.send(buf, MULTICAST_PORT, MULTICAST_ADDR, (err) => {
+        socket.send(buf, DISCOVERY_MULTICAST_PORT, DISCOVERY_MULTICAST_ADDR, (err) => {
           if (err) log(`multicast announce error: ${String(err)}`);
           else log(`multicast announce sent ${buf.length}B`);
         });
@@ -95,9 +86,8 @@ export function startDiscovery(opts: DiscoveryOptions): DiscoveryHandle {
     }
   }
 
-  // try to bind dgram
+  // try to bind dgram — guarded for bundler/web where dgram may be shimmed
   try {
-    const dgram = eval("require")("node:dgram") as typeof import("node:dgram");
     socket = dgram.createSocket({ type: "udp4", reuseAddr: true });
 
     socket.on("error", (err) => log(`multicast error: ${String(err)}`));
@@ -116,7 +106,7 @@ export function startDiscovery(opts: DiscoveryOptions): DiscoveryHandle {
             platform: typeof data["platform"] === "string" ? (data["platform"] as string) : undefined,
           },
           host: (data["host"] as string) ?? rinfo.address,
-          port: typeof data["port"] === "number" ? (data["port"] as number) : MULTICAST_PORT,
+          port: typeof data["port"] === "number" ? (data["port"] as number) : DISCOVERY_MULTICAST_PORT,
           pairing: (data["pairing"] as DiscoveredPeer["pairing"]) ?? undefined,
         };
         opts.onPeer(peer);
@@ -125,12 +115,12 @@ export function startDiscovery(opts: DiscoveryOptions): DiscoveryHandle {
       }
     });
 
-    socket.bind(MULTICAST_PORT, () => {
+    socket.bind(DISCOVERY_MULTICAST_PORT, () => {
       try {
-        socket?.addMembership(MULTICAST_ADDR);
+        socket?.addMembership(DISCOVERY_MULTICAST_ADDR);
         socket?.setMulticastTTL(2);
         socket?.setMulticastLoopback(true);
-        log(`multicast listening on ${MULTICAST_ADDR}:${MULTICAST_PORT}`);
+        log(`multicast listening on ${DISCOVERY_MULTICAST_ADDR}:${DISCOVERY_MULTICAST_PORT}`);
         announce();
         interval = setInterval(announce, 30_000);
       } catch (err) {
@@ -144,18 +134,36 @@ export function startDiscovery(opts: DiscoveryOptions): DiscoveryHandle {
     interval = setInterval(announce, 30_000);
   }
 
-  // bonjour if available
+  // bonjour if available — dynamic require guard for bundler safety
   try {
-    const Bonjour = eval("require")("bonjour-service") as unknown as { Bonjour: new () => { publish: (o: unknown) => unknown; unpublishAll: (cb?: () => void) => void; destroy: () => void } };
-    const instance = new Bonjour.Bonjour();
-    bonjour = instance;
-    service = instance.publish({
-      name: `Lyra ${opts.identity.name}`,
-      type: "_lyra._tcp",
-      port: opts.peerPort,
-      txt: { id: opts.identity.id, fp: opts.identity.fingerprint },
-    } as unknown as never);
-    log(`bonjour published _lyra._tcp :${opts.peerPort}`);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const maybeRequire = (globalThis as any).require as ((id: string) => any) | undefined;
+    let BonjourMod: unknown = null;
+    if (typeof maybeRequire === "function") {
+      try {
+        BonjourMod = maybeRequire("bonjour-service");
+      } catch {
+        BonjourMod = null;
+      }
+    }
+    if (BonjourMod) {
+      const BonjourCtor =
+        (BonjourMod as { Bonjour: new () => { publish: (o: unknown) => unknown; unpublishAll: (cb?: () => void) => void; destroy: () => void } }).Bonjour ??
+        (BonjourMod as { default?: { Bonjour: new () => { publish: (o: unknown) => unknown; unpublishAll: (cb?: () => void) => void; destroy: () => void } } }).default?.Bonjour;
+      if (BonjourCtor) {
+        const instance = new BonjourCtor();
+        bonjour = instance;
+        service = instance.publish({
+          name: `Lyra ${opts.identity.name}`,
+          type: "_lyra._tcp",
+          port: opts.peerPort,
+          txt: { id: opts.identity.id, fp: opts.identity.fingerprint },
+        } as unknown as never);
+        log(`bonjour published _lyra._tcp :${opts.peerPort}`);
+      }
+    } else {
+      log("bonjour-service not available, skipping mDNS");
+    }
   } catch {
     log("bonjour-service not available, skipping mDNS");
   }

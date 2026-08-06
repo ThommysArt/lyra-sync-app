@@ -1,9 +1,9 @@
 import * as http from "node:http";
 import * as os from "node:os";
 import type { DeviceIdentity, LyraEnvelope } from "@lyra-sync-app/protocol";
-import type { DaemonConfig } from "./types.js";
+import type { DaemonConfig, TrustedPeer } from "./types.js";
 import { unsealPayload } from "./seal.js";
-import { appendChunk, createTransferState, type TransferState } from "./transfer.js";
+import { appendChunk, createTransferState, finalizeTransfer, type TransferState } from "./transfer.js";
 import type { FileEntry, Transfer } from "@lyra-sync-app/protocol";
 
 type PeerServerHandlers = {
@@ -27,6 +27,7 @@ export type PeerServer = {
   setIdentity(id: DeviceIdentity): void;
   revokeDevice(deviceId: string): number;
   resolvePairRequest(match: string | { token: string }, decision: boolean): boolean;
+  syncTrustedPeers(peers: TrustedPeer[]): void;
 };
 
 function getLanHost(): string | null {
@@ -82,7 +83,23 @@ export async function startPeerServer(opts: PeerServerOptions): Promise<PeerServ
   const pendingPairs = new Map<string, { resolve: (ok: boolean) => void; timer: ReturnType<typeof setTimeout> }>();
   const transfers = new Map<string, TransferState>();
 
-  // allow initial trusted seeding via no-op; revokeDevice will handle
+  // seed trusted peers from config
+  if (Array.isArray(opts.trustedPeers)) {
+    for (const p of opts.trustedPeers) {
+      if (p.deviceId && p.authSecret) {
+        trusted.set(p.deviceId, { fingerprint: p.fingerprint, authSecret: p.authSecret });
+      }
+    }
+  }
+
+  function syncTrustedPeers(peers: TrustedPeer[]): void {
+    trusted.clear();
+    for (const p of peers ?? []) {
+      if (!p.deviceId || !p.authSecret) continue;
+      trusted.set(p.deviceId, { fingerprint: p.fingerprint, authSecret: p.authSecret });
+    }
+    log(`trusted peers synced: ${trusted.size}`);
+  }
 
   const server = http.createServer(async (req, res) => {
     // CORS preflight
@@ -135,7 +152,6 @@ export async function startPeerServer(opts: PeerServerOptions): Promise<PeerServ
           }, 60_000);
           pendingPairs.set(token, { resolve: (v) => { clearTimeout(timer); resolve(v); }, timer });
         });
-        // if pending still exists, it was timeout; else resolved via resolvePairRequest
         pendingPairs.delete(token);
         if (decision) sendJson(res, 200, { ok: true, paired: true });
         else sendJson(res, 200, { ok: true, paired: false, status: "timeout_or_rejected" });
@@ -150,15 +166,42 @@ export async function startPeerServer(opts: PeerServerOptions): Promise<PeerServ
           return;
         }
         let payload: unknown = (envelope as { payload?: unknown }).payload;
+        let trustedForSeal = false;
         if (envelope.seal) {
-          const secret = await opts.resolvePeerAuth?.(envelope.fromDeviceId, undefined) ?? null;
-          const fallback = trusted.get(envelope.fromDeviceId)?.authSecret ?? null;
-          const authSecret = secret ?? fallback;
+          // lookup authSecret via opts.resolvePeerAuth OR trusted map
+          let authSecret: string | null = null;
+          try {
+            const viaResolve = await opts.resolvePeerAuth?.(envelope.fromDeviceId, undefined);
+            if (typeof viaResolve === "string" && viaResolve) authSecret = viaResolve;
+          } catch {}
+          if (!authSecret) {
+            const fallback = trusted.get(envelope.fromDeviceId)?.authSecret ?? null;
+            if (fallback) authSecret = fallback;
+          }
+          trustedForSeal = !!authSecret;
+          // if trusted entry exists but resolve didn't return, also consider trusted map directly
+          if (!authSecret) {
+            const t = trusted.get(envelope.fromDeviceId);
+            if (t) {
+              authSecret = t.authSecret;
+              trustedForSeal = true;
+            }
+          }
           if (authSecret) {
             try {
               payload = await unsealPayload(envelope.seal, authSecret);
             } catch (err) {
               log(`unseal failed for ${envelope.fromDeviceId}: ${String(err)}`);
+              if (trustedForSeal) {
+                sendJson(res, 401, { ok: false, error: "unauthorized: seal verification failed" });
+                return;
+              }
+            }
+          } else {
+            // no secret available but seal present — if peer is in trusted map, fail
+            if (trusted.has(envelope.fromDeviceId)) {
+              sendJson(res, 401, { ok: false, error: "unauthorized: missing auth secret" });
+              return;
             }
           }
         }
@@ -169,17 +212,63 @@ export async function startPeerServer(opts: PeerServerOptions): Promise<PeerServ
           await opts.handlers?.onClipboardPush?.(envelope, payload);
         } else if (type === "transfer_offer") {
           await opts.handlers?.onTransferOffer?.(envelope, payload);
-          // if transfer offer contains Transfer, create state
           const maybe = payload as Partial<Transfer> | null;
           if (maybe && typeof maybe["transferId"] === "string" && Array.isArray(maybe["files"])) {
             try {
               const state = await createTransferState(maybe as Transfer);
-              void downloadDir;
               transfers.set(maybe["transferId"] as string, state);
             } catch (err) {
               log(`createTransferState failed: ${String(err)}`);
             }
           }
+        } else if (type === "transfer_chunk") {
+          const p = payload as { transferId?: string; offset?: number; dataBase64?: string; data?: string } | null;
+          const tid = p?.transferId ?? (envelope.payload as { transferId?: string } | null)?.transferId ?? "";
+          const offset = typeof p?.offset === "number" ? p.offset : 0;
+          const b64 = p?.dataBase64 ?? p?.data ?? "";
+          if (tid && b64) {
+            let state = transfers.get(tid);
+            if (!state) {
+              // stub if offer missed
+              const offer: Transfer = {
+                transferId: tid,
+                files: [{ name: `${tid}.bin`, size: offset + Buffer.from(b64, "base64").length }],
+                totalBytes: offset + Buffer.from(b64, "base64").length,
+                status: "in_progress",
+              };
+              state = await createTransferState(offer);
+              transfers.set(tid, state);
+            }
+            const bytes = new Uint8Array(Buffer.from(b64, "base64"));
+            await appendChunk(state, offset, bytes);
+          }
+        } else if (type === "transfer_complete") {
+          const p = payload as { transferId?: string; transfer_id?: string } | null;
+          const tid = p?.transferId ?? p?.transfer_id ?? (envelope.payload as { transferId?: string } | null)?.transferId ?? "";
+          if (tid) {
+            const state = transfers.get(tid);
+            if (state) {
+              try {
+                const result = await finalizeTransfer(state, downloadDir);
+                transfers.delete(tid);
+                // emit completion for daemon listeners
+                void opts.onEnvelope?.({ ...envelope, payload: { ...((payload as object) ?? {}), savedPaths: result.savedPaths, ok: result.ok, error: result.error } } as LyraEnvelope);
+                // also notify via lyra:transfer-complete concept — reuse onEnvelope with enriched payload
+                log(`transfer complete ${tid} -> ${result.savedPaths.join(", ")} ok=${result.ok}`);
+                sendJson(res, 200, { ok: result.ok, savedPaths: result.savedPaths, error: result.error });
+                return;
+              } catch (err) {
+                log(`finalizeTransfer failed ${tid}: ${String(err)}`);
+                sendJson(res, 500, { ok: false, error: String(err) });
+                return;
+              }
+            }
+          }
+        } else if (type === "transfer_pause" || type === "transfer_resume") {
+          // pause/resume are client-side signals; just forward
+          void opts.onEnvelope?.(envelope);
+          sendJson(res, 200, { ok: true });
+          return;
         } else if (type === "open_url") {
           const u = (payload as { url?: string } | null)?.url ?? (payload as string | null);
           if (typeof u === "string") await opts.handlers?.onOpenUrl?.(u);
@@ -211,7 +300,6 @@ export async function startPeerServer(opts: PeerServerOptions): Promise<PeerServ
         if (transferId) {
           let state = transfers.get(transferId);
           if (!state) {
-            // create stub state if not exists
             const offer: Transfer = {
               transferId,
               files: [{ name: `${transferId}.bin`, size: data.length + offset }],
@@ -234,13 +322,43 @@ export async function startPeerServer(opts: PeerServerOptions): Promise<PeerServ
     }
   });
 
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(opts.port, "0.0.0.0", () => resolve());
-  });
+  // port candidates loop for EADDRINUSE (like old main.ts:404)
+  const portCandidates = [opts.port, opts.port + 2, opts.port + 4];
+  let lastErr: unknown = null;
+  let listeningPort: number | null = null;
+  for (const candidate of portCandidates) {
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const onErr = (err: unknown) => {
+          server.removeListener("listening", onListen);
+          reject(err);
+        };
+        const onListen = () => {
+          server.removeListener("error", onErr);
+          resolve();
+        };
+        server.once("error", onErr);
+        server.once("listening", onListen);
+        server.listen(candidate, "0.0.0.0");
+      });
+      listeningPort = candidate;
+      break;
+    } catch (err: unknown) {
+      lastErr = err;
+      const code = (err as { code?: string })?.code;
+      if (code === "EADDRINUSE") {
+        log(`port ${candidate} in use, trying next`);
+        continue;
+      }
+      throw err;
+    }
+  }
+  if (listeningPort === null) {
+    throw lastErr ?? new Error(`failed to listen on ports ${portCandidates.join(", ")}`);
+  }
 
   const addr = server.address() as { port: number } | null;
-  const port = addr?.port ?? opts.port;
+  const port = addr?.port ?? listeningPort ?? opts.port;
   const protocol = opts.tls ? "https" : "http";
 
   log(`peer server listening ${protocol}://0.0.0.0:${port}`);
@@ -255,7 +373,12 @@ export async function startPeerServer(opts: PeerServerOptions): Promise<PeerServ
       pendingPairs.clear();
       for (const s of transfers.values()) {
         try {
-          await s.fd?.close();
+          await (s.fh ?? s.fd)?.close();
+        } catch {}
+        // best-effort cleanup tmpDir
+        try {
+          const { promises: fsp } = await import("node:fs");
+          await fsp.rm(s.tmpDir, { recursive: true, force: true });
         } catch {}
       }
       transfers.clear();
@@ -279,5 +402,6 @@ export async function startPeerServer(opts: PeerServerOptions): Promise<PeerServ
       entry.resolve(decision);
       return true;
     },
+    syncTrustedPeers,
   };
 }

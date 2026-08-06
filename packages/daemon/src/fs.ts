@@ -27,20 +27,48 @@ function getMimeType(fileName: string): string | undefined {
   return MIME_MAP[ext];
 }
 
-function toFileEntry(fullPath: string, name: string, stat: { isDirectory(): boolean; size: number; mtimeMs: number }): FileEntry & { mimeType?: string } {
+function toFileEntry(fullPath: string, name: string, stat: { isDirectory(): boolean; size: number; mtimeMs: number }): FileEntry {
   return {
     name,
     path: fullPath,
     isDirectory: stat.isDirectory(),
     size: stat.isDirectory() ? undefined : stat.size,
     modifiedAt: stat.mtimeMs,
-    mimeType: stat.isDirectory() ? undefined : getMimeType(name),
+    ...(stat.isDirectory() ? {} : { mimeType: getMimeType(name) }),
   } as FileEntry & { mimeType?: string };
 }
 
+export function resolveSmartPath(p: string): string {
+  const home = os.homedir();
+  const trimmed = (p ?? "").trim();
+  if (trimmed === "" || trimmed === "/" || trimmed === "~") return home;
+  if (trimmed === "~/" || trimmed.startsWith("~/")) {
+    const rest = trimmed.slice(2);
+    return rest ? path.join(home, rest) : home;
+  }
+  const smartRoots: Record<string, string> = {
+    "/Documents": path.join(home, "Documents"),
+    "/Downloads": path.join(home, "Downloads"),
+    "/Desktop": path.join(home, "Desktop"),
+    "/Pictures": path.join(home, "Pictures"),
+    "/Music": path.join(home, "Music"),
+    "/Videos": path.join(home, "Videos"),
+  };
+  if (smartRoots[trimmed]) return smartRoots[trimmed] as string;
+  for (const [key, mapped] of Object.entries(smartRoots)) {
+    if (trimmed === key + "/" || trimmed.startsWith(key + "/")) {
+      const suffix = trimmed.slice(key.length + 1);
+      return suffix ? path.join(mapped, suffix) : mapped;
+    }
+  }
+  if (path.isAbsolute(trimmed)) return path.normalize(trimmed);
+  return path.resolve(trimmed);
+}
+
 export async function statOsPath(targetPath: string): Promise<{ exists: boolean; isDirectory: boolean; size?: number; modifiedAt?: number }> {
+  const resolved = resolveSmartPath(targetPath);
   try {
-    const s = await fs.stat(targetPath);
+    const s = await fs.stat(resolved);
     return { exists: true, isDirectory: s.isDirectory(), size: s.size, modifiedAt: s.mtimeMs };
   } catch {
     return { exists: false, isDirectory: false };
@@ -48,10 +76,13 @@ export async function statOsPath(targetPath: string): Promise<{ exists: boolean;
 }
 
 export async function listOsFiles(dirPath: string): Promise<FileEntry[]> {
-  const entries = await fs.readdir(dirPath, { withFileTypes: true });
+  const input = dirPath ?? "";
+  const isRootRequest = input.trim() === "" || input.trim() === "/" || input.trim() === "~";
+  const resolved = resolveSmartPath(input);
+  const entries = await fs.readdir(resolved, { withFileTypes: true });
   const out: FileEntry[] = [];
   for (const entry of entries) {
-    const fullPath = path.join(dirPath, entry.name);
+    const fullPath = path.join(resolved, entry.name);
     try {
       const stat = await fs.stat(fullPath);
       out.push(toFileEntry(fullPath, entry.name, stat) as FileEntry);
@@ -59,17 +90,41 @@ export async function listOsFiles(dirPath: string): Promise<FileEntry[]> {
       // skip unreadable
     }
   }
+  if (isRootRequest) {
+    const smart = getSmartFolders();
+    const existingNames = new Set(out.filter((e) => e.isDirectory).map((e) => e.name.toLowerCase()));
+    for (const folder of smart) {
+      if (!existingNames.has(folder.name.toLowerCase())) {
+        try {
+          const stat = await fs.stat(folder.path);
+          out.push(toFileEntry(folder.path, folder.name, stat) as FileEntry);
+        } catch {
+          out.push({
+            name: folder.name,
+            path: folder.path,
+            isDirectory: true,
+            modifiedAt: Date.now(),
+          } as FileEntry);
+        }
+      }
+    }
+  }
   return out;
 }
 
 export async function readOsFileChunk(filePath: string, offset: number, maxBytes: number): Promise<Uint8Array> {
-  const fd = await fs.open(filePath, "r");
+  const resolved = resolveSmartPath(filePath);
+  const len = Math.max(0, Math.floor(maxBytes));
+  if (len === 0) return new Uint8Array(0);
+  const safeOffset = Math.max(0, Math.floor(offset));
+  const fh = await fs.open(resolved, "r");
   try {
-    const buf = Buffer.alloc(maxBytes);
-    const { bytesRead } = await fd.read(buf, 0, maxBytes, offset);
-    return new Uint8Array(buf.buffer, buf.byteOffset, bytesRead);
+    const buf = Buffer.alloc(len);
+    const { bytesRead } = await fh.read(buf, 0, len, safeOffset);
+    if (bytesRead === len) return new Uint8Array(buf.buffer, buf.byteOffset, bytesRead);
+    return new Uint8Array(buf.buffer.slice(buf.byteOffset, buf.byteOffset + bytesRead));
   } finally {
-    await fd.close();
+    await fh.close();
   }
 }
 

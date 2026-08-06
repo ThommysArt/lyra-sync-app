@@ -23,6 +23,12 @@ function timeoutSignal(timeoutMs: number, outer?: AbortSignal): AbortSignal {
   return ctrl.signal;
 }
 
+/**
+ * NodeHttpTransport — Node fetch-based transport for desktop/server.
+ * Implements PeerTransport:
+ * - info(endpoint) GET http://${host}:${port}/lyra/info with 2500ms timeout
+ * - send(endpoint, envelope) POST /lyra/message JSON, with seal if envelope.seal
+ */
 export class NodeHttpTransport implements PeerTransport {
   async info(
     endpoint: PeerEndpoint,
@@ -67,11 +73,13 @@ export class NodeHttpTransport implements PeerTransport {
     try {
       const headers: Record<string, string> = { "content-type": "application/json", accept: "application/json" };
       if (opts?.sessionToken) headers["x-lyra-token"] = opts.sessionToken;
+      // envelope may contain `seal` field — include as-is in JSON body
+      const body = JSON.stringify(envelope);
       const res = await fetch(url, {
         method: "POST",
         signal,
         headers,
-        body: JSON.stringify(envelope),
+        body,
       });
       if (!res.ok) {
         const text = await res.text().catch(() => "");
@@ -88,4 +96,53 @@ export class NodeHttpTransport implements PeerTransport {
       return { ok: false, error: message };
     }
   }
+
+  async uploadChunk(
+    endpoint: PeerEndpoint,
+    transferId: string,
+    offset: number,
+    bytes: Uint8Array,
+    opts?: { signal?: AbortSignal; timeoutMs?: number; sessionToken?: string },
+  ): Promise<{ ok: true } | { ok: false; error: string }> {
+    return uploadChunk(endpoint, transferId, offset, bytes, opts);
+  }
 }
+
+export async function uploadChunk(
+  endpoint: PeerEndpoint,
+  transferId: string,
+  offset: number,
+  bytes: Uint8Array,
+  opts?: { signal?: AbortSignal; timeoutMs?: number; sessionToken?: string },
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const timeoutMs = opts?.timeoutMs ?? 30_000;
+  const signal = timeoutSignal(timeoutMs, opts?.signal);
+  const base = endpointBase(endpoint);
+  const url = `${base}/lyra/file/chunk?transferId=${encodeURIComponent(transferId)}&offset=${offset}`;
+  try {
+    const headers: Record<string, string> = {
+      "content-type": "application/octet-stream",
+      "x-transfer-id": transferId,
+      "x-offset": String(offset),
+    };
+    if (opts?.sessionToken) headers["x-lyra-token"] = opts.sessionToken;
+    const res = await fetch(url, {
+      method: "POST",
+      signal,
+      headers,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      body: bytes as unknown as any,
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      return { ok: false, error: `http ${res.status} ${text}`.trim() };
+    }
+    return { ok: true };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: message };
+  }
+}
+
+// alias for task description name
+export const sendFileChunk = uploadChunk;

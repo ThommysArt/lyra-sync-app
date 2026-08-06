@@ -21,6 +21,7 @@ export type DaemonConfig = {
   port: number;
   tls?: boolean;
   downloadDir?: string;
+  trustedPeers?: TrustedPeer[];
   onEnvelope?: (envelope: LyraEnvelope) => void;
   onLog?: (msg: string) => void;
   resolvePeerAuth?: (deviceId: string, fingerprint?: string) => string | null | Promise<string | null>;

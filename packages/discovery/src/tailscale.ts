@@ -23,8 +23,24 @@ function parseStatusJson(raw: string): TailscaleStatus {
 }
 
 /**
+ * isTailscaleHost — true if host looks like a Tailscale address:
+ * - 100.x.y.z CGNAT range (first octet 100)
+ * - or ends with .ts.net (case-insensitive)
+ */
+export function isTailscaleHost(host: string): boolean {
+  const h = host.trim().toLowerCase();
+  if (h.endsWith(".ts.net")) return true;
+  // 100.64.0.0/10 is the CGNAT range, but we treat any 100.* as tailscale hint
+  if (/^100\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h)) return true;
+  // also handle dnsName that may have trailing dot
+  const stripped = h.replace(/\.$/, "");
+  if (stripped.endsWith(".ts.net")) return true;
+  return false;
+}
+
+/**
  * fetchTailscaleStatus — spawns `tailscale status --json` and parses.
- * Timeout 2500ms by default. Returns null on failure.
+ * Timeout 2500ms by default. Returns null on failure or if binary not found.
  */
 export async function fetchTailscaleStatus(
   opts?: { timeoutMs?: number; command?: string },
@@ -32,17 +48,31 @@ export async function fetchTailscaleStatus(
   const timeoutMs = opts?.timeoutMs ?? 2500;
   const command = opts?.command ?? "tailscale";
   return new Promise((resolve) => {
-    const child = spawn(command, ["status", "--json"], { timeout: timeoutMs });
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(command, ["status", "--json"], { timeout: timeoutMs });
+    } catch {
+      // spawn threw synchronously (e.g. invalid command) — binary not found
+      resolve(null);
+      return;
+    }
     let out = "";
     let errOut = "";
     const timer = setTimeout(() => {
-      try { child.kill(); } catch {}
+      try {
+        child.kill();
+      } catch {}
       resolve(null);
     }, timeoutMs + 200);
-    child.stdout?.on("data", (d: Buffer) => { out += d.toString("utf8"); });
-    child.stderr?.on("data", (d: Buffer) => { errOut += d.toString("utf8"); });
+    child.stdout?.on("data", (d: Buffer) => {
+      out += d.toString("utf8");
+    });
+    child.stderr?.on("data", (d: Buffer) => {
+      errOut += d.toString("utf8");
+    });
     child.on("error", () => {
       clearTimeout(timer);
+      // binary not found (ENOENT) or spawn error — resolve null
       resolve(null);
     });
     child.on("close", (code) => {

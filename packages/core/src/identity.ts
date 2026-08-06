@@ -1,4 +1,5 @@
 import type { DeviceIdentity, DeviceType, Platform } from "@lyra-sync-app/protocol";
+import { createHash } from "node:crypto";
 
 // -- helpers ---------------------------------------------------------------
 
@@ -25,7 +26,9 @@ export function generatePairingCode(length = 6): string {
 
 function toHex(buf: ArrayBuffer | Uint8Array): string {
   const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
-  return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+  return Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
 }
 
 async function sha256Hex(input: string): Promise<string> {
@@ -37,10 +40,10 @@ async function sha256Hex(input: string): Promise<string> {
       return toHex(hash);
     }
   } catch {}
-  // Node fallback
+  // Node fallback — dynamic import for bundler safety
   try {
-    const { createHash } = await import("node:crypto");
-    return createHash("sha256").update(input, "utf8").digest("hex");
+    const { createHash: dh } = await import("node:crypto");
+    return dh("sha256").update(input, "utf8").digest("hex");
   } catch {}
   // ultra fallback (not cryptographically secure, just scaffold)
   let h = 0;
@@ -48,10 +51,9 @@ async function sha256Hex(input: string): Promise<string> {
   return Math.abs(h).toString(16).padStart(8, "0");
 }
 
-// sync version for scaffold where async not desired
+// sync version for scaffold where async not desired — uses static import with try guard
 function sha256HexSync(input: string): string {
   try {
-    const { createHash } = eval("require")("node:crypto") as typeof import("node:crypto");
     return createHash("sha256").update(input, "utf8").digest("hex");
   } catch {
     let h = 0;
@@ -70,14 +72,10 @@ export async function hashPairingCodeAsync(code: string): Promise<string> {
 }
 
 /**
- * deriveMutualAuthSecret — scaffold: SHA256(token + fpA + fpB) hex.
- * Day 1 simple shared secret; Day 2 will add ECDSA.
+ * deriveMutualAuthSecret — SHA256(token + sorted fingerprints) hex.
+ * Sorted fingerprints ensure A->B and B->A derive same secret.
  */
-export async function deriveMutualAuthSecret(
-  token: string,
-  fpA: string,
-  fpB: string,
-): Promise<string> {
+export async function deriveMutualAuthSecret(token: string, fpA: string, fpB: string): Promise<string> {
   const sorted = [fpA, fpB].sort().join("|");
   return sha256Hex(`${token}|${sorted}`);
 }

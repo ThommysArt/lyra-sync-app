@@ -3,9 +3,18 @@ import type { ProbeResult } from "./types.js";
 import { LYRA_DEFAULT_TIMEOUT, type PeerTransport } from "./transport.js";
 
 /**
- * NativeTcpTransport — mobile path via react-native-tcp-socket.
+ * NativeTcpTransport — mobile path via `react-native-tcp-socket`.
  * Falls back to fetch when running on web or when the native module is absent.
+ *
  * Timeout is applied *after* slot acquisition (slot queue not implemented yet — placeholder).
+ * Structure is timeout-after-slot:
+ *   1. acquire slot (stub — immediate)
+ *   2. start timeout
+ *   3. perform probe/send
+ *   4. release slot
+ *
+ * When `react-native-tcp-socket` is not installed, we catch the dynamic import
+ * error and fallback to fetch (HTTP) so the transport remains usable in dev/web.
  */
 export class NativeTcpTransport implements PeerTransport {
   private fallbackFetch(
@@ -36,9 +45,9 @@ export class NativeTcpTransport implements PeerTransport {
         void mod;
       }
     } catch {
-      // ignore
+      // ignore — fallback to fetch
     }
-    // fetch fallback
+    // fetch fallback — timeout after slot
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(new Error("timeout")), timeoutMs);
     if (signal) {
@@ -91,7 +100,7 @@ export class NativeTcpTransport implements PeerTransport {
         // future: write via socket, await response with timeout after slot
       }
     } catch {
-      // ignore
+      // ignore — fallback to fetch
     }
 
     const ctrl = new AbortController();
@@ -126,11 +135,52 @@ export class NativeTcpTransport implements PeerTransport {
       return { ok: false, error: message };
     }
   }
+
+  async uploadChunk(
+    endpoint: PeerEndpoint,
+    transferId: string,
+    offset: number,
+    bytes: Uint8Array,
+    opts?: { signal?: AbortSignal; timeoutMs?: number; sessionToken?: string },
+  ): Promise<{ ok: true } | { ok: false; error: string }> {
+    const timeoutMs = opts?.timeoutMs ?? 30_000;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(new Error("timeout")), timeoutMs);
+    if (opts?.signal) {
+      if (opts.signal.aborted) ctrl.abort(opts.signal.reason);
+      else opts.signal.addEventListener("abort", () => ctrl.abort(opts.signal?.reason), { once: true });
+    }
+    ctrl.signal.addEventListener("abort", () => clearTimeout(timer), { once: true });
+    try {
+      const headers: Record<string, string> = {
+        "content-type": "application/octet-stream",
+        "x-transfer-id": transferId,
+        "x-offset": String(offset),
+      };
+      if (opts?.sessionToken) headers["x-lyra-token"] = opts.sessionToken;
+      const res = await this.fallbackFetch(endpoint, `/lyra/file/chunk?transferId=${encodeURIComponent(transferId)}&offset=${offset}`, {
+        method: "POST",
+        signal: ctrl.signal,
+        headers,
+        body: bytes as unknown as never,
+      });
+      clearTimeout(timer);
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        return { ok: false, error: `http ${res.status} ${text}`.trim() };
+      }
+      return { ok: true };
+    } catch (err) {
+      clearTimeout(timer);
+      const message = err instanceof Error ? err.message : String(err);
+      return { ok: false, error: message };
+    }
+  }
 }
 
 async function tryLoadTcpSocket(): Promise<unknown | null> {
   try {
-    // dynamic import — bundlers will handle missing module at runtime
+    // dynamic import — bundlers will handle missing module at runtime; try/catch ensures fallback to fetch
     const mod = await import("react-native-tcp-socket" as string);
     return (mod as unknown) ?? null;
   } catch {

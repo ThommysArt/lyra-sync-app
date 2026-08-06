@@ -58,6 +58,17 @@ export async function sealPayload(payload: unknown, secret: string): Promise<Lyr
   return { v: 1, nonce: toBase64(nonce), ciphertext: toBase64(ciphertext) };
 }
 
+export async function sealEnvelope(envelope: import("@lyra-sync-app/protocol").LyraEnvelope, secret: string): Promise<import("@lyra-sync-app/protocol").LyraEnvelope> {
+  const seal = await sealPayload(envelope.payload, secret);
+  return { ...envelope, seal };
+}
+
+export async function unsealEnvelope(envelope: import("@lyra-sync-app/protocol").LyraEnvelope, secret: string): Promise<import("@lyra-sync-app/protocol").LyraEnvelope> {
+  if (!envelope.seal) return envelope;
+  const payload = await unsealPayload(envelope.seal, secret);
+  return { ...envelope, payload };
+}
+
 export async function unsealPayload(seal: LyraSeal, secret: string): Promise<unknown> {
   const key = deriveKey(secret);
   const nonce = fromBase64(seal.nonce);
