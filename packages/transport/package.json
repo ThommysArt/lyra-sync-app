@@ -1,0 +1,21 @@
+{
+  "name": "@lyra-sync-app/transport",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "check-types": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@lyra-sync-app/protocol": "workspace:*",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@lyra-sync-app/config": "workspace:*",
+    "typescript": "^6",
+    "@types/node": "^22.13.14"
+  }
+}
