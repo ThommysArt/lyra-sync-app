@@ -1,108 +1,67 @@
-# lyra-sync-app
+# Lyra v2
 
-This project was created with [Better-T-Stack](https://github.com/AmanVarshney01/create-better-t-stack), a modern TypeScript stack that combines React, TanStack Router, and more.
+Privacy-first, peer-to-peer device network — **file sharing + clipboard sync** over LAN and Tailscale. No accounts, no cloud.
 
-## Features
+> **Branch:** `feat/lyra-v2` — reboot from `df07d3d`. See `docs/ARCHITECTURE-v2.md` for full plan.
 
-- **TypeScript** - For type safety and improved developer experience
-- **TanStack Router** - File-based routing with full type safety
-- **React Native** - Build mobile apps using React
-- **Expo** - Tools for React Native development
-- **TailwindCSS** - Utility-first CSS for rapid UI development
-- **Shared UI package** - shadcn/ui primitives live in `packages/ui`
-- **Biome** - Linting and formatting
-- **PWA** - Progressive Web App support
-- **Turborepo** - Optimized monorepo build system
+## Architecture (v2)
 
-## Getting Started
-
-First, install the dependencies:
-
-```bash
-pnpm install
-```
-
-Then, run the development server:
-
-```bash
-pnpm run dev
-```
-
-Open [http://localhost:3001](http://localhost:3001) in your browser to see the web application.
-Use the Expo Go app to run the mobile application.
-
-## UI Customization
-
-React web apps in this stack share shadcn/ui primitives through `packages/ui`.
-
-- Change design tokens and global styles in `packages/ui/src/styles/globals.css`
-- Update shared primitives in `packages/ui/src/components/*`
-- Adjust shadcn aliases or style config in `packages/ui/components.json` and `apps/web/components.json`
-
-### Add more shared components
-
-Run this from the project root to add more primitives to the shared UI package:
-
-```bash
-npx shadcn@latest add accordion dialog popover sheet table -c packages/ui
-```
-
-Import shared components like this:
-
-```tsx
-import { Button } from "@lyra-sync-app/ui/components/button";
-```
-
-### Add app-specific blocks
-
-If you want to add app-specific blocks instead of shared primitives, run the shadcn CLI from `apps/web`.
-
-## Deployment
-
-### Vercel Services
-
-- Target: web
-- Config: `vercel.json`
-- Link the project first: pnpm run deploy:setup
-- Local Vercel dev: pnpm run dev:vercel
-- Sync preview env: pnpm run env:preview
-- Sync production env: pnpm run env:production
-- Dry-run check (no upload): pnpm run deploy:check
-- Preview deploy: pnpm run deploy
-- Production deploy: pnpm run deploy:prod
-  Vercel Services share project environment variables, but deploys do not upload local `.env` files automatically. Link the project with `vercel link`, then run the env sync command before your first deploy (otherwise the deployment starts with no env vars), or pass one-off envs with `vercel deploy -e KEY=value`.
-  Pass Vercel CLI flags to the env sync command directly, for example: `pnpm run env:production --scope your-team`.
-
-For more details, see the guide on [Deploying to Vercel](https://www.better-t-stack.dev/docs/guides/vercel).
-
-## Git Hooks and Formatting
-
-- Run checks: `pnpm run check`
+- **Desktop = Server** — Electron daemon owns HTTP peer server + UDP multicast discovery + FS + clipboard monitor.
+- **Mobile = Client** — Expo prebuild (dev builds), `NativeTcpTransport` + `expo-secure-store`. No multicast walk unless user taps Scan LAN.
+- **Protocol** `packages/protocol` — Zod schemas only, `lyra/2` envelope + AES-GCM seal when paired.
+- **Transport** `packages/transport` — `PeerTransport` interface (`NodeHttpTransport`, `NativeTcpTransport`).
+- **Discovery** `packages/discovery` — Node dgram `239.255.255.250:53317` + bonjour `_lyra._tcp` + `tailscale status --json` relay.
+- **Daemon** `packages/daemon` — `startPeerServer` (`/lyra/info`, `/lyra/pair` 60s long-poll, `/lyra/message` sealed, `/lyra/file/chunk` streaming to `os.tmpdir()` for >2 GB resumes).
+- **Core** `packages/core` — sliced store (`identity`, `pairing`, `discovery`, `transfers`, `clipboard`) — pure, no IO.
+- **Web** `apps/web` — Vite+TanStack embedded in Electron `resources/web-dist`.
 
 ## Project Structure
 
 ```
-lyra-sync-app/
-├── apps/
-│   ├── web/         # Frontend application (React + TanStack Router)
-│   ├── native/      # Mobile application (React Native, Expo)
-├── packages/
-│   ├── ui/          # Shared shadcn/ui components and styles
+apps/
+  desktop/   Electron shell (thin, delegates to daemon) — variants dev/preview/prod (53317/53327/53337)
+  web/       Vite frontend (embedded)
+  native/    Expo mobile (prebuild android)
+packages/
+  protocol/  Zod schemas, envelope
+  transport/ PeerTransport
+  discovery/ multicast + tailscale
+  daemon/    peer HTTP server, FS, seal
+  core/      sliced store + identity
+  hooks/     useLyra
+  ui/        shadcn/ui
+docs/
+  ARCHITECTURE-v2.md  Full reboot plan
 ```
 
-## Available Scripts
+## Getting Started
 
-- `pnpm run dev`: Start all applications in development mode
-- `pnpm run build`: Build all applications
-- `pnpm run dev:web`: Start only the web application
-- `pnpm run check-types`: Check TypeScript types across all apps
-- `pnpm run dev:native`: Start the React Native/Expo development server
-- `pnpm run check`: Run Biome formatting and linting
-- `cd apps/web && pnpm run generate-pwa-assets`: Generate PWA assets
-- `pnpm run deploy:setup`: Link this repo to a Vercel project (first-time setup)
-- `pnpm run dev:vercel`: Run the Vercel Services dev environment locally
-- `pnpm run env:preview`: Sync local env files to the Vercel preview environment
-- `pnpm run env:production`: Sync local env files to the Vercel production environment
-- `pnpm run deploy`: Create a Vercel preview deployment
-- `pnpm run deploy:prod`: Deploy to Vercel production
-- `pnpm run deploy:check`: Dry-run a deploy to preview framework detection and included files without uploading
+```bash
+pnpm install
+pnpm run check-types   # 9/9 packages should pass
+pnpm run dev           # turbo dev (web + native)
+pnpm run dev:desktop            # Lyra Dev (53317)
+pnpm run dev:desktop:preview    # Lyra Preview side-by-side (53327)
+# two local desktops for pairing test:
+pnpm run dev:pair-a & pnpm run dev:pair-b
+```
+
+## Variants
+
+`LYRA_VARIANT=development|preview|production` → `appId app.lyra.desktop{.dev,.preview}`, `userData lyra-desktop{-dev,-preview}`, port `53317/53327/53337`. Mobile `APP_VARIANT` similarly.
+
+## iOS Note (recommendation)
+
+Receive-only clipboard, manual Send. No background poll (system restriction, Spec §5.3). Labeled in UI.
+
+## Screen Mirror
+
+Deprecated in v2 — stabilize file/clipboard first.
+
+## Deployment
+
+`pnpm run build` — turbo build. Desktop packaging via `electron-builder` (AppImage/dmg/nsis) when re-enabled in P6.
+
+## Legacy
+
+Old God-store/net on `feature/screen-mirror-tailscale` — stashed as `pre-v2 stash`.

@@ -4,6 +4,8 @@ packages:
 allowBuilds:
   esbuild: true
   sharp: true
+  electron: true
+  electron-builder: true
 catalog:
   dotenv: ^17.4.2
   zod: ^4.4.3
