@@ -1,7 +1,7 @@
 # Lyra v2 — Architecture Plan
 
 **Branch:** `feat/lyra-v2` off `df07d3d` (initial scaffold)  
-**Status:** Draft — replaces all v1 code (store, net, protocol, desktop)  
+**Status:** Implemented P0-P5 — replaces all v1 code (store, net, protocol, desktop) — 9/9 `check-types` green at `0ac133e`  
 **Priorities:** File sharing (large, resumable, >2 GB) + Clipboard sync. Tailscale required. Screen mirror dropped/deprecated for v2.  
 **Stacks:** Electron (desktop), Expo prebuild (mobile, dev builds only), Vite+TanStack Router (web embedded in Electron), pnpm+Turbo.
 
