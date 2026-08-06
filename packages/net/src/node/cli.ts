@@ -54,57 +54,90 @@ async function resolveIdentity(): Promise<DeviceIdentity> {
 }
 
 async function main() {
-  const port = Number(process.env.LYRA_PORT ?? 53317);
+  const requestedPort = Number(process.env.LYRA_PORT ?? 53317);
   const identity = await resolveIdentity();
 
   const useTls = process.env.LYRA_TLS === "1" || process.env.LYRA_TLS === "true";
 
-  const peer = await startPeerServer({
-    identity,
-    port,
-    tls: useTls,
-    // Fall through to built-in handlers (transfer chunks, clipboard, fs, pair)
-    onEnvelope: async (envelope) => {
-      console.log(`[envelope] ${envelope.type} from ${envelope.fromDeviceId}`);
-      return undefined;
-    },
-    handlers: {
-      onFsList: async (path) => {
-        // Real OS smart folders + browse (fallback message on error)
-        try {
-          return await listOsFiles(path);
-        } catch (e) {
-          console.warn("[fs_list]", e instanceof Error ? e.message : e);
-          // Demo fallback if OS path missing (e.g. headless CI)
-          if (path === "/" || path === "") {
-            return [
-              { name: "Documents", path: "/Documents", isDirectory: true },
-              { name: "Downloads", path: "/Downloads", isDirectory: true },
-            ];
-          }
-          return [];
-        }
-      },
-      onFsRead: (path, offset, maxBytes) => readOsFileChunk(path, offset, maxBytes),
-      onFsDelete: (path) => deleteOsPath(path),
-      onFsRename: (path, newName) => renameOsPath(path, newName),
-      onOpenUrl: (url) => {
-        console.log(`[open_url] ${url}`);
-        return true;
-      },
-      onClipboardPush: (item) => {
-        console.log(`[clipboard] ${item.type} from ${item.sourceDeviceName}`);
-      },
-      onPairRequest: (payload) => {
-        console.log(`[pair_request] from ${payload.name} (${payload.deviceId})`);
-      },
-      onTransferComplete: (state) => {
-        console.log(
-          `[transfer_complete] ${state.transferId} · ${state.receivedBytes} bytes · ${state.files.length} file(s)${state.diskPath ? ` · disk ${state.diskPath}` : ""}`,
-        );
-      },
-    },
-  });
+  // Try requested port then fallbacks so `pnpm dev` with desktop+mobile peers side-by-side doesn't collide with LocalSend/Electron
+  const portCandidates = [
+    requestedPort,
+    requestedPort + 2,
+    requestedPort + 4,
+    requestedPort + 10,
+    requestedPort + 20,
+    0,
+  ];
+  let peer: Awaited<ReturnType<typeof startPeerServer>> | null = null;
+  let lastError: unknown = null;
+  for (const tryPort of portCandidates) {
+    try {
+      peer = await startPeerServer({
+        identity,
+        port: tryPort,
+        tls: useTls,
+        // Fall through to built-in handlers (transfer chunks, clipboard, fs, pair)
+        onEnvelope: async (envelope) => {
+          console.log(`[envelope] ${envelope.type} from ${envelope.fromDeviceId}`);
+          return undefined;
+        },
+        handlers: {
+          onFsList: async (path) => {
+            // Real OS smart folders + browse (fallback message on error)
+            try {
+              return await listOsFiles(path);
+            } catch (e) {
+              console.warn("[fs_list]", e instanceof Error ? e.message : e);
+              // Demo fallback if OS path missing (e.g. headless CI)
+              if (path === "/" || path === "") {
+                return [
+                  { name: "Documents", path: "/Documents", isDirectory: true },
+                  { name: "Downloads", path: "/Downloads", isDirectory: true },
+                ];
+              }
+              return [];
+            }
+          },
+          onFsRead: (path, offset, maxBytes) => readOsFileChunk(path, offset, maxBytes),
+          onFsDelete: (path) => deleteOsPath(path),
+          onFsRename: (path, newName) => renameOsPath(path, newName),
+          onOpenUrl: (url) => {
+            console.log(`[open_url] ${url}`);
+            return true;
+          },
+          onClipboardPush: (item) => {
+            console.log(`[clipboard] ${item.type} from ${item.sourceDeviceName}`);
+          },
+          onPairRequest: (payload) => {
+            console.log(`[pair_request] from ${payload.name} (${payload.deviceId})`);
+          },
+          onTransferComplete: (state) => {
+            console.log(
+              `[transfer_complete] ${state.transferId} · ${state.receivedBytes} bytes · ${state.files.length} file(s)${state.diskPath ? ` · disk ${state.diskPath}` : ""}`,
+            );
+          },
+        },
+      });
+      if (tryPort !== requestedPort && tryPort !== 0) {
+        console.warn(`[lyra peer] preferred port ${requestedPort} busy — listening on ${peer.port} instead (set LYRA_PORT to pin)`);
+      } else if (tryPort === 0) {
+        console.warn(`[lyra peer] using ephemeral peer port ${peer.port}`);
+      }
+      lastError = null;
+      break;
+    } catch (e) {
+      lastError = e;
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/EADDRINUSE|address already in use/i.test(msg)) {
+        console.warn(`[lyra peer] port ${tryPort} in use, trying next…`);
+        continue;
+      }
+      throw e;
+    }
+  }
+  if (!peer) {
+    throw lastError instanceof Error ? lastError : new Error(`Could not bind peer port (tried ${portCandidates.join(", ")})`);
+  }
 
   console.log(`Lyra peer server listening on ${peer.url}`);
   console.log(`  device: ${identity.name} (${identity.id})`);

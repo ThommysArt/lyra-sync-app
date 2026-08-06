@@ -1,5 +1,5 @@
 import { formatRelativeTime } from "@lyra-sync-app/core";
-import { CheckCircle2, CloudOff, Radio, Scan, Sync } from "lucide-react";
+import { CheckCircle2, CloudOff, Radio, RefreshCw, Scan } from "lucide-react";
 
 import { useLyraSelector } from "@/lib/lyra";
 
@@ -32,7 +32,7 @@ export function ConnectionStatusCard({ deviceId }: { deviceId: string }) {
     sublabel = "Checking trust and reachability";
     color = "text-amber-600";
     bg = "bg-amber-500/10";
-    Icon = Sync;
+    Icon = RefreshCw;
   } else if (isScanning) {
     phase = "scanning";
     label = "Looking for peers…";
@@ -98,7 +98,7 @@ export function GlobalDiscoveryStatusCard() {
     sublabel = "Verifying paired devices";
     color = "text-amber-600";
     bg = "bg-amber-500/10";
-    Icon = Sync;
+    Icon = RefreshCw;
   } else if (discovery.phase === "offline") {
     label = "Discovery off";
     sublabel = "Enable in Settings";

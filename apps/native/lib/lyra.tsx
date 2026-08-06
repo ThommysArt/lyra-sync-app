@@ -9,6 +9,12 @@ import { startNativeDiscovery, type NativeDiscoveryHandle } from "@/lib/discover
 import { ACCENT, PAGE_BG } from "@/lib/constants";
 import { useAppTheme } from "@/contexts/app-theme-context";
 import {
+  nativeDefaultPortFromEnv,
+  nativePreferredPortFromEnv,
+  nativeVariantDefaultPort,
+  resolveNativeVariant,
+} from "@/lib/native-variant";
+import {
   createSecureLyraStorage,
   migratePrivateKeyToSecureStore,
 } from "@/lib/secure-storage";
@@ -145,18 +151,31 @@ export function LyraProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      // Reset ephemeral random port (e.g. 44119 from fallback to 0) back to default so next scan uses known ports
+      // Reset ephemeral random port (e.g. 44119 from fallback to 0) back to variant default + migrate dev/preview defaults
       try {
-        const currentPort = store.getState().settings.peerListenPort ?? 53317;
-        const knownPorts = new Set([53317, 53319, 53321, 53327, 53337, 53317 + 2, 53317 + 4, 53317 + 10]);
-        // Also allow any 5331x/5332x/5333x in range, but not random >40000 outside that list
+        const variant = resolveNativeVariant();
+        const variantDefault = nativeVariantDefaultPort(variant);
+        const currentPort = store.getState().settings.peerListenPort ?? variantDefault;
+        const knownPorts = new Set([53317, 53319, 53321, 53327, 53329, 53337, 53339]);
         if (currentPort > 40000 && !knownPorts.has(currentPort)) {
-          console.info(`[lyra] resetting ephemeral peerListenPort ${currentPort} → 53317`);
-          store.updateSettings({ peerListenPort: 53317 });
+          console.info(`[lyra] resetting ephemeral peerListenPort ${currentPort} → ${variantDefault}`);
+          store.updateSettings({ peerListenPort: variantDefault });
+        }
+        // Migrate stale defaults so `pnpm dev` desktop (53317) and mobile (53319) don't collide
+        if (variant === "development" && currentPort === 53317 && !nativePreferredPortFromEnv()) {
+          console.info("[lyra] migrating dev peer port 53317 → 53319 (desktop/mobile separation)");
+          store.updateSettings({ peerListenPort: 53319 });
+        }
+        if (variant === "preview" && currentPort === 53327 && !nativePreferredPortFromEnv()) {
+          console.info("[lyra] migrating preview peer port 53327 → 53329");
+          store.updateSettings({ peerListenPort: 53329 });
         }
       } catch {}
       try {
-        const preferred = store.getState().settings.peerListenPort ?? 53317;
+        const envPort = nativePreferredPortFromEnv();
+        const variantDefault = nativeDefaultPortFromEnv();
+        const stored = store.getState().settings.peerListenPort;
+        const preferred = envPort ?? stored ?? variantDefault;
         const peer = await startNativePeerServer({
           identity,
           port: preferred,

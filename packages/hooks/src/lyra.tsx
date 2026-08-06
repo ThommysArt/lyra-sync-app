@@ -18,7 +18,17 @@ import {
 
 import { shallowEqual } from "./shallow-equal";
 
-const StoreContext = createContext<LyraStore | null>(null);
+// Share StoreContext across HMR / duplicate module copies (vite deps cache + monorepo)
+// so useLyraStore never sees a null context when the provider comes from a different bundle copy.
+const GLOBAL_CTX_KEY = Symbol.for("lyra.StoreContext");
+function getStoreContext() {
+  const g = globalThis as unknown as Record<symbol, ReturnType<typeof createContext<LyraStore | null>> | undefined>;
+  if (!g[GLOBAL_CTX_KEY]) {
+    g[GLOBAL_CTX_KEY] = createContext<LyraStore | null>(null);
+  }
+  return g[GLOBAL_CTX_KEY]!;
+}
+const StoreContext = getStoreContext();
 
 export type LyraProviderProps = {
   children: ReactNode;
@@ -76,11 +86,15 @@ export function LyraProvider({
     return onStoreReady(store);
   }, [ready, store, onStoreReady]);
 
-  if (!ready) {
-    return <>{fallback}</>;
-  }
-
-  return <StoreContext.Provider value={store}>{children}</StoreContext.Provider>;
+  // Always provide StoreContext even while hydrating so that HMR or
+  // early mounts (e.g. route lazy chunks) don't see a null context and
+  // throw "useLyraStore must be used within LyraProvider". We render
+  // `fallback` until hydrate completes, then children.
+  return (
+    <StoreContext.Provider value={store}>
+      {ready ? children : (fallback ?? null)}
+    </StoreContext.Provider>
+  );
 }
 
 export function useLyraStore(): LyraStore {

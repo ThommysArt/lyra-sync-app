@@ -83,6 +83,22 @@ export function variantScheme(variant: AppVariant): string {
   }
 }
 
+/**
+ * Peer listen port for native variants — offset +2 from desktop
+ * (desktop 53317/53327/53337) so `pnpm dev` can run desktop + mobile
+ * peer servers side-by-side without port collision.
+ */
+export function variantDefaultPort(variant: AppVariant): number {
+  switch (variant) {
+    case "development":
+      return 53319;
+    case "preview":
+      return 53329;
+    default:
+      return 53339;
+  }
+}
+
 export default ({ config }: ConfigContext): ExpoConfig => {
   const variant = resolveVariant(process.env.APP_VARIANT);
   const version = readPackageVersion();

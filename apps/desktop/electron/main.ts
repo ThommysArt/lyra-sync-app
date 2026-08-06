@@ -876,9 +876,6 @@ function createWindow() {
   mainWindow.webContents.on("page-favicon-updated", () => {
     if (mainWindow) applyWindowIcon(mainWindow, appIcon);
   });
-  mainWindow.webContents.on("did-finish-load", () => {
-    if (mainWindow) applyWindowIcon(mainWindow, appIcon);
-  });
 
   const broadcastWindowState = () => {
     if (!mainWindow) return;
@@ -908,11 +905,86 @@ function createWindow() {
     }
   }, 2500);
 
+  // --- Dev: auto-retry when web server not yet ready (pnpm dev turbo race) ---
+  let webRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  let webRetryCount = 0;
+  const MAX_WEB_RETRIES = 60;
+  const isDevConnectionFailure = (code: number, url: string) => {
+    if (app.isPackaged) return false;
+    if (url !== WEB_DEV_URL && !url.startsWith(WEB_DEV_URL)) return false;
+    // ERR_CONNECTION_REFUSED (-102), ERR_CONNECTION_RESET (-101), ERR_ADDRESS_UNREACHABLE (-109), etc.
+    return code === -102 || code === -101 || code === -105 || code === -106 || code === -109 || code === -118;
+  };
+
+  const showWaitingUI = (code: number, desc: string, url: string, attempt: number, delayMs: number) => {
+    const html = `
+      <div style="min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#0B0F17;color:#f8fafc;font-family:ui-sans-serif,system-ui,-apple-system,sans-serif;padding:32px;text-align:center">
+        <div style="width:40px;height:40px;border:3px solid rgba(255,255,255,0.12);border-top-color:#2F6BFF;border-radius:50%;animation:spin 0.85s linear infinite;margin-bottom:20px"></div>
+        <h1 style="font-size:18px;font-weight:600;letter-spacing:-0.02em;margin:0 0 8px">Waiting for Lyra UI…</h1>
+        <p style="font-size:13px;color:rgba(255,255,255,0.62);margin:0 0 4px">Web server not ready at <code style="background:rgba(255,255,255,0.08);padding:2px 6px;border-radius:6px;font-size:12px">${url}</code></p>
+        <p style="font-size:12px;color:rgba(255,255,255,0.42);margin:0 0 18px">${desc} (${code}) · attempt ${attempt}/${MAX_WEB_RETRIES} · retry in ${Math.round(delayMs / 1000)}s</p>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center">
+          <button onclick="window.lyraDesktop?.reload?.() || location.reload()" style="padding:9px 18px;background:#2F6BFF;color:white;border:none;border-radius:10px;font-size:13px;font-weight:600;cursor:pointer;box-shadow:0 4px 14px rgba(47,107,255,0.35)">Reload now</button>
+          <button onclick="window.lyraDesktop?.quit?.() || window.close()" style="padding:9px 16px;background:rgba(255,255,255,0.08);color:#f8fafc;border:1px solid rgba(255,255,255,0.12);border-radius:10px;font-size:13px;font-weight:500;cursor:pointer">Close</button>
+        </div>
+        <p style="font-size:11px;color:rgba(255,255,255,0.28);margin-top:18px;max-width:420px;line-height:1.5">Auto-retrying… Keep <code style="background:rgba(255,255,255,0.08);padding:1px 5px;border-radius:4px">pnpm run dev:web</code> running. The window will reload automatically when Vite is ready.</p>
+        <style>@keyframes spin{to{transform:rotate(360deg)}}</style>
+      </div>
+    `;
+    void mainWindow?.webContents.executeJavaScript(
+      `document.documentElement.style.background='#0B0F17'; document.body.style.margin='0'; document.body.innerHTML = ${JSON.stringify(html)};`,
+    );
+    mainWindow?.show();
+  };
+
+  const scheduleWebRetry = () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (webRetryCount >= MAX_WEB_RETRIES) {
+      console.error("[lyra] web retry limit reached — showing final error");
+      const html = `<pre style="padding:24px;font:14px/1.4 ui-monospace,monospace;color:#f8fafc;background:#0B0F17">Lyra failed to load UI — web server not reachable\n${WEB_DEV_URL}\n\nTried ${webRetryCount} times. Run: pnpm run dev:web\n\n<button onclick="window.lyraDesktop?.reload?.() || location.reload()" style="margin-top:16px;padding:8px 14px;background:#2F6BFF;color:white;border:none;border-radius:8px;cursor:pointer">Reload</button></pre>`;
+      void mainWindow.webContents.executeJavaScript(`document.body.innerHTML = ${JSON.stringify(html)}`);
+      mainWindow.show();
+      return;
+    }
+    webRetryCount++;
+    const delayMs = Math.min(2000, 500 + webRetryCount * 250);
+    console.log(`[lyra] web not ready — retry ${webRetryCount}/${MAX_WEB_RETRIES} in ${delayMs}ms (${WEB_DEV_URL})`);
+    if (webRetryTimer) clearTimeout(webRetryTimer);
+    webRetryTimer = setTimeout(() => {
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+      // Poll once more via fetch before reload to avoid error flash — optional
+      void mainWindow.loadURL(WEB_DEV_URL).catch(() => {
+        // did-fail-load will schedule next retry
+      });
+    }, delayMs);
+  };
+
+  mainWindow.webContents.on("did-finish-load", () => {
+    if (mainWindow) applyWindowIcon(mainWindow, appIcon);
+    // Successful load — reset retry state
+    webRetryCount = 0;
+    if (webRetryTimer) {
+      clearTimeout(webRetryTimer);
+      webRetryTimer = null;
+    }
+  });
+
   mainWindow.webContents.on("did-fail-load", (_e, code, desc, url) => {
     console.error("[lyra] did-fail-load", { code, desc, url });
+    if (isDevConnectionFailure(code, url)) {
+      const delayMs = Math.min(2000, 500 + (webRetryCount + 1) * 250);
+      showWaitingUI(code, desc, url, webRetryCount + 1, delayMs);
+      scheduleWebRetry();
+      return;
+    }
+    // Non-recoverable or packaged build — show error with manual reload
+    const isDev = !app.isPackaged;
+    const reloadAction = isDev
+      ? `window.lyraDesktop?.reload?.() || location.reload()`
+      : `location.reload()`;
     void mainWindow?.webContents.executeJavaScript(
       `document.body.innerHTML = ${JSON.stringify(
-        `<pre style="padding:24px;font:14px/1.4 ui-monospace,monospace;color:#f8fafc;background:#0B0F17">Lyra failed to load UI\n${desc} (${code})\n${url}</pre>`,
+        `<div style="min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#0B0F17;color:#f8fafc;font-family:ui-sans-serif,system-ui;padding:32px;text-align:center"><h1 style="font-size:16px;font-weight:600;margin:0 0 8px">Lyra failed to load UI</h1><p style="font-size:13px;color:rgba(255,255,255,0.6);margin:0 0 12px">${desc} (${code})</p><p style="font-size:12px;color:rgba(255,255,255,0.4);word-break:break-all;margin:0 0 16px">${url}</p><button onclick="${reloadAction}" style="padding:8px 16px;background:#2F6BFF;color:white;border:none;border-radius:8px;font-size:13px;cursor:pointer">Reload</button></div>`,
       )}`,
     );
     mainWindow?.show();
@@ -940,6 +1012,10 @@ function createWindow() {
   }
 
   mainWindow.on("closed", () => {
+    if (webRetryTimer) {
+      clearTimeout(webRetryTimer);
+      webRetryTimer = null;
+    }
     mainWindow = null;
   });
 }
@@ -1078,6 +1154,16 @@ app.whenReady().then(async () => {
 
   ipcMain.handle("lyra:window-close", () => {
     mainWindow?.close();
+  });
+
+  ipcMain.handle("lyra:reload", () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return { ok: false as const };
+    if (!app.isPackaged) {
+      void mainWindow.loadURL(WEB_DEV_URL);
+    } else {
+      mainWindow.reload();
+    }
+    return { ok: true as const };
   });
 
   ipcMain.handle("lyra:window-get-state", () => ({
@@ -1338,8 +1424,8 @@ app.whenReady().then(async () => {
   ipcMain.handle(
     "lyra:check-adb",
     async (_e, opts?: { serial?: string }) => {
-      const adb = resolveAdbBinary();
-      const scrcpy = resolveScrcpyBinary();
+      const adb = resolveAdbBinary() ?? "adb";
+      const scrcpy = resolveScrcpyBinary() ?? "scrcpy";
       const { execFile } = await import("node:child_process");
       const { promisify } = await import("node:util");
       const execFileAsync = promisify(execFile);

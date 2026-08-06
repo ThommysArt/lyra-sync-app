@@ -59,6 +59,32 @@ function needsNoSandbox(electronBin: string): boolean {
   }
 }
 
+/**
+ * Poll web server until it responds (Vite dev). Returns true when ready.
+ * Used so `pnpm dev` (turbo runs web + desktop in parallel) doesn't flash
+ * ERR_CONNECTION_REFUSED before Vite is listening on :3001.
+ */
+async function waitForWebServer(url: string, timeoutMs: number): Promise<boolean> {
+  const start = Date.now();
+  const intervalMs = 500;
+  while (Date.now() - start < timeoutMs) {
+    try {
+      // Node 18+ has global fetch
+      const res = await fetch(url, { method: "GET", redirect: "follow" });
+      // Vite returns 200 for HTML, 304 etc are still "up". Only retry on 5xx / network error
+      if (res.status < 500) {
+        const elapsed = Date.now() - start;
+        console.log(`[lyra desktop] web server ready (${res.status}) after ${elapsed}ms`);
+        return true;
+      }
+    } catch {
+      // ECONNREFUSED — keep polling
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  return false;
+}
+
 async function main() {
   // Default local `pnpm dev` to development so it doesn't collide with a packaged prod AppImage
   if (!process.env.LYRA_VARIANT && !process.env.APP_VARIANT) {
@@ -75,6 +101,23 @@ async function main() {
   }
 
   await buildElectronMain();
+
+  // --- Dev: wait for web server so Electron doesn't flash ERR_CONNECTION_REFUSED ---
+  const webUrl = process.env.LYRA_WEB_URL ?? "http://localhost:3001";
+  const waitEnv = process.env.LYRA_WEB_WAIT ?? process.env.LYRA_WAIT_FOR_WEB;
+  // LYRA_WEB_WAIT=0 to skip waiting (e.g. when web is launched separately)
+  const waitMs =
+    waitEnv === "0" || waitEnv === "false" ? 0 : Number(waitEnv ?? 30000);
+  if (waitMs > 0 && !process.env.CI) {
+    console.log(`[lyra desktop] waiting for web server at ${webUrl} (up to ${waitMs}ms)…`);
+    const ready = await waitForWebServer(webUrl, waitMs);
+    if (!ready) {
+      console.warn(
+        `[lyra desktop] web server not ready after ${waitMs}ms — launching anyway (Electron will auto-retry). ` +
+          `Start the web server with: pnpm run dev:web  or  set LYRA_WEB_WAIT=0 to skip`,
+      );
+    }
+  }
 
   let electronBin: string;
   try {

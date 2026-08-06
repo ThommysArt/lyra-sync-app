@@ -5,8 +5,8 @@
   "main": "expo-router/entry",
   "scripts": {
     "start": "expo start",
-    "dev": "APP_VARIANT=development expo start --clear",
-    "dev:preview": "APP_VARIANT=preview expo start --clear",
+    "dev": "LYRA_PORT=53319 EXPO_PUBLIC_LYRA_PORT=53319 APP_VARIANT=development expo start --clear",
+    "dev:preview": "LYRA_PORT=53329 EXPO_PUBLIC_LYRA_PORT=53329 APP_VARIANT=preview expo start --clear",
     "web": "expo start --web",
     "android": "APP_VARIANT=development expo run:android",
     "ios": "APP_VARIANT=development expo run:ios",

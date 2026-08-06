@@ -510,7 +510,7 @@ export function attachNativePeerToStore(
   // and would be probed as 44119 etc. on next launch, missing the real 53317 peers.
   if (peer.port && peer.port !== store.getState().settings.peerListenPort) {
     const preferred = store.getState().settings.peerListenPort ?? 53317;
-    const known = new Set([53317, 53319, 53321, 53327, 53337, preferred, preferred + 2, preferred + 4, preferred + 10]);
+    const known = new Set([53317, 53319, 53321, 53327, 53329, 53337, 53339, preferred, preferred + 2, preferred + 4, preferred + 10]);
     if (known.has(peer.port)) {
       store.updateSettings({ peerListenPort: peer.port });
     } else {

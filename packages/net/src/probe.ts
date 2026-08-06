@@ -193,11 +193,13 @@ export function expandLanCandidates(
 
 /** Common Lyra peer ports across variants + EADDRINUSE fallbacks. */
 export const LYRA_SCAN_PORTS = [
-  LYRA_DEFAULT_PORT, // 53317 dev
-  LYRA_DEFAULT_PORT + 2, // 53319 multi-instance
+  LYRA_DEFAULT_PORT, // 53317 desktop dev
+  LYRA_DEFAULT_PORT + 2, // 53319 native dev / desktop dev+2
   LYRA_DEFAULT_PORT + 4, // 53321 multi-instance
-  53327, // preview
-  53337, // production
+  53327, // desktop preview
+  53329, // native preview
+  53337, // desktop production
+  53339, // native production
 ] as const;
 
 /**

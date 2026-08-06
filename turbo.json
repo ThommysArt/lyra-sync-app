@@ -16,6 +16,26 @@
     "dev": {
       "cache": false,
       "persistent": true
+    },
+    "peer-server": {
+      "cache": false,
+      "persistent": true
+    },
+    "peer-server:desktop": {
+      "cache": false,
+      "persistent": true
+    },
+    "peer-server:mobile": {
+      "cache": false,
+      "persistent": true
+    },
+    "peer-server:preview-desktop": {
+      "cache": false,
+      "persistent": true
+    },
+    "peer-server:preview-mobile": {
+      "cache": false,
+      "persistent": true
     }
   }
 }

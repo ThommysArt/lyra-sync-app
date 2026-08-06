@@ -1189,11 +1189,19 @@ export function createLyraStore(options?: {
         const expandedHosts = expandLanCandidates(seeds, port);
         const pairPorts = [
           ...new Set(
-            [port, LYRA_DEFAULT_PORT, port + 2, LYRA_DEFAULT_PORT + 2, LYRA_DEFAULT_PORT + 4, 53327].filter(
-              (p) => p > 0 && p <= 65535,
-            ),
+            [
+              port,
+              LYRA_DEFAULT_PORT,
+              port + 2,
+              LYRA_DEFAULT_PORT + 2,
+              LYRA_DEFAULT_PORT + 4,
+              53327,
+              53329,
+              53337,
+              53339,
+            ].filter((p) => p > 0 && p <= 65535),
           ),
-        ].slice(0, 5);
+        ].slice(0, 6);
         // Exact seeds: full port matrix. Expanded /24: primary + multi-instance ports only.
         const candidates: { host: string; port: number }[] = [];
         const seen = new Set<string>();
@@ -1208,8 +1216,17 @@ export function createLyraStore(options?: {
           for (const p of pairPorts) push(s.host, p);
         }
         const expandPairPorts = [
-          ...new Set([port, LYRA_DEFAULT_PORT, LYRA_DEFAULT_PORT + 2, LYRA_DEFAULT_PORT + 4]),
-        ].slice(0, 4);
+          ...new Set([
+            port,
+            LYRA_DEFAULT_PORT,
+            LYRA_DEFAULT_PORT + 2,
+            LYRA_DEFAULT_PORT + 4,
+            53327,
+            53329,
+            53337,
+            53339,
+          ]),
+        ].slice(0, 5);
         for (const ep of expandedHosts) {
           // Don't re-blow exact seeds (already full matrix)
           if (seedHosts.has(ep.host)) continue;

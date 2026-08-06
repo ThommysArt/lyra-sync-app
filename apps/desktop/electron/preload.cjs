@@ -33,6 +33,7 @@ contextBridge.exposeInMainWorld("lyraDesktop", {
   windowMaximizeToggle: () => ipcRenderer.invoke("lyra:window-maximize-toggle"),
   windowClose: () => ipcRenderer.invoke("lyra:window-close"),
   windowGetState: () => ipcRenderer.invoke("lyra:window-get-state"),
+  reload: () => ipcRenderer.invoke("lyra:reload"),
   onWindowState: (handler) => {
     const listener = (_event, state) => handler(state);
     ipcRenderer.on("lyra:window-state", listener);
