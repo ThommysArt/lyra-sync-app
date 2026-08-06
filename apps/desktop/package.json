@@ -10,12 +10,21 @@
     "dev:prod": "LYRA_VARIANT=production tsx scripts/dev.ts",
     "build": "tsx scripts/build-electron.ts",
     "build:electron": "tsx scripts/build-electron.ts",
-    "check-types": "tsc --noEmit"
+    "check-types": "tsc --noEmit",
+    "pack": "electron-builder --dir",
+    "pack:dev": "LYRA_VARIANT=development electron-builder --dir",
+    "pack:preview": "LYRA_VARIANT=preview electron-builder --dir",
+    "pack:prod": "LYRA_VARIANT=production electron-builder --dir",
+    "dist": "electron-builder",
+    "dist:dev": "LYRA_VARIANT=development electron-builder",
+    "dist:preview": "LYRA_VARIANT=preview electron-builder",
+    "dist:prod": "LYRA_VARIANT=production electron-builder"
   },
   "dependencies": {
     "@lyra-sync-app/daemon": "workspace:*",
     "@lyra-sync-app/discovery": "workspace:*",
-    "@lyra-sync-app/protocol": "workspace:*"
+    "@lyra-sync-app/protocol": "workspace:*",
+    "electron-store": "^8.1.0"
   },
   "devDependencies": {
     "@lyra-sync-app/config": "workspace:*",
@@ -29,15 +38,11 @@
     "appId": "app.lyra.desktop",
     "productName": "Lyra",
     "artifactName": "Lyra-${version}-${variant}.${ext}",
-    "files": [
-      "dist-electron/**/*",
-      "resources/**/*"
-    ],
-    "extraResources": [
-      {
-        "from": "../web/dist",
-        "to": "web-dist"
-      }
-    ]
+    "directories": { "output": "release" },
+    "files": ["dist-electron/**/*", "resources/**/*", "package.json"],
+    "extraResources": [{ "from": "../web/dist", "to": "web-dist", "filter": ["**/*"] }],
+    "linux": { "target": ["AppImage", "dir"], "category": "Network", "icon": "resources/icon.png" },
+    "mac": { "target": ["dmg", "dir"], "category": "public.app-category.utilities" },
+    "win": { "target": ["nsis", "dir"] }
   }
 }
