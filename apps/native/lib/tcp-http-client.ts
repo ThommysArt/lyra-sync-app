@@ -290,8 +290,6 @@ export function createTcpHttpTransport(): HttpTransport | null {
               isLongPoll ? 15_000 : Math.min(timeoutMs, 8_000),
             ),
           };
-          void isPrivateLanIPv4; // retained for future multi-homed routing experiments
-          void isTailscaleIPv4;
 
           if (SocketCtor) {
             socket = new SocketCtor();

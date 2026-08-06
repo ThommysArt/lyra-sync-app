@@ -35,22 +35,40 @@ function isPrivateLanIPv4(ip: string): boolean {
  * Uses expo-modules-core or React Native NativeModules.
  */
 async function tryNativeList(): Promise<string[] | null> {
+  // Try detailed first for subnet-aware scans (LocalSend-style prefixLength)
   try {
-    // expo-modules-core load
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const mod = require("expo-modules-core") as { NativeModulesProxy?: Record<string, unknown> };
-    const proxy = (mod as unknown as { NativeModulesProxy?: Record<string, { listLanHosts?: () => Promise<string[]> }> }).NativeModulesProxy;
-    const m = proxy?.["LyraNetwork"];
+    const proxy = (mod as unknown as { NativeModulesProxy?: Record<string, { listLanHosts?: () => Promise<string[]>; listLanHostsDetailed?: () => Promise<{host:string;prefixLength:number}[]> }> }).NativeModulesProxy;
+    const m = proxy?.["LyraNetwork"] as { listLanHosts?: () => Promise<string[]>; listLanHostsDetailed?: () => Promise<{host:string;prefixLength:number}[]> } | undefined;
+    if (m?.listLanHostsDetailed) {
+      try {
+        const detailed = await m.listLanHostsDetailed();
+        if (Array.isArray(detailed) && detailed.length > 0) {
+          // Prefer detailed but return hosts for simple callers
+          const hosts = detailed.map((d) => d.host).filter(Boolean) as string[];
+          if (hosts.length > 0) return hosts;
+        }
+      } catch {}
+    }
     if (m?.listLanHosts) {
       const res = await m.listLanHosts();
       if (Array.isArray(res) && res.length > 0) return res as string[];
     }
   } catch {}
   try {
-    // fallback RN NativeModules
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const RN = require("react-native") as { NativeModules?: Record<string, unknown> };
-    const m = (RN.NativeModules as Record<string, { listLanHosts?: () => Promise<string[]> }>)?.["LyraNetwork"];
+    const m = (RN.NativeModules as Record<string, { listLanHosts?: () => Promise<string[]>; listLanHostsDetailed?: () => Promise<{host:string;prefixLength:number}[]> }>)?.["LyraNetwork"];
+    if (m?.listLanHostsDetailed) {
+      try {
+        const detailed = await m.listLanHostsDetailed();
+        if (Array.isArray(detailed) && detailed.length > 0) {
+          const hosts = detailed.map((d) => d.host).filter(Boolean) as string[];
+          if (hosts.length > 0) return hosts;
+        }
+      } catch {}
+    }
     if (m?.listLanHosts) {
       const res = await m.listLanHosts();
       if (Array.isArray(res) && res.length > 0) return res as string[];

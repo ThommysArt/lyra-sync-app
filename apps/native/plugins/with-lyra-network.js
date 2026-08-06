@@ -31,30 +31,54 @@ class LyraNetworkModule : Module() {
         val interfaces = NetworkInterface.getNetworkInterfaces()
         while (interfaces.hasMoreElements()) {
           val ni = interfaces.nextElement()
-          // Skip down / loopback / virtual
           if (!ni.isUp || ni.isLoopback) continue
-          val addrs = ni.inetAddresses
-          while (addrs.hasMoreElements()) {
-            val addr = addrs.nextElement()
+          val addrs = ni.interfaceAddresses
+          for (ia in addrs) {
+            val addr = ia.address
             if (addr is Inet4Address && !addr.isLoopbackAddress) {
               val host = addr.hostAddress ?: continue
-              // Include private LAN + Tailscale CGNAT + loopback 127 for self-test
               if (host == "127.0.0.1" || host.startsWith("10.") || host.startsWith("192.168.") || host.startsWith("172.") || host.startsWith("100.")) {
-                // Validate numeric octets
                 val parts = host.split(".")
                 if (parts.size == 4) out.add(host)
               } else if (host.contains(".")) {
-                // Other IPv4 (fallback)
                 out.add(host)
               }
             }
           }
+          // Fallback: inetAddresses if interfaceAddresses empty (some OEM)
+          if (out.isEmpty()) {
+            val addrs2 = ni.inetAddresses
+            while (addrs2.hasMoreElements()) {
+              val addr = addrs2.nextElement()
+              if (addr is Inet4Address && !addr.isLoopbackAddress) {
+                val host = addr.hostAddress ?: continue
+                if (host.contains(".")) out.add(host)
+              }
+            }
+          }
         }
-      } catch (e: Exception) {
-        // return what we have
-      }
-      // Dedupe and keep Tailscale last so primary Wi-Fi is first
+      } catch (e: Exception) {}
       return@AsyncFunction out.distinct()
+    }
+
+    AsyncFunction("listLanHostsDetailed") {
+      val out = mutableListOf<Map<String, Any>>()
+      try {
+        val interfaces = NetworkInterface.getNetworkInterfaces()
+        while (interfaces.hasMoreElements()) {
+          val ni = interfaces.nextElement()
+          if (!ni.isUp || ni.isLoopback) continue
+          for (ia in ni.interfaceAddresses) {
+            val addr = ia.address
+            if (addr is Inet4Address && !addr.isLoopbackAddress) {
+              val host = addr.hostAddress ?: continue
+              val prefix = ia.networkPrefixLength
+              out.add(mapOf("host" to host, "prefixLength" to prefix.toInt(), "iface" to ni.name))
+            }
+          }
+        }
+      } catch (e: Exception) {}
+      return@AsyncFunction out
     }
   }
 }
@@ -70,4 +94,4 @@ function withLyraNetwork(config) {
   }]);
 }
 
-module.exports = createRunOncePlugin(withLyraNetwork, "with-lyra-network", "1.0.0");
+module.exports = createRunOncePlugin(withLyraNetwork, "with-lyra-network", "1.1.0");
