@@ -46,7 +46,7 @@ export function isLikelyTailscaleHost(host: string): boolean {
  */
 export async function probePeer(
   endpoint: PeerUrl,
-  opts?: { timeoutMs?: number; preferTailscale?: boolean },
+  opts?: { timeoutMs?: number; preferTailscale?: boolean; lane?: number },
 ): Promise<ProbeResult> {
   const host = endpoint.host.trim();
   const port = endpoint.port ?? LYRA_DEFAULT_PORT;
@@ -56,7 +56,7 @@ export async function probePeer(
   try {
     const info = await fetchPeerInfo(
       { host, port, protocol: endpoint.protocol ?? "http" },
-      { timeoutMs },
+      { timeoutMs, lane: opts?.lane },
     );
     const latencyMs = Date.now() - started;
     if (!info.ok) {
@@ -344,10 +344,10 @@ export async function scanLanForPeers(input: {
       const p = ep.port ?? primaryPort;
       try {
         // Transport-level timeout only — must not start before socket slot is free
-        // (native TCP is concurrency-limited; AbortController-from-t0 skipped most hosts).
+        // (native TCP is concurrency-limited; lane SCAN yields to interactive).
         const info = await fetchPeerInfo(
           { host, port: p, protocol: "http" },
-          { timeoutMs },
+          { timeoutMs, lane: 2 },
         );
         if (!info.ok) continue;
         if (input.localDeviceId && info.identity.id === input.localDeviceId) continue;
@@ -406,7 +406,7 @@ export async function findPeerByPairingCode(input: {
       try {
         const info = await fetchPeerInfo(
           { host, port, protocol: ep.protocol ?? "http" },
-          { timeoutMs },
+          { timeoutMs, lane: 2 },
         );
         if (!info.ok || !info.pairing) continue;
         if (info.pairing.codeHash !== input.codeHash) continue;

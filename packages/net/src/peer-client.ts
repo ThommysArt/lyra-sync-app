@@ -80,7 +80,7 @@ export function peerBaseUrl(endpoint: PeerUrl): string {
 async function postJson<T = unknown>(
   url: string,
   body: unknown,
-  init?: { headers?: Record<string, string>; signal?: AbortSignal; timeoutMs?: number },
+  init?: { headers?: Record<string, string>; signal?: AbortSignal; timeoutMs?: number; lane?: number },
 ): Promise<{ ok: true; data: T; status: number } | { ok: false; error: string; status: number }> {
   try {
     const http = getHttpTransport();
@@ -94,6 +94,7 @@ async function postJson<T = unknown>(
       body: JSON.stringify(body),
       signal: init?.signal,
       timeoutMs: init?.timeoutMs,
+      lane: init?.lane,
     });
     const text = await res.text();
     let data: unknown = null;
@@ -121,7 +122,7 @@ async function postJson<T = unknown>(
 
 async function getJson<T = unknown>(
   url: string,
-  init?: { signal?: AbortSignal; timeoutMs?: number },
+  init?: { signal?: AbortSignal; timeoutMs?: number; lane?: number },
 ): Promise<{ ok: true; data: T; status: number } | { ok: false; error: string; status: number }> {
   try {
     const http = getHttpTransport();
@@ -130,6 +131,7 @@ async function getJson<T = unknown>(
       headers: { accept: "application/json" },
       signal: init?.signal,
       timeoutMs: init?.timeoutMs,
+      lane: init?.lane,
     });
     const text = await res.text();
     let data: unknown = null;
@@ -180,7 +182,7 @@ export type PeerPairingOffer = {
 /** GET /lyra/info — unauthenticated peer hello. */
 export async function fetchPeerInfo(
   endpoint: PeerUrl,
-  opts?: { signal?: AbortSignal; timeoutMs?: number },
+  opts?: { signal?: AbortSignal; timeoutMs?: number; lane?: number },
 ): Promise<
   | {
       ok: true;
@@ -226,6 +228,7 @@ export async function sendEnvelope(
     sealSecret?: string;
     /** Request budget (pair long-poll must pass waitMs + buffer). */
     timeoutMs?: number;
+    lane?: number;
   },
 ): Promise<{ ok: true; envelope?: Envelope } | { ok: false; error: string }> {
   const base = peerBaseUrl(endpoint);
@@ -245,6 +248,7 @@ export async function sendEnvelope(
     headers: opts?.sessionToken ? { authorization: `Bearer ${opts.sessionToken}` } : undefined,
     signal: opts?.signal,
     timeoutMs: opts?.timeoutMs,
+    lane: opts?.lane,
   });
   if (!res.ok) return { ok: false, error: res.error };
   if (res.data && typeof res.data === "object" && res.data !== null) {
@@ -631,6 +635,7 @@ export async function sendPairRequest(input: {
       sessionToken: input.sessionToken,
       signal,
       timeoutMs: waitMs + 10_000,
+      lane: 0,
     });
     const elapsed = Date.now() - started;
     if (!res.ok) {

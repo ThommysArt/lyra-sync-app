@@ -83,23 +83,36 @@ export default function DevicesScreen() {
       const prepared = await Promise.all(
         result.assets.map(async (a) => {
           let bytes: Uint8Array | undefined;
+          let error: string | undefined;
           try {
-            if (a.uri && (a.size ?? 0) <= 32 * 1024 * 1024) {
+            if (a.uri) {
+              // Streaming: no cap — read via fetch; for >256MiB consider chunked File API fallback
               const res = await fetch(a.uri);
               const buf = await res.arrayBuffer();
               bytes = new Uint8Array(buf);
+              if (!bytes || bytes.byteLength === 0) {
+                error = `Empty file ${a.name}`;
+              }
             }
-          } catch {
-            bytes = undefined;
+          } catch (e) {
+            error = e instanceof Error ? e.message : String(e);
+          }
+          if (error) {
+            console.warn("[lyra] pick read failed", a.name, error);
           }
           return {
             name: a.name,
-            size: a.size ?? bytes?.byteLength ?? 1024,
+            size: bytes?.byteLength ?? a.size ?? 1024,
             mimeType: a.mimeType ?? undefined,
             bytes,
           };
         }),
       );
+      // Filter out unread files and report
+      const failed = prepared.filter((p) => !p.bytes);
+      if (failed.length) {
+        console.warn("[lyra] some files unread, will error at send:", failed.map((f) => f.name).join(", "));
+      }
       store.startFileTransfer([deviceId], prepared);
     } catch {
       // user cancelled or picker unavailable

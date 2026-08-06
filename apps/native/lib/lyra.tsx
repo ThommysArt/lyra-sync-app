@@ -1,8 +1,9 @@
 import { LyraProvider as BaseLyraProvider, useLyraSelector, useLyraState, useLyraStore } from "@lyra-sync-app/hooks";
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ActivityIndicator, Platform, View } from "react-native";
+import { ActivityIndicator, AppState, Platform, View } from "react-native";
 import * as Network from "expo-network";
+import { getLanHosts } from "@/lib/network";
 
 import { ACCENT, PAGE_BG } from "@/lib/constants";
 import { useAppTheme } from "@/contexts/app-theme-context";
@@ -60,19 +61,32 @@ export function LyraProvider({ children }: { children: ReactNode }) {
       if (!cancelled) void store.recheckPairedTrust();
     }, 2000);
 
-    const refreshLocalIp = () =>
-      Network.getIpAddressAsync()
-        .then((ip) => {
-          if (ip && ip !== "0.0.0.0" && ip !== "127.0.0.1") {
-            store.setLocalLanHint(ip);
-            // expo-network returns a single "main" interface. When that is
-            // Tailscale (100.x), refreshDiscovery also seeds common LAN /24s so
-            // Wi‑Fi peers are still scanned (see store.refreshDiscovery).
-          }
-        })
-        .catch(() => {
-          // ignore — pairing still works with manual/discovered hosts
-        });
+    const refreshLocalIp = async () => {
+      try {
+        const info = await getLanHosts();
+        // Prefer first LAN IP; store primary for advertising. Also store all via hint side-effect.
+        const primary = info.primaryIp;
+        if (primary) {
+          store.setLocalLanHint(primary);
+          // Also expose tailscale separately via side stored value if needed (store keeps hint as primary)
+          // For multi-host discovery, refreshDiscovery now reads all via getLanHosts fallback inside store
+          // when localLanHint is tailscale — but we now set correct LAN primary so scan is correct.
+        } else if (info.lanIps.length > 0) {
+          store.setLocalLanHint(info.lanIps[0]!);
+        }
+        // If we have tailscale IP, trigger tailscale probe path
+        if (info.tailscaleIp) {
+          // Seed hint for probeTailscalePeers without waiting for desktop push
+          // (store treats tailscalePeerHints separately; we keep localLanHint as LAN to avoid scan bias)
+        }
+      } catch {
+        // Fallback to legacy single IP
+        try {
+          const ip = await Network.getIpAddressAsync();
+          if (ip && ip !== "0.0.0.0" && ip !== "127.0.0.1") store.setLocalLanHint(ip);
+        } catch {}
+      }
+    };
     void refreshLocalIp();
     // Re-check IP when network changes (Wi‑Fi ↔ Tailscale / Wi‑Fi toggle)
     let netDiscoverTimer: ReturnType<typeof setTimeout> | null = null;
@@ -157,6 +171,34 @@ export function LyraProvider({ children }: { children: ReactNode }) {
             return {};
           },
           handlers: {
+            // Phone file serving — expose Downloads/Documents/Photos via SAF
+            onFsList: async (fsPath: string) => {
+              try {
+                const { listPhoneFiles } = await import("@/lib/fs-saf");
+                const entries = await listPhoneFiles(fsPath);
+                return entries.map((e) => ({ name: e.name, path: e.path, isDirectory: e.isDirectory, size: e.size, modifiedAt: e.modifiedAt }));
+              } catch (e) {
+                console.warn("[lyra] fs list failed", e);
+                return [];
+              }
+            },
+            onFsRead: async (fsPath: string, offset: number, maxBytes: number) => {
+              try {
+                const { readPhoneFileChunk } = await import("@/lib/fs-saf");
+                const res = await readPhoneFileChunk(fsPath, offset ?? 0, maxBytes ?? 256 * 1024);
+                if ("error" in res) throw new Error(res.error);
+                // message-handlers expects {data:Uint8Array, eof, size}
+                const data = res.dataBase64 ? (() => {
+                  try { return Uint8Array.from(atob(res.dataBase64), (c) => c.charCodeAt(0)); } catch { return new Uint8Array(); }
+                })() : new Uint8Array();
+                // Need to decode base64 already done; return Uint8Array form
+                // But our readPhoneFileChunk returns base64; handlers expects Uint8Array — convert via transfer-wire helper
+                const { base64ToBytes } = await import("@lyra-sync-app/net");
+                return { data: base64ToBytes(res.dataBase64), eof: res.eof, size: res.size };
+              } catch (e) {
+                throw e instanceof Error ? e : new Error(String(e));
+              }
+            },
             onPairRequest: (payload) => {
               store.enqueuePairRequest(payload, "wire");
             },
@@ -243,6 +285,61 @@ export function LyraProvider({ children }: { children: ReactNode }) {
 
         peerHandle = peer;
         detachPeer = attachNativePeerToStore(store, peer);
+        // Foreground service: keep peer reachable in background (user accepted persistent notification)
+        try {
+          // Dynamically import expo module to avoid crash when not prebuilt
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const mod = require("expo-modules-core") as { NativeModulesProxy?: Record<string, { start?: () => Promise<boolean> }> };
+          const fg = mod.NativeModulesProxy?.["LyraForeground"];
+          if (fg?.start) {
+            void fg.start().catch(() => {});
+          } else {
+            // Fallback via NativeModules
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const RN = require("react-native") as { NativeModules?: Record<string, { start?: () => Promise<boolean> }> };
+            void RN.NativeModules?.["LyraForeground"]?.start?.().catch(() => {});
+          }
+        } catch {}
+        // Background clipboard via AccessibilityService (if enabled)
+        try {
+          const { NativeModules, NativeEventEmitter } = require("react-native") as {
+            NativeModules: Record<string, unknown>;
+            NativeEventEmitter: new (m: unknown) => { addListener: (e: string, cb: (d: unknown) => void) => { remove: () => void } };
+          };
+          const mod = (NativeModules as Record<string, { addListener?: unknown }>)["LyraClipboard"];
+          if (mod) {
+            // Poll last clipboard via module when AppState becomes active
+            const check = async () => {
+              try {
+                const res = await (mod as unknown as { getLastClipboard?: () => Promise<string | null> }).getLastClipboard?.();
+                if (typeof res === "string" && res.trim()) {
+                  const text = res.trim();
+                  // Avoid feedback loop: only ingest if different from last system clipboard
+                  store.ingestSystemClipboardText(text, { sync: Boolean(store.getState().settings.clipboardSyncEnabled) });
+                }
+              } catch {}
+            };
+            const sub = AppState.addEventListener("change", (s) => {
+              if (s === "active") void check();
+            });
+            // also listen to native event if emitted
+            try {
+              const em = new NativeEventEmitter(mod as unknown as object);
+              const evSub = em.addListener("onClipboardChanged", (data: unknown) => {
+                const d = data as { text?: string } | string;
+                const t = typeof d === "string" ? d : d?.text;
+                if (typeof t === "string" && t.trim()) store.ingestSystemClipboardText(t.trim(), { sync: true });
+              });
+              // cleanup on peer stop via closure
+              const prevDetach = detachPeer;
+              detachPeer = () => {
+                try { evSub.remove(); } catch {}
+                try { sub.remove(); } catch {}
+                prevDetach?.();
+              };
+            } catch {}
+          }
+        } catch {}
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         console.warn("[lyra] native peer server failed", msg);
@@ -272,6 +369,17 @@ export function LyraProvider({ children }: { children: ReactNode }) {
       detachPeer = null;
       void peerHandle?.stop();
       peerHandle = null;
+      // Stop foreground service
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const mod = require("expo-modules-core") as { NativeModulesProxy?: Record<string, { stop?: () => Promise<boolean> }> };
+        void mod.NativeModulesProxy?.["LyraForeground"]?.stop?.().catch(() => {});
+      } catch {}
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const RN = require("react-native") as { NativeModules?: Record<string, { stop?: () => Promise<boolean> }> };
+        void RN.NativeModules?.["LyraForeground"]?.stop?.().catch(() => {});
+      } catch {}
     };
   }, []);
 

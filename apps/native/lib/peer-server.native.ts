@@ -21,6 +21,13 @@ import { LYRA_DEFAULT_PORT, type DeviceIdentity } from "@lyra-sync-app/protocol"
 import { Platform } from "react-native";
 import * as Network from "expo-network";
 import Constants from "expo-constants";
+import {
+  buildHttpResponse,
+  concatBytes,
+  parseHttpRequestBytes,
+  statusLine,
+  toUint8Array,
+} from "@lyra-sync-app/net";
 
 type TcpSocketModule = typeof import("react-native-tcp-socket");
 
@@ -65,174 +72,8 @@ function loadTcpSocket(): TcpSocketModule | null {
   }
 }
 
-function statusLine(status: number): string {
-  const map: Record<number, string> = {
-    200: "OK",
-    204: "No Content",
-    400: "Bad Request",
-    401: "Unauthorized",
-    404: "Not Found",
-    500: "Internal Server Error",
-  };
-  return map[status] ?? "OK";
-}
-
-const MAX_REQUEST_BYTES = 8 * 1024 * 1024; // 8 MiB (sealed transfer chunks)
-
-function concatBytes(chunks: Uint8Array[]): Uint8Array {
-  let total = 0;
-  for (const c of chunks) total += c.byteLength;
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const c of chunks) {
-    out.set(c, offset);
-    offset += c.byteLength;
-  }
-  return out;
-}
-
-function toUint8Array(data: unknown): Uint8Array {
-  if (typeof data === "string") {
-    return new TextEncoder().encode(data);
-  }
-  if (data instanceof Uint8Array) return data;
-  if (data instanceof ArrayBuffer) return new Uint8Array(data);
-  if (data && typeof data === "object" && ArrayBuffer.isView(data as ArrayBufferView)) {
-    const v = data as ArrayBufferView;
-    return new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
-  }
-  // react-native-tcp-socket may emit Buffer-like objects
-  if (data && typeof data === "object" && "length" in (data as object)) {
-    try {
-      return Uint8Array.from(data as ArrayLike<number>);
-    } catch {
-      // fall through
-    }
-  }
-  return new TextEncoder().encode(String(data ?? ""));
-}
-
-function indexOfHeaderEnd(buf: Uint8Array): number {
-  // Look for \r\n\r\n
-  for (let i = 0; i < buf.byteLength - 3; i++) {
-    if (
-      buf[i] === 13 &&
-      buf[i + 1] === 10 &&
-      buf[i + 2] === 13 &&
-      buf[i + 3] === 10
-    ) {
-      return i;
-    }
-  }
-  return -1;
-}
-
-/** Parse one HTTP request from a raw byte buffer. Returns null if incomplete. */
-function parseHttpRequestBytes(raw: Uint8Array): {
-  method: string;
-  path: string;
-  headers: Record<string, string>;
-  body: string;
-  consumed: number;
-} | null {
-  const headerEnd = indexOfHeaderEnd(raw);
-  if (headerEnd < 0) {
-    if (raw.byteLength > 64 * 1024) return null; // headers too large / garbage
-    return null;
-  }
-  const headBytes = raw.subarray(0, headerEnd);
-  const head = new TextDecoder().decode(headBytes);
-  const lines = head.split("\r\n");
-  const requestLine = lines[0];
-  if (!requestLine) return null;
-  const parts = requestLine.split(" ");
-  const method = parts[0] ?? "GET";
-  // Strip query string for routing; peer-http-core also splits on ?
-  const path = parts[1] ?? "/";
-  const headers: Record<string, string> = {};
-  for (let i = 1; i < lines.length; i++) {
-    const line = lines[i]!;
-    const colon = line.indexOf(":");
-    if (colon > 0) {
-      const k = line.slice(0, colon).trim().toLowerCase();
-      const v = line.slice(colon + 1).trim();
-      headers[k] = v;
-    }
-  }
-  const contentLengthRaw = headers["content-length"];
-  const contentLength = contentLengthRaw
-    ? Number.parseInt(contentLengthRaw, 10)
-    : Number.NaN;
-  const bodyStart = headerEnd + 4;
-  const methodUpper = method.toUpperCase();
-  const expectsBody =
-    methodUpper === "POST" || methodUpper === "PUT" || methodUpper === "PATCH";
-
-  // Prefer Content-Length when present (fetch / Node always set it for JSON).
-  if (Number.isFinite(contentLength) && contentLength >= 0) {
-    const bodyLen = contentLength;
-    if (bodyLen > MAX_REQUEST_BYTES) {
-      return { method, path, headers, body: "", consumed: -1 };
-    }
-    if (raw.byteLength < bodyStart + bodyLen) {
-      return null; // wait for more bytes
-    }
-    const bodyBytes = raw.subarray(bodyStart, bodyStart + bodyLen);
-    return {
-      method,
-      path,
-      headers,
-      body: new TextDecoder().decode(bodyBytes),
-      consumed: bodyStart + bodyLen,
-    };
-  }
-
-  // No Content-Length: GET/HEAD have empty body. For POST without CL, treat any
-  // already-buffered trailing bytes as the body (some stacks omit CL on LAN).
-  if (!expectsBody) {
-    return {
-      method,
-      path,
-      headers,
-      body: "",
-      consumed: bodyStart,
-    };
-  }
-  // Wait for more data if we only have headers so far (chunked / late body).
-  // Caller should also complete on socket 'end'.
-  if (raw.byteLength === bodyStart) {
-    return null;
-  }
-  const bodyBytes = raw.subarray(bodyStart);
-  return {
-    method,
-    path,
-    headers,
-    body: new TextDecoder().decode(bodyBytes),
-    consumed: raw.byteLength,
-  };
-}
-
-function buildHttpResponse(
-  status: number,
-  headers: Record<string, string> | undefined,
-  body: string,
-): string {
-  const h = { ...(headers ?? {}) };
-  const bodyBytes = new TextEncoder().encode(body);
-  if (body && !h["content-length"] && !h["Content-Length"]) {
-    h["content-length"] = String(bodyBytes.byteLength);
-  }
-  if (!h["connection"] && !h["Connection"]) {
-    h["connection"] = "close";
-  }
-  const lines = [`HTTP/1.1 ${status} ${statusLine(status)}`];
-  for (const [k, v] of Object.entries(h)) {
-    lines.push(`${k}: ${v}`);
-  }
-  lines.push("", body);
-  return lines.join("\r\n");
-}
+// Streaming: no hard 8MiB wall — enforce per-chunk limits at handler; keep soft cap for DoS.
+const MAX_REQUEST_BYTES = 32 * 1024 * 1024; // 32 MiB (doubled, but chunks still 48KiB sealed)
 
 async function pickLanHost(): Promise<string | null> {
   try {
@@ -390,7 +231,7 @@ export async function startNativePeerServer(
           const tryHandle = () => {
             if (handling || done) return;
             const buf = concatBytes(chunks);
-            const parsed = parseHttpRequestBytes(buf);
+            const parsed = parseHttpRequestBytes(buf, MAX_REQUEST_BYTES);
             if (!parsed) {
               if (totalBytes > MAX_REQUEST_BYTES) {
                 respond(

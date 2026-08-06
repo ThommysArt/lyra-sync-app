@@ -186,6 +186,8 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       ],
       "./plugins/with-clipboard-accessibility",
       "./plugins/with-cleartext-traffic",
+      "./plugins/with-lyra-network",
+      "./plugins/with-lyra-foreground-service",
     ],
     experiments: {
       typedRoutes: true,

@@ -19,6 +19,11 @@ export type HttpRequestInit = {
    * For pair long-polls, pass waitMs + buffer (e.g. 125_000).
    */
   timeoutMs?: number;
+  /**
+   * Priority lane for native TCP queue (0=pair, 1=interactive, 2=scan).
+   * Defaults to interactive (1). Scan uses 2 so user actions preempt discovery.
+   */
+  lane?: number;
 };
 
 export type HttpResponse = {

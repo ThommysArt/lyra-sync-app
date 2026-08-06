@@ -15,6 +15,8 @@
 import type { HttpTransport } from "@lyra-sync-app/net";
 import { Platform } from "react-native";
 import Constants from "expo-constants";
+import { buildHttpRequest, concatBytes, indexOfHeaderEnd, toUint8Array } from "@lyra-sync-app/net";
+import { Lane, withPrioritySlot } from "@lyra-sync-app/net";
 
 type TcpApi = {
   Socket?: new () => {
@@ -65,50 +67,6 @@ function loadTcpApi(): TcpApi | null {
   }
 }
 
-function toBytes(data: unknown): Uint8Array {
-  if (typeof data === "string") return new TextEncoder().encode(data);
-  if (data instanceof Uint8Array) return data;
-  if (data instanceof ArrayBuffer) return new Uint8Array(data);
-  if (data && typeof data === "object" && ArrayBuffer.isView(data as ArrayBufferView)) {
-    const v = data as ArrayBufferView;
-    return new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
-  }
-  if (data && typeof data === "object" && "length" in (data as object)) {
-    try {
-      return Uint8Array.from(data as ArrayLike<number>);
-    } catch {
-      // fall through
-    }
-  }
-  return new TextEncoder().encode(String(data ?? ""));
-}
-
-function indexOfHeaderEnd(buf: Uint8Array): number {
-  for (let i = 0; i < buf.byteLength - 3; i++) {
-    if (
-      buf[i] === 13 &&
-      buf[i + 1] === 10 &&
-      buf[i + 2] === 13 &&
-      buf[i + 3] === 10
-    ) {
-      return i;
-    }
-  }
-  return -1;
-}
-
-function concat(chunks: Uint8Array[]): Uint8Array {
-  let n = 0;
-  for (const c of chunks) n += c.byteLength;
-  const out = new Uint8Array(n);
-  let o = 0;
-  for (const c of chunks) {
-    out.set(c, o);
-    o += c.byteLength;
-  }
-  return out;
-}
-
 function parseUrl(url: string): { host: string; port: number; path: string } {
   const u = new URL(url);
   if (u.protocol !== "http:") {
@@ -120,97 +78,19 @@ function parseUrl(url: string): { host: string; port: number; path: string } {
   return { host, port, path };
 }
 
-/** RFC1918 / CGNAT private — prefer Wi‑Fi interface when Tailscale VPN is up. */
-function isPrivateLanIPv4(host: string): boolean {
-  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host.trim());
-  if (!m) return false;
-  const a = Number(m[1]);
-  const b = Number(m[2]);
-  if (a === 10) return true;
-  if (a === 192 && b === 168) return true;
-  if (a === 172 && b >= 16 && b <= 31) return true;
-  return false;
-}
-
-function isTailscaleIPv4(host: string): boolean {
-  const m = /^100\.(\d+)\.(\d+)\.(\d+)$/.exec(host.trim());
-  if (!m) return false;
-  const second = Number(m[1]);
-  return second >= 64 && second <= 127;
-}
-
-/** Limit concurrent native sockets — RN tcp-socket crashes under scan floods. */
+// Re-export for compat + keep deprecated helpers referenced
 export const NATIVE_HTTP_MAX_IN_FLIGHT = 8;
-let inFlight = 0;
-type Waiter = {
-  resolve: () => void;
-  reject: (e: Error) => void;
-  signal?: AbortSignal;
-  onAbort?: () => void;
-};
-const waitQueue: Waiter[] = [];
+const toBytes = toUint8Array;
+const concat = concatBytes;
+// Retained for future multi-homed routing experiments — now housed in httpCodec
+void indexOfHeaderEnd;
 
 let logCounter = 0;
 function logTcp(line: string, extra?: Record<string, unknown>) {
-  // Cap spam: always log errors/warns from callers; here only every Nth success path via debug
   if (extra) {
     console.info(`[lyra tcp] ${line}`, extra);
   } else {
     console.info(`[lyra tcp] ${line}`);
-  }
-}
-
-function detachWaiter(waiter: Waiter) {
-  const i = waitQueue.indexOf(waiter);
-  if (i >= 0) waitQueue.splice(i, 1);
-  if (waiter.signal && waiter.onAbort) {
-    try {
-      waiter.signal.removeEventListener("abort", waiter.onAbort);
-    } catch {
-      // ignore
-    }
-  }
-}
-
-async function withSlot<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-  if (signal?.aborted) {
-    throw new Error("Aborted");
-  }
-
-  if (inFlight >= NATIVE_HTTP_MAX_IN_FLIGHT) {
-    await new Promise<void>((resolve, reject) => {
-      const waiter: Waiter = { resolve, reject, signal };
-      waiter.onAbort = () => {
-        detachWaiter(waiter);
-        reject(new Error("Aborted"));
-      };
-      waitQueue.push(waiter);
-      if (signal) {
-        signal.addEventListener("abort", waiter.onAbort, { once: true });
-      }
-    });
-  }
-
-  if (signal?.aborted) {
-    throw new Error("Aborted");
-  }
-
-  inFlight++;
-  try {
-    return await fn();
-  } finally {
-    inFlight--;
-    const next = waitQueue.shift();
-    if (next) {
-      if (next.signal && next.onAbort) {
-        try {
-          next.signal.removeEventListener("abort", next.onAbort);
-        } catch {
-          // ignore
-        }
-      }
-      next.resolve();
-    }
   }
 }
 
@@ -227,21 +107,24 @@ export function createTcpHttpTransport(): HttpTransport | null {
     return null;
   }
 
-  const transport: HttpTransport = (url, init) =>
-    withSlot(() => {
-      const method = (init?.method ?? "GET").toUpperCase();
-      const body = init?.body ?? "";
-      const headers: Record<string, string> = {
-        accept: "application/json",
-        connection: "close",
-        ...(init?.headers ?? {}),
-      };
-      if (body && !headers["content-type"] && !headers["Content-Type"]) {
-        headers["content-type"] = "application/json";
-      }
-      if (body) {
-        headers["content-length"] = String(new TextEncoder().encode(body).byteLength);
-      }
+  const transport: HttpTransport = (url, init) => {
+    const laneRaw = typeof init?.lane === "number" ? init.lane : Lane.INTERACTIVE;
+    const lane = laneRaw === 0 ? Lane.PAIR : laneRaw === 2 ? Lane.SCAN : Lane.INTERACTIVE;
+    return withPrioritySlot(
+      () => {
+        const method = (init?.method ?? "GET").toUpperCase();
+        const body = init?.body ?? "";
+        const headers: Record<string, string> = {
+          accept: "application/json",
+          connection: "close",
+          ...(init?.headers ?? {}),
+        };
+        if (body && !headers["content-type"] && !headers["Content-Type"]) {
+          headers["content-type"] = "application/json";
+        }
+        if (body) {
+          headers["content-length"] = String(new TextEncoder().encode(body).byteLength);
+        }
 
       const { host, port, path } = parseUrl(url);
       const reqId = ++logCounter;
@@ -351,12 +234,7 @@ export function createTcpHttpTransport(): HttpTransport | null {
         const writeRequest = () => {
           if (settled || wrote || !socket || socket.destroyed) return;
           wrote = true;
-          const lines = [`${method} ${path} HTTP/1.1`, `Host: ${host}:${port}`];
-          for (const [k, v] of Object.entries(headers)) {
-            lines.push(`${k}: ${v}`);
-          }
-          lines.push("", body);
-          const payload = lines.join("\r\n");
+          const payload = buildHttpRequest({ method, path, host, port, headers, body });
           try {
             if (socket.destroyed) {
               finishErr(new Error("Socket closed before write"));
@@ -465,7 +343,11 @@ export function createTcpHttpTransport(): HttpTransport | null {
           finishErr(e);
         }
       });
-    }, init?.signal);
+      },
+      lane,
+      init?.signal,
+    );
+  };
 
   return transport;
 }

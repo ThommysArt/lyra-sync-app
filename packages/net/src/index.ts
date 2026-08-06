@@ -8,6 +8,8 @@ export * from "./seal";
 export * from "./transfer-wire";
 export * from "./message-handlers";
 export * from "./peer-http-core";
+export * from "./httpCodec";
+export * from "./transport/priorityQueue";
 export {
   setHttpTransport,
   getHttpTransport,

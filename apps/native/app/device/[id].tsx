@@ -330,16 +330,17 @@ export default function DeviceDetailScreen() {
                     result.assets.map(async (a) => {
                       let bytes: Uint8Array | undefined;
                       try {
-                        if (a.uri && (a.size ?? 0) <= 32 * 1024 * 1024) {
+                        if (a.uri) {
                           const res = await fetch(a.uri);
                           bytes = new Uint8Array(await res.arrayBuffer());
                         }
-                      } catch {
+                      } catch (e) {
+                        console.warn("[lyra] pick failed", a.name, e);
                         bytes = undefined;
                       }
                       return {
                         name: a.name,
-                        size: a.size ?? bytes?.byteLength ?? 1024,
+                        size: bytes?.byteLength ?? a.size ?? 1024,
                         mimeType: a.mimeType ?? undefined,
                         bytes,
                       };

@@ -8,7 +8,6 @@ import {
   listRemoteFs,
   openUrlOnPeer,
   pushClipboardToPeer,
-  randomBytesOfSize,
   requestScreenShare,
   sendFilesOverWire,
   sendPairRequest,
@@ -340,28 +339,23 @@ export async function wireSendFiles(input: {
   const session = await ensureSession(input);
   if (!session.ok) return session;
 
-  const prepared = input.files.map((f) => {
-    const bytes =
-      f.bytes ??
-      // Synthetic payload when UI only has metadata (browser File not retained)
-      randomBytesOfSize(Math.min(f.size, 256 * 1024));
-    // Cap synthetic size for demo safety; real File bytes should be passed when available
-    const effective =
-      f.bytes ??
-      (f.size > bytes.byteLength
-        ? (() => {
-            // Represent full size with sparse synthetic: only send min(size, 256KiB) but report size
-            return bytes;
-          })()
-        : bytes);
-    return {
-      name: f.name,
-      size: f.bytes ? f.bytes.byteLength : Math.min(f.size, 256 * 1024),
-      mimeType: f.mimeType,
-      checksum: f.checksum,
-      bytes: effective,
-    };
-  });
+  // No synthetic fallback — caller must provide real bytes (streaming). This fixes silent truncation bug
+  // where >32MiB files were sent as 256KiB random bytes while reporting full size.
+  for (const f of input.files) {
+    if (!f.bytes) {
+      return { ok: false, error: `Missing bytes for "${f.name}" — file picker failed to read. Please retry with system picker.` };
+    }
+    if (f.bytes.byteLength === 0 && f.size > 0) {
+      return { ok: false, error: `Empty bytes for "${f.name}"` };
+    }
+  }
+  const prepared = input.files.map((f) => ({
+    name: f.name,
+    size: f.bytes!.byteLength,
+    mimeType: f.mimeType,
+    checksum: f.checksum,
+    bytes: f.bytes!,
+  }));
 
   const sent = await sendFilesOverWire({
     endpoint: session.endpoint,

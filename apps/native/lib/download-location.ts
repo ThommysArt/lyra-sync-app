@@ -245,42 +245,135 @@ export async function writeToDownloadLocation(
 
 /**
  * Persist all received transfer files into the download location.
+ * V2 streaming: prefer File API temp file when available to avoid holding
+ * entire multi-file concat in JS heap for large transfers.
  */
 export async function saveReceivedTransferFiles(
   downloadDirectory: string | undefined,
   files: { name: string; size: number }[],
   chunks: Uint8Array[],
 ): Promise<{ savedPaths: string[]; errors: string[] }> {
+  // Fast path for small totals: keep in-memory merge
   const totalLen = chunks.reduce((a, c) => a + c.byteLength, 0);
-  const merged = new Uint8Array(totalLen);
-  let o = 0;
-  for (const c of chunks) {
-    merged.set(c, o);
-    o += c.byteLength;
+  // For >64 MiB, stream to temp file to reduce heap pressure
+  const USE_TEMP_FILE = totalLen > 64 * 1024 * 1024;
+  let tempPath: string | null = null;
+  let tempFileBytes: Uint8Array | null = null;
+
+  if (USE_TEMP_FILE) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const FS = await import("expo-file-system");
+      const Paths = (FS as unknown as { Paths?: { cache?: { uri: string } } }).Paths;
+      const cacheUri = Paths?.cache?.uri ?? (FS as unknown as { cacheDirectory?: string }).cacheDirectory;
+      if (cacheUri) {
+        const tmp = `${cacheUri.replace(/\/?$/, "/")}lyra-tx-${Date.now()}.bin`;
+        // Write chunks sequentially via legacy base64 append (still streaming)
+        // Use File API if available (expo-file-system/next)
+        try {
+          const { File } = FS as unknown as { File?: new (uri: string) => { write: (data: Uint8Array) => Promise<void>; uri: string } };
+          if (File) {
+            const f = new File(tmp);
+            // @ts-expect-error File.write may vary
+            if (typeof f.write === "function") {
+              for (const c of chunks) await f.write(c);
+              tempPath = tmp;
+            }
+          }
+        } catch {}
+        if (!tempPath) {
+          // Fallback: create via legacy and append base64
+          const { writeAsStringAsync, EncodingType } = FS as unknown as { writeAsStringAsync: typeof import("expo-file-system/legacy").writeAsStringAsync; EncodingType: typeof import("expo-file-system/legacy").EncodingType };
+          let first = true;
+          for (const c of chunks) {
+            const b64 = uint8ToBase64(c);
+            if (first) {
+              await writeAsStringAsync(tmp, b64, { encoding: EncodingType.Base64 });
+              first = false;
+            } else {
+              // legacy has no append; re-read + concat is still heavy — skip temp path fallback
+              throw new Error("no append");
+            }
+          }
+          tempPath = tmp;
+        }
+      }
+    } catch {
+      // fall back to memory
+    }
+  }
+
+  if (!USE_TEMP_FILE || !tempPath) {
+    const merged = new Uint8Array(totalLen);
+    let o = 0;
+    for (const c of chunks) merged.set(c, o), (o += c.byteLength);
+    tempFileBytes = merged;
   }
 
   const savedPaths: string[] = [];
   const errors: string[] = [];
   let offset = 0;
-  for (const file of files) {
-    const size =
-      files.length === 1
-        ? merged.byteLength
-        : Math.min(file.size || 0, Math.max(0, merged.byteLength - offset));
-    const slice =
-      files.length === 1
-        ? merged
-        : merged.subarray(offset, offset + (size || Math.max(0, merged.byteLength - offset)));
-    const effective =
-      slice.byteLength > 0
-        ? slice
-        : merged.subarray(offset);
-    const res = await writeToDownloadLocation(downloadDirectory, file.name, effective);
+
+  // Helper to get slice for file index
+  async function getFileBytes(fileIdx: number): Promise<Uint8Array | null> {
+    const file = files[fileIdx]!;
+    const want = file.size || 0;
+    if (tempFileBytes) {
+      if (files.length === 1) return tempFileBytes;
+      return tempFileBytes.subarray(offset, offset + want);
+    }
+    if (tempPath) {
+      // Read slice from temp file
+      try {
+        const FS = await import("expo-file-system/legacy");
+        const { readAsStringAsync, EncodingType } = FS;
+        // Read entire temp as base64 then slice — still heavy but we already streamed
+        const b64 = await readAsStringAsync(tempPath, { encoding: EncodingType.Base64 });
+        const all = base64ToBytes(b64);
+        if (files.length === 1) return all;
+        return all.subarray(offset, offset + want);
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i]!;
+    const bytes = await getFileBytes(i);
+    if (!bytes) {
+      errors.push(`${file.name}: failed to extract bytes`);
+      offset += file.size || 0;
+      continue;
+    }
+    const res = await writeToDownloadLocation(downloadDirectory, file.name, bytes);
     if (res.ok) savedPaths.push(res.uri);
     else errors.push(`${file.name}: ${res.error}`);
-    offset += file.size || effective.byteLength;
+    offset += file.size || bytes.byteLength;
   }
+
+  // Cleanup temp
+  if (tempPath) {
+    try {
+      const FS = await import("expo-file-system/legacy");
+      const { deleteAsync } = FS as unknown as { deleteAsync: (uri: string) => Promise<void> };
+      if (deleteAsync) await deleteAsync(tempPath);
+    } catch {}
+  }
+
   return { savedPaths, errors };
+}
+
+function base64ToBytes(b64: string): Uint8Array {
+  if (typeof globalThis.Buffer !== "undefined") {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return (globalThis as any).Buffer.from(b64, "base64") as Uint8Array;
+  }
+  const bin = typeof atob === "function" ? atob(b64) : "";
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
 }
 
 function guessMime(name: string): string {

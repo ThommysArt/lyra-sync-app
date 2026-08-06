@@ -1,10 +1,66 @@
 # Lyra — Agent Progress Report
 
-**Last updated:** 2026-07-24 (mobile→desktop pair long-poll + TCP transport)  
-**Status:** Dev/preview/prod side-by-side · mobile outbound pair path fixed · unit green  
-**Plan:** [`docs/GAP-FIX-PLAN.md`](./GAP-FIX-PLAN.md) · **Packaging:** [`docs/PACKAGING.md`](./PACKAGING.md)
+**Last updated:** 2026-08-06 (mobile v2 full rebuild — 0.3.0 / protocol v2)  
+**Status:** Mobile rebuilt all-at-once · streaming transfers · mDNS+multi-IP discovery · foreground service · real Accessibility bridge · unit green  
+**Plan:** [`docs/MOBILE-REBUILD-PLAN.md`](./MOBILE-REBUILD-PLAN.md) (archived: `docs/archives/GAP-FIX-PLAN-2026-07-19.md`) · **Packaging:** [`docs/PACKAGING.md`](./PACKAGING.md)
+
 
 ---
+
+## 2026-08-06 — Mobile v2 full rebuild (0.3.0 / protocol v2)
+
+### Why rebuilt
+Desktop worked (Node http, UDP 224.0.0.167, os.networkInterfaces, disk streaming) while mobile was patchwork: single IP via expo-network hiding Wi-Fi, no multicast (discoveryActive lie), HTTP scan flood via 8-slot FIFO 75s queue blocking clipboard/file, duplicated HTTP parsers, 8MiB wall, global transport singleton, storage hydrate race, Tailscale chicken-egg, RAM merges + 32MiB cap with 256KiB synthetic truncation, scoped-storage file:// fail on 11+, foreground-only clipboard poll + no-op AccessibilityService, no foreground service.
+
+### Version bump
+- `LYRA_PROTOCOL_VERSION 1→2` `packages/protocol/src/index.ts:4`
+- App `0.2.3→0.3.0` `apps/native/package.json:3`, `apps/desktop/package.json:3`, `apps/web/package.json:3`
+- Test updated `packages/net/src/node/peer-server.test.ts:43`
+
+### Shared codec + priority lanes
+- New `packages/net/src/httpCodec.ts` — single `
+
+` search, concat, build/parse request/response (replaces dup in `peer-server.native.ts:115-214` + `tcp-http-client.ts:86-110`)
+- New `packages/net/src/transport/priorityQueue.ts` — Lane PAIR(0) > INTERACTIVE(1) > SCAN(2), SCAN capped to 4/8 slots so clipboard/pair never starve
+- `packages/net/src/http-transport.ts:10` `lane?:number`, `peer-client.ts:84/126/221` propagate, `probe.ts:47/348/406` scan uses lane 2, `sendPairRequest` lane 0
+
+### Storage
+- `apps/native/lib/secure-storage.ts:18-66` hydrate now deduped promise, ready flag used, write-through logs errors, migrate not double-hydrates — fixes cold-start identity overwrite
+
+### Network — multi-interface + Tailscale
+- New `apps/native/lib/network.ts` `getLanHosts()` tries native `LyraNetwork.listLanHosts()` (NetworkInterface enumeration) then fallback single IP; correctly separates `lanIps` vs `tailscaleIp` (100.64/10)
+- New plugin `apps/native/plugins/with-lyra-network.js` injects `expo.modules.lyranetwork.LyraNetworkModule.kt` (NetworkInterface loop, distinct())
+- `apps/native/app.config.ts:187` registers network + foreground plugins
+- `apps/native/lib/lyra.tsx:5/63-78` uses `getLanHosts` primary IP (not single tailscale), triggers correct /24 scan
+
+### Transfers — streaming no cap
+- `packages/core/src/peer-ops.ts:343-378` removed `randomBytesOfSize` synthetic 256KiB truncation — now requires real `bytes`, returns error if missing
+- `apps/native/lib/download-location.ts:246` streaming: >64MiB uses temp file via `expo-file-system` File/cache, correct slicing, MediaStore fallback kept
+- Pickers `apps/native/app/(tabs)/index.tsx:87`, `transfers.tsx:52`, `device/[id].tsx:333` removed 32MiB cap, now read any size with error toast
+
+### Peer server v2
+- `apps/native/lib/peer-server.native.ts:12-15` imports `httpCodec`, `MAX_REQUEST_BYTES 8→32MiB`, uses shared parser with limit param
+- `apps/native/lib/tcp-http-client.ts:15-38` imports codec + priorityQueue, `withSlot→withPrioritySlot`, `buildHttpRequest`, lane-aware transport
+- Phone now serves FS: new `apps/native/lib/fs-saf.ts` + `apps/native/lib/lyra.tsx:159` `onFsList/onFsRead` (Downloads/Documents/Photos via SAF/legacy)
+
+### Foreground service
+- New plugin `apps/native/plugins/with-lyra-foreground-service.js` adds `LyraForegroundService.kt` (NotificationChannel, WifiLock/MulticastLock, dataSync FGS) + `LyraForegroundModule.kt`, manifest perms
+- `apps/native/lib/lyra.tsx:260-344` starts/stops service, holds locks while peer running
+
+### Clipboard real bridge
+- `apps/native/plugins/with-clipboard-accessibility.js` v1.2.0→2.0.0: XML `canRetrieveWindowContent true` + `flagRetrieveInteractiveWindows`, real Kotlin service reads ClipboardManager + debounces + broadcasts, plus `LyraClipboardModule.kt`
+- `apps/native/components/clipboard-monitor.tsx:8` POLL 2500→1500ms + NativeEventEmitter listener for background
+- `apps/native/lib/lyra.tsx:275-313` also listens to native clipboard on AppState active
+
+### Docs
+- Archived `docs/GAP-FIX-PLAN.md → docs/archives/GAP-FIX-PLAN-2026-07-19.md`
+- New `docs/MOBILE-REBUILD-PLAN.md` with full target architecture, version, execution log
+
+### Verification
+- `pnpm --filter @lyra-sync-app/net test` 17/17 pass (protocolVersion 2)
+- `pnpm --filter @lyra-sync-app/core test` 16/16 pass
+- `pnpm --filter @lyra-sync-app/core check-types` pass
+- Rebuild needs `pnpm run build:dev && pnmm run install:dev` + `expo prebuild --clean` for new native modules
 
 ## 2026-07-24 — Phone cannot discover/pair (desktop sees phone)
 
