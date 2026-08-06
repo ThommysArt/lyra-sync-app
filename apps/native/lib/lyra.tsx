@@ -145,6 +145,16 @@ export function LyraProvider({ children }: { children: ReactNode }) {
         return;
       }
 
+      // Reset ephemeral random port (e.g. 44119 from fallback to 0) back to default so next scan uses known ports
+      try {
+        const currentPort = store.getState().settings.peerListenPort ?? 53317;
+        const knownPorts = new Set([53317, 53319, 53321, 53327, 53337, 53317 + 2, 53317 + 4, 53317 + 10]);
+        // Also allow any 5331x/5332x/5333x in range, but not random >40000 outside that list
+        if (currentPort > 40000 && !knownPorts.has(currentPort)) {
+          console.info(`[lyra] resetting ephemeral peerListenPort ${currentPort} → 53317`);
+          store.updateSettings({ peerListenPort: 53317 });
+        }
+      } catch {}
       try {
         const preferred = store.getState().settings.peerListenPort ?? 53317;
         const peer = await startNativePeerServer({

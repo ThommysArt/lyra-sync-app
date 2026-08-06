@@ -682,12 +682,30 @@ export async function wireVerifyPairTrust(input: {
     sawReachable = true;
     const live: PeerUrl = { host: probe.host, port: probe.port, protocol: "http" };
     clearPeerSessionFor(live, input.device.id);
-    const auth = await authenticateWithPeer({
+    let auth = await authenticateWithPeer({
       endpoint: live,
       identity: input.identity,
       privateKey: input.privateKey,
       sharedSecret: input.device.authSecret,
     });
+    // Retry once on 401 shortly after pairing — desktop's trustedPeers may still be syncing (IPC race)
+    if (
+      !auth.ok &&
+      /Invalid proof|401/i.test(auth.error) &&
+      // Only retry if we haven't yet tried the next candidate; this handles the sync race without masking real revokes
+      !/Fingerprint|Device id/.test(auth.error)
+    ) {
+      await new Promise((r) => setTimeout(r, 700));
+      clearPeerSessionFor(live, input.device.id);
+      const retry = await authenticateWithPeer({
+        endpoint: live,
+        identity: input.identity,
+        privateKey: input.privateKey,
+        sharedSecret: input.device.authSecret,
+      });
+      if (retry.ok) auth = retry;
+      else lastAuthError = retry.error || lastAuthError;
+    }
     if (auth.ok) {
       if (
         auth.peerDeviceId &&

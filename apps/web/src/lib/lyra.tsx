@@ -66,7 +66,7 @@ export function LyraProvider({ children }: { children: ReactNode }) {
 
     // Sync trusted peers whenever devices change (pair / unpair)
     const syncTrust = () => {
-      if (!api.syncTrustedPeers) return;
+      if (!api.syncTrustedPeers) return Promise.resolve();
       const peers = store
         .getState()
         .devices.filter((d) => d.authSecret)
@@ -76,9 +76,9 @@ export function LyraProvider({ children }: { children: ReactNode }) {
           publicKey: d.publicKey,
           authSecret: d.authSecret!,
         }));
-      void api.syncTrustedPeers(peers);
+      return api.syncTrustedPeers(peers).catch(() => undefined) as Promise<unknown>;
     };
-    syncTrust();
+    void syncTrust();
 
     // Advertise active pairing code hash on desktop peer /lyra/info
     let lastOfferKey = "";
@@ -115,9 +115,19 @@ export function LyraProvider({ children }: { children: ReactNode }) {
     syncPairingAndIdentity();
 
     // Wire host Accept/Decline → peer-server long-poll resolution
-    store.setPairDecisionResolver?.((payload) => {
+    // Ensure trustedPeers are synced BEFORE resolving pair_confirm (fix race where
+    // joiner's immediate probe gets 401 because main hasn't yet stored the new authSecret)
+    store.setPairDecisionResolver?.(async (payload) => {
       if (!api.resolvePairRequest) {
-        return Promise.resolve({ ok: false as const, error: "Desktop bridge missing resolvePairRequest" });
+        return { ok: false as const, error: "Desktop bridge missing resolvePairRequest" };
+      }
+      if (payload.accepted) {
+        // Host accepted — ensure main's trustedPeers includes the new device before unblocking joiner
+        try {
+          await syncTrust();
+          // Brief yield to let main process IPC queue
+          await new Promise((r) => setTimeout(r, 80));
+        } catch {}
       }
       return api.resolvePairRequest(payload);
     });

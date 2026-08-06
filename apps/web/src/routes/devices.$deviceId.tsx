@@ -26,6 +26,7 @@ import { Switch } from "@lyra-sync-app/ui/components/switch";
 import { DeviceAddressesCard } from "@/components/device-addresses";
 import { DropZone } from "@/components/drop-zone";
 import { ScreenMirrorPanel } from "@/components/screen-mirror";
+import { ConnectionStatusCard } from "@/components/connection-status-card";
 import { readSystemClipboard } from "@/lib/clipboard";
 import { pickFiles } from "@/lib/file-picker";
 import { useLyraSelector, useLyraStore } from "@/lib/lyra";
@@ -141,6 +142,8 @@ function DeviceDetailPage() {
           {device.online ? "Online" : "Offline"}
         </Badge>
       </div>
+
+      <ConnectionStatusCard deviceId={deviceId} />
 
       <div className="grid gap-4 lg:grid-cols-5">
         <Card className="rounded-xl lg:col-span-2">

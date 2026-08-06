@@ -173,6 +173,14 @@ export type LyraState = {
     error?: string;
     updatedAt: number;
   } | null;
+  /** UI-visible discovery / connection phase for status cards */
+  discoveryStatus: {
+    phase: "idle" | "scanning" | "announcing" | "reconnecting" | "offline";
+    isScanning: boolean;
+    lastScannedAt: number | null;
+    lastResult: { online: number; nearby: number } | null;
+    error: string | null;
+  };
 };
 
 export type LyraStore = {
@@ -457,6 +465,13 @@ function createInitialState(): LyraState {
     screenSessions: {},
     tailscalePeerHints: [],
     tailscaleStatus: null,
+    discoveryStatus: {
+      phase: "idle",
+      isScanning: false,
+      lastScannedAt: null,
+      lastResult: null,
+      error: null,
+    },
   };
 }
 
@@ -1015,6 +1030,13 @@ export function createLyraStore(options?: {
       clipboardHistory,
       transfers,
       settings,
+      discoveryStatus: s.discoveryStatus ?? {
+        phase: "idle",
+        isScanning: false,
+        lastScannedAt: null,
+        lastResult: null,
+        error: null,
+      },
     }));
     persist();
   };
@@ -1576,10 +1598,25 @@ export function createLyraStore(options?: {
       const s = getState();
       if (!s.identity || !s.privateKey) return { revoked: 0, checked: 0 };
       const paired = s.devices.filter((d) => d.authSecret && isLivePeer(d));
+      if (paired.length > 0) {
+        set((st) => ({
+          ...st,
+          discoveryStatus: {
+            phase: "reconnecting",
+            isScanning: true,
+            lastScannedAt: st.discoveryStatus.lastScannedAt,
+            lastResult: st.discoveryStatus.lastResult,
+            error: null,
+          },
+        }));
+      }
       let revoked = 0;
       let checked = 0;
       for (const device of paired) {
         checked++;
+        // Grace: don't revoke a device we just paired (main's trustedPeers may still be syncing)
+        const pairedAt = (device as { pairedAt?: number }).pairedAt ?? 0;
+        const isRecentPair = pairedAt > 0 && Date.now() - pairedAt < 60_000;
         try {
           const res = await wireVerifyPairTrust({
             device,
@@ -1587,10 +1624,17 @@ export function createLyraStore(options?: {
             privateKey: s.privateKey!,
           });
           if (!res.ok) {
-            // Unreachable — keep local pair
+            // Unreachable — keep local pair. For recent pairs, also treat as unreachable
+            // (don't surface 401 as revoke)
             continue;
           }
           if (!res.stillTrusted) {
+            if (isRecentPair) {
+              console.info(
+                `[lyra trust] skip revoke for recent pair ${device.name} (${Date.now() - pairedAt}ms ago) — treating as transient`,
+              );
+              continue;
+            }
             revoked++;
             const name = device.nickname || device.name;
             store.unpairDevice(device.id, { silent: true });
@@ -1602,6 +1646,22 @@ export function createLyraStore(options?: {
           }
         } catch {
           // ignore individual failures
+        }
+      }
+      // Restore idle after reconnect check
+      if (paired.length > 0) {
+        const cur = getState().discoveryStatus;
+        if (cur.phase === "reconnecting") {
+          set((st) => ({
+            ...st,
+            discoveryStatus: {
+              phase: "idle",
+              isScanning: false,
+              lastScannedAt: st.discoveryStatus.lastScannedAt,
+              lastResult: st.discoveryStatus.lastResult,
+              error: null,
+            },
+          }));
         }
       }
       return { revoked, checked };
@@ -2031,9 +2091,29 @@ export function createLyraStore(options?: {
     refreshDiscovery: async () => {
       const s0 = getState();
       if (!s0.settings.discoveryEnabled) {
+        set((st) => ({
+          ...st,
+          discoveryStatus: {
+            phase: "offline",
+            isScanning: false,
+            lastScannedAt: st.discoveryStatus.lastScannedAt,
+            lastResult: st.discoveryStatus.lastResult,
+            error: "Discovery disabled",
+          },
+        }));
         notify(set, "Network discovery is disabled in Settings", "info");
         return;
       }
+      set((st) => ({
+        ...st,
+        discoveryStatus: {
+          phase: "scanning",
+          isScanning: true,
+          lastScannedAt: st.discoveryStatus.lastScannedAt,
+          lastResult: st.discoveryStatus.lastResult,
+          error: null,
+        },
+      }));
       const now = Date.now();
       const port = s0.settings.peerListenPort ?? LYRA_DEFAULT_PORT;
 
@@ -2246,7 +2326,17 @@ export function createLyraStore(options?: {
       }
 
       persist();
-      // Re-check mutual trust for paired peers (detect remote unpair)
+      // Re-check mutual trust for paired peers (detect remote unpair) — show reconnecting phase
+      set((st) => ({
+        ...st,
+        discoveryStatus: {
+          phase: "reconnecting",
+          isScanning: true,
+          lastScannedAt: st.discoveryStatus.lastScannedAt,
+          lastResult: st.discoveryStatus.lastResult,
+          error: null,
+        },
+      }));
       try {
         await store.recheckPairedTrust();
       } catch {
@@ -2263,6 +2353,13 @@ export function createLyraStore(options?: {
       set((st) => ({
         ...st,
         lastProbeSummary: summary,
+        discoveryStatus: {
+          phase: "idle",
+          isScanning: false,
+          lastScannedAt: Date.now(),
+          lastResult: { online, nearby },
+          error: null,
+        },
       }));
       notify(
         set,

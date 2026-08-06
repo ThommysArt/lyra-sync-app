@@ -16,6 +16,7 @@ import {
 import { Input } from "@lyra-sync-app/ui/components/input";
 import { Label } from "@lyra-sync-app/ui/components/label";
 import { DeviceCard } from "@/components/device-card";
+import { GlobalDiscoveryStatusCard } from "@/components/connection-status-card";
 import { PairingDialog } from "@/components/pairing-dialog";
 import { readSystemClipboard } from "@/lib/clipboard";
 import { materializeFileBytes, pickFiles, type PickedFile } from "@/lib/file-picker";
@@ -160,6 +161,8 @@ function DevicesPage() {
 
   return (
     <div className="mx-auto max-w-5xl space-y-4 p-4 md:px-5 md:py-4">
+      <GlobalDiscoveryStatusCard />
+
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Devices</h1>

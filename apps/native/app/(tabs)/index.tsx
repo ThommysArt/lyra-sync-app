@@ -18,6 +18,7 @@ import {
 } from "react-native";
 
 import { ScreenHeader, useTabBottomPadding } from "@/components/ui/screen-header";
+import { GlobalDiscoveryStatusCard } from "@/components/connection-status-card";
 import { useAppTheme } from "@/contexts/app-theme-context";
 import { ACCENT, ACCENT_DARK, fonts, PAGE_BG } from "@/lib/constants";
 import { useLyraSelector, useLyraStore } from "@/lib/lyra";
@@ -207,6 +208,8 @@ export default function DevicesScreen() {
         />
 
         <View style={{ gap: 12, paddingHorizontal: 16 }}>
+          <GlobalDiscoveryStatusCard />
+
           {/* Tailscale: scan-first */}
           <View style={{ backgroundColor: card, borderRadius: 12, gap: 10, padding: 14 }}>
             <Text style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 14 }}>
@@ -231,7 +234,7 @@ export default function DevicesScreen() {
                   paddingVertical: 10,
                 }}
               >
-                <Ionicons color="#fff" name="radar-outline" size={16} />
+                <Ionicons color="#fff" name="scan-outline" size={16} />
                 <Text style={{ color: "#fff", fontFamily: fonts.semiBold, fontSize: 13 }}>
                   {scanBusy ? "Scanning…" : "Scan Tailscale"}
                 </Text>

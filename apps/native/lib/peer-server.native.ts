@@ -506,8 +506,16 @@ export function attachNativePeerToStore(
   syncStatus();
 
   // Keep settings in sync when we fell back to an alternate port (EADDRINUSE)
+  // Don't persist ephemeral random ports (fallback to 0) — they aren't in the scan matrix
+  // and would be probed as 44119 etc. on next launch, missing the real 53317 peers.
   if (peer.port && peer.port !== store.getState().settings.peerListenPort) {
-    store.updateSettings({ peerListenPort: peer.port });
+    const preferred = store.getState().settings.peerListenPort ?? 53317;
+    const known = new Set([53317, 53319, 53321, 53327, 53337, preferred, preferred + 2, preferred + 4, preferred + 10]);
+    if (known.has(peer.port)) {
+      store.updateSettings({ peerListenPort: peer.port });
+    } else {
+      console.warn(`[lyra peer] ephemeral port ${peer.port} not persisted (will retry ${preferred} next launch)`);
+    }
   }
 
   // Identity changes

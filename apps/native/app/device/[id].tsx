@@ -12,6 +12,7 @@ import { useEffect, useState } from "react";
 import { Image, Pressable, ScrollView, Text, TextInput, View } from "react-native";
 
 import { IosSwitch } from "@/components/ui/ios-switch";
+import { ConnectionStatusCard } from "@/components/connection-status-card";
 import { useAppTheme } from "@/contexts/app-theme-context";
 import { ACCENT, ACCENT_DARK, fonts, PAGE_BG } from "@/lib/constants";
 import { useLyraSelector, useLyraStore } from "@/lib/lyra";
@@ -188,6 +189,8 @@ export default function DeviceDetailScreen() {
             accent={accent}
           />
         </View>
+
+        <ConnectionStatusCard deviceId={device.id} />
 
         <View style={{ backgroundColor: card, borderRadius: 14, padding: 16, gap: 12 }}>
           <Text style={{ color: ink, fontFamily: fonts.semiBold, fontSize: 16 }}>Screen mirror</Text>
