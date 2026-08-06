@@ -109,9 +109,18 @@ importers:
       '@gorhom/bottom-sheet':
         specifier: ^5.2.14
         version: 5.2.14(@types/react@19.2.17)(react-native-gesture-handler@2.32.0(react-native@0.86.0(@babel/core@7.29.7)(@react-native/metro-config@0.86.0(@babel/core@7.29.7))(@types/react@19.2.17)(react@19.2.3))(react@19.2.3))(react-native-reanimated@4.5.0(react-native-worklets@0.10.0(@babel/core@7.29.7)(@react-native/metro-config@0.86.0(@babel/core@7.29.7))(react-native@0.86.0(@babel/core@7.29.7)(@react-native/metro-config@0.86.0(@babel/core@7.29.7))(@types/react@19.2.17)(react@19.2.3))(react@19.2.3))(react-native@0.86.0(@babel/core@7.29.7)(@react-native/metro-config@0.86.0(@babel/core@7.29.7))(@types/react@19.2.17)(react@19.2.3))(react@19.2.3))(react-native@0.86.0(@babel/core@7.29.7)(@react-native/metro-config@0.86.0(@babel/core@7.29.7))(@types/react@19.2.17)(react@19.2.3))(react@19.2.3)
+      '@lyra-sync-app/core':
+        specifier: workspace:*
+        version: link:../../packages/core
       '@lyra-sync-app/env':
         specifier: workspace:*
         version: link:../../packages/env
+      '@lyra-sync-app/hooks':
+        specifier: workspace:*
+        version: link:../../packages/hooks
+      '@lyra-sync-app/transport':
+        specifier: workspace:*
+        version: link:../../packages/transport
       dotenv:
         specifier: 'catalog:'
         version: 17.4.2
@@ -215,9 +224,18 @@ importers:
       '@hookform/resolvers':
         specifier: ^5.4.0
         version: 5.4.0(react-hook-form@7.81.0(react@19.2.7))
+      '@lyra-sync-app/core':
+        specifier: workspace:*
+        version: link:../../packages/core
       '@lyra-sync-app/env':
         specifier: workspace:*
         version: link:../../packages/env
+      '@lyra-sync-app/hooks':
+        specifier: workspace:*
+        version: link:../../packages/hooks
+      '@lyra-sync-app/transport':
+        specifier: workspace:*
+        version: link:../../packages/transport
       '@lyra-sync-app/ui':
         specifier: workspace:*
         version: link:../../packages/ui

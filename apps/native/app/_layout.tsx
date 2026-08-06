@@ -5,6 +5,8 @@ import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { KeyboardProvider } from "react-native-keyboard-controller";
 
 import { AppThemeProvider } from "@/contexts/app-theme-context";
+import { nativeLyraStore } from "@/lib/lyra";
+import { LyraProvider } from "@lyra-sync-app/hooks";
 
 export const unstable_settings = {
   initialRouteName: "(drawer)",
@@ -22,13 +24,15 @@ function StackLayout() {
 export default function Layout() {
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
-      <KeyboardProvider>
-        <AppThemeProvider>
-          <HeroUINativeProvider>
-            <StackLayout />
-          </HeroUINativeProvider>
-        </AppThemeProvider>
-      </KeyboardProvider>
+      <LyraProvider store={nativeLyraStore}>
+        <KeyboardProvider>
+          <AppThemeProvider>
+            <HeroUINativeProvider>
+              <StackLayout />
+            </HeroUINativeProvider>
+          </AppThemeProvider>
+        </KeyboardProvider>
+      </LyraProvider>
     </GestureHandlerRootView>
   );
 }

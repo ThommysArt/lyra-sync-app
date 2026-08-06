@@ -42,6 +42,7 @@ const userDataSuffix = variantUserDataSuffix(variant);
 
 let peerServer: PeerServer | null = null;
 let discovery: DiscoveryHandle | null = null;
+let clipboardMonitor: { stop(): void } | null = null;
 let mainWindow: InstanceType<NonNullable<typeof electron>["BrowserWindow"]> | null = null;
 let currentIdentity: DeviceIdentity = {
   id: `desktop-${os.hostname()}-${variant}`,
@@ -178,6 +179,33 @@ function setupIpc(): void {
     if (typeof url === "string") void shell.openExternal(url);
     return true;
   });
+
+  // P4 clipboard sync — renderer -> daemon forwarding
+  ipcMain.handle("lyra:clipboard-push", (_ev: unknown, text: string) => {
+    if (typeof text === "string" && text.length) {
+      try {
+        const { writeClipboardText } = requireCjs("@lyra-sync-app/daemon/clipboard") as { writeClipboardText: (t: string) => void };
+        // dynamic import for ESM compat fallback — require may fail, try static
+        try { writeClipboardText(text); } catch {}
+      } catch {}
+      mainWindow?.webContents.send("lyra:clipboard-push", { text, source: "renderer", createdAt: Date.now() });
+    }
+    return true;
+  });
+  ipcMain.handle("lyra:clipboard-read", () => {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const mod = requireCjs("@lyra-sync-app/daemon/clipboard") as { readClipboardText: () => string };
+      return mod.readClipboardText();
+    } catch { return ""; }
+  });
+  // P5 remote browse — renderer requests local fs list via daemon
+  ipcMain.handle("lyra:fs-list", async (_ev: unknown, p: string) => {
+    try {
+      const { listOsFiles } = await import("@lyra-sync-app/daemon");
+      return await listOsFiles(p ?? "/");
+    } catch { return []; }
+  });
 }
 
 async function startDaemon(): Promise<void> {
@@ -202,9 +230,13 @@ async function startDaemon(): Promise<void> {
       onTransferOffer: (envelope, payload) => {
         mainWindow?.webContents.send("lyra:transfer-offer", { envelope, payload });
       },
-      onFsList: async (_p: string) => {
-        // stub fs list — return empty
-        return [];
+      onFsList: async (p: string) => {
+        try {
+          const { listOsFiles } = await import("@lyra-sync-app/daemon");
+          return await listOsFiles(p);
+        } catch {
+          return [];
+        }
       },
       onOpenUrl: (u: string) => {
         mainWindow?.webContents.send("lyra:open-url", u);
@@ -214,6 +246,38 @@ async function startDaemon(): Promise<void> {
       },
     },
   });
+
+  // P4 — start clipboard monitor (headless-safe). Logs + forwards to renderer as lyra:clipboard-push.
+  // iOS note for mobile: "iOS cannot monitor automatically — use Send Clipboard" (handled in native UI)
+  try {
+    const { startClipboardMonitor } = await import("@lyra-sync-app/daemon/clipboard");
+    clipboardMonitor = startClipboardMonitor({
+      intervalMs: 900,
+      getEnabled: () => true,
+      onText: (text) => {
+        // forward to renderer store.ingestSystemClipboardText via IPC
+        mainWindow?.webContents.send("lyra:clipboard-push", { text, source: "system", createdAt: Date.now() });
+        // headless logging
+        console.log(`[clipboard] polled ${text.slice(0, 48)}`);
+      },
+    });
+  } catch (e) {
+    console.warn("[desktop] clipboard monitor failed", String(e));
+  }
+
+  // P5 — wire real fs handler after monitor (replacing stub)
+  if (peerServer) {
+    // peerServer already created with stub onFsList returning []; we patch by reusing startPeerServer's handler via direct import
+    // For P5 the daemon peerServer already supports fs_list if handler provided at start; we now ensure fs_list reads real files
+    // To keep simple, attach onFsList override via dynamic re-import of fs
+    try {
+      const { listOsFiles: realList } = await import("@lyra-sync-app/daemon");
+      // monkey-patch peerServer handler via closure if available — if peerServer exposes handlers, we rely on restart logic;
+      // fallback: we ensure future fs_list handled by peer-server's onFsList param was realList (we already passed stub, so patch via peerServer internal map is not exposed)
+      // Workaround: log that realList is available for transport layer tests
+      void realList;
+    } catch {}
+  }
 
   discovery = startDiscovery({
     identity: currentIdentity,
@@ -265,11 +329,13 @@ async function main(): Promise<void> {
 void main();
 
 process.on("SIGINT", async () => {
+  try { clipboardMonitor?.stop(); } catch {}
   await peerServer?.close();
   await discovery?.stop();
   process.exit(0);
 });
 process.on("SIGTERM", async () => {
+  try { clipboardMonitor?.stop(); } catch {}
   await peerServer?.close();
   await discovery?.stop();
   process.exit(0);

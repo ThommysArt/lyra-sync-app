@@ -11,7 +11,19 @@
     "rootDirs": ["."],
     "paths": {
       "@/*": ["./src/*"],
-      "@lyra-sync-app/ui/*": ["../../packages/ui/src/*"]
+      "@lyra-sync-app/ui/*": ["../../packages/ui/src/*"],
+      "@lyra-sync-app/hooks": ["../../packages/hooks/src"],
+      "@lyra-sync-app/hooks/*": ["../../packages/hooks/src/*"],
+      "@lyra-sync-app/core": ["../../packages/core/src"],
+      "@lyra-sync-app/core/*": ["../../packages/core/src/*"],
+      "@lyra-sync-app/transport": ["../../packages/transport/src"],
+      "@lyra-sync-app/transport/*": ["../../packages/transport/src/*"],
+      "@lyra-sync-app/protocol": ["../../packages/protocol/src"],
+      "@lyra-sync-app/protocol/*": ["../../packages/protocol/src/*"],
+      "@lyra-sync-app/discovery": ["../../packages/discovery/src"],
+      "@lyra-sync-app/discovery/*": ["../../packages/discovery/src/*"],
+      "@lyra-sync-app/daemon": ["../../packages/daemon/src"],
+      "@lyra-sync-app/daemon/*": ["../../packages/daemon/src/*"]
     }
   }
 }

@@ -13,7 +13,10 @@
   },
   "dependencies": {
     "@hookform/resolvers": "^5.4.0",
+    "@lyra-sync-app/core": "workspace:*",
     "@lyra-sync-app/env": "workspace:*",
+    "@lyra-sync-app/hooks": "workspace:*",
+    "@lyra-sync-app/transport": "workspace:*",
     "@lyra-sync-app/ui": "workspace:*",
     "@tailwindcss/vite": "^4.3.2",
     "@tanstack/react-router": "^1.170.17",

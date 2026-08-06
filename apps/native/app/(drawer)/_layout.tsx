@@ -57,7 +57,7 @@ function DrawerLayout() {
             />
           ),
           headerRight: () => (
-            <Link href="/modal" asChild>
+            <Link href={"/modal" as never} asChild>
               <Pressable className="mr-4">
                 <Ionicons name="add-outline" size={24} color={themeColorForeground} />
               </Pressable>

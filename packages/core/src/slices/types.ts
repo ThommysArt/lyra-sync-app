@@ -1,4 +1,4 @@
-import type { AppSettings, ClipboardItem, DeviceIdentity, PairedDevice, Transfer } from "@lyra-sync-app/protocol";
+import type { AppSettings, ClipboardItem, DeviceIdentity, FileEntry, PairedDevice, Transfer } from "@lyra-sync-app/protocol";
 
 // Local discovery peer types — keep in sync with @lyra-sync-app/discovery
 export type DiscoveredPeer = {
@@ -61,14 +61,46 @@ export type DiscoverySlice = {
   ingestTailscalePeers?: (hints: ProbeTarget[]) => void;
 };
 
+export type TransferSession = {
+  id: string;
+  deviceId: string;
+  deviceName: string;
+  files: Array<{ name: string; size: number; relativePath?: string; bytes?: Uint8Array; checksum?: string; mimeType?: string }>;
+  totalBytes: number;
+  transferredBytes: number;
+  status: "pending" | "offered" | "in_progress" | "transferring" | "paused" | "completed" | "failed" | "cancelled";
+  overWire?: boolean;
+  resumeOffset?: number;
+};
+
 export type TransferSlice = {
+  /** canonical sessions map — new P3 */
+  sessions: Record<string, TransferSession>;
+  /** legacy alias kept for compat — mirror of sessions as Transfer objects */
   transfers: Record<string, Transfer>;
+  startFileTransfer: (
+    deviceIds: string[],
+    files: Array<{ name: string; size: number; relativePath?: string; bytes?: Uint8Array; checksum?: string }>,
+  ) => string[];
+  pauseTransfer: (id: string) => void;
+  resumeTransfer: (id: string) => void;
+  cancelTransfer: (id: string) => void;
+  ingestTransferProgress: (id: string, transferredBytes: number) => void;
+  /** stub for legacy createTransfer */
   createTransfer: (..._args: unknown[]) => void;
 };
 
 export type ClipboardSlice = {
   history: ClipboardItem[];
-  pushClipboard: (item: ClipboardItem) => void;
+  pushClipboardText: (text: string, targetDeviceIds?: string[]) => void;
+  pushClipboardImage: (dataUrl: string, targetDeviceIds?: string[]) => void;
+  pinItem: (id: string) => void;
+  clearHistory: () => void;
+  /** compat alias — accepts either item or plain text */
+  pushClipboard: (item: ClipboardItem | string) => void;
+  /** ingest incoming from transport */
+  receiveClipboardItem: (item: ClipboardItem) => void;
+  ingestSystemClipboardText?: (text: string) => void;
 };
 
 export type SettingsSlice = {
@@ -88,6 +120,11 @@ export type ToastSlice = {
   dismissToast: (id: string) => void;
 };
 
+export type RemoteFsSlice = {
+  remoteFsCache: Record<string, FileEntry[]>;
+  fetchRemoteFiles: (deviceId: string, path: string) => Promise<FileEntry[]>;
+};
+
 export type LyraState = {
   identity: DeviceIdentity | null;
   pairedDevices: PairedDevice[];
@@ -98,7 +135,9 @@ export type LyraState = {
   pairing: PairingSlice;
   peerServer: PeerServerSlice;
   toasts: ToastSlice;
-
+  remoteFsCache: Record<string, FileEntry[]>;
+  /** direct action for remote browse (mirrors remoteFsSlice for ergonomics) */
+  fetchRemoteFiles: (deviceId: string, path: string) => Promise<FileEntry[]>;
   // legacy aliases for migration
   _hydrated: boolean;
 };
