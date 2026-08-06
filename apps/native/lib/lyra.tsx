@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, AppState, Platform, View } from "react-native";
 import * as Network from "expo-network";
 import { getLanHosts } from "@/lib/network";
+import { startNativeDiscovery, type NativeDiscoveryHandle } from "@/lib/discovery-native";
 
 import { ACCENT, PAGE_BG } from "@/lib/constants";
 import { useAppTheme } from "@/contexts/app-theme-context";
@@ -55,6 +56,7 @@ export function LyraProvider({ children }: { children: ReactNode }) {
     let cancelled = false;
     let detachPeer: (() => void) | null = null;
     let peerHandle: NativePeerHandle | null = null;
+    let discoveryHandle: NativeDiscoveryHandle | null = null;
 
     // Recheck mutual trust shortly after startup (detect remote unpair)
     const trustTimer = setTimeout(() => {
@@ -285,6 +287,15 @@ export function LyraProvider({ children }: { children: ReactNode }) {
 
         peerHandle = peer;
         detachPeer = attachNativePeerToStore(store, peer);
+        // Native multicast discovery (LocalSend-style) — instant LAN discovery without HTTP scan
+        try {
+          discoveryHandle = await startNativeDiscovery(store);
+          if (discoveryHandle) {
+            console.info("[lyra] native discovery started");
+          }
+        } catch (e) {
+          console.warn("[lyra] native discovery failed", e);
+        }
         // Foreground service: keep peer reachable in background (user accepted persistent notification)
         try {
           // Dynamically import expo module to avoid crash when not prebuilt
@@ -369,6 +380,8 @@ export function LyraProvider({ children }: { children: ReactNode }) {
       detachPeer = null;
       void peerHandle?.stop();
       peerHandle = null;
+      void discoveryHandle?.stop();
+      discoveryHandle = null;
       // Stop foreground service
       try {
         // eslint-disable-next-line @typescript-eslint/no-require-imports
