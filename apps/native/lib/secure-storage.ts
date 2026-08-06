@@ -18,48 +18,59 @@ const STATE_PREFIX = "lyra.v1.";
 function createAsyncStorageBulk(): StorageLike & { hydrate: () => Promise<void> } {
   const cache = new Map<string, string>();
   let ready = false;
+  let hydratePromise: Promise<void> | null = null;
+
+  const doHydrate = async () => {
+    try {
+      const keys = await AsyncStorage.getAllKeys();
+      const lyraKeys = keys.filter((k) => k.startsWith(STATE_PREFIX) || k === "lyra.v1.state");
+      if (lyraKeys.length === 0) {
+        const all = await AsyncStorage.multiGet(keys.filter((k) => k.startsWith("lyra.")));
+        for (const [k, v] of all) {
+          if (k && v != null) cache.set(k, v);
+        }
+      } else {
+        const pairs = await AsyncStorage.multiGet(lyraKeys);
+        for (const [k, v] of pairs) {
+          if (k && v != null) cache.set(k, v);
+        }
+      }
+      const state = await AsyncStorage.getItem("lyra.v1.state");
+      if (state != null) cache.set("lyra.v1.state", state);
+      const key = await AsyncStorage.getItem("lyra.v1.state.key");
+      if (key != null) cache.set("lyra.v1.state.key", key);
+    } catch (e) {
+      console.warn("[lyra storage] hydrate failed", e);
+    }
+    ready = true;
+  };
 
   return {
-    hydrate: async () => {
-      try {
-        const keys = await AsyncStorage.getAllKeys();
-        const lyraKeys = keys.filter((k) => k.startsWith(STATE_PREFIX) || k === "lyra.v1.state");
-        if (lyraKeys.length === 0) {
-          // Also pull any non-prefixed lyra keys used historically
-          const all = await AsyncStorage.multiGet(keys.filter((k) => k.startsWith("lyra.")));
-          for (const [k, v] of all) {
-            if (k && v != null) cache.set(k, v);
-          }
-        } else {
-          const pairs = await AsyncStorage.multiGet(lyraKeys);
-          for (const [k, v] of pairs) {
-            if (k && v != null) cache.set(k, v);
-          }
-        }
-        // Ensure primary state key is loaded even if prefix filter missed
-        const state = await AsyncStorage.getItem("lyra.v1.state");
-        if (state != null) cache.set("lyra.v1.state", state);
-        const key = await AsyncStorage.getItem("lyra.v1.state.key");
-        if (key != null) cache.set("lyra.v1.state.key", key);
-      } catch {
-        // keep empty cache
-      }
-      ready = true;
+    hydrate: () => {
+      if (hydratePromise) return hydratePromise;
+      if (ready) return Promise.resolve();
+      hydratePromise = doHydrate().finally(() => {
+        // keep promise for dedupe
+      });
+      return hydratePromise;
     },
     getItem: (k) => {
-      void ready;
+      if (!ready) {
+        console.warn("[lyra storage] getItem before hydrate", k);
+      }
       return cache.get(k) ?? null;
     },
     setItem: (k, v) => {
       cache.set(k, v);
-      void AsyncStorage.setItem(k, v).catch(() => {
-        // ignore quota / native errors
+      // Write-through async but surface errors in log
+      void AsyncStorage.setItem(k, v).catch((e) => {
+        console.warn("[lyra storage] setItem failed", k, e instanceof Error ? e.message : String(e));
       });
     },
     removeItem: (k) => {
       cache.delete(k);
-      void AsyncStorage.removeItem(k).catch(() => {
-        // ignore
+      void AsyncStorage.removeItem(k).catch((e) => {
+        console.warn("[lyra storage] removeItem failed", k, e instanceof Error ? e.message : String(e));
       });
     },
   };
@@ -154,6 +165,7 @@ export async function migratePrivateKeyToSecureStore(
   stateKey = "lyra.v1.state",
 ): Promise<void> {
   try {
+    // hydrate is idempotent via promise dedupe; call once
     if (storage.hydrate) await storage.hydrate();
     const raw = storage.getItem(stateKey);
     if (!raw) return;
@@ -162,10 +174,10 @@ export async function migratePrivateKeyToSecureStore(
       await storage.setPrivateKey(parsed.privateKey);
       const { privateKey: _drop, ...rest } = parsed as Record<string, unknown>;
       storage.setItem(stateKey, JSON.stringify({ ...rest, privateKey: null }));
+      // Also ensure async flush completes before next read
+      await new Promise((r) => setTimeout(r, 0));
     }
-  } catch {
-    // ignore corrupt
+  } catch (e) {
+    console.warn("[lyra storage] migrate failed", e instanceof Error ? e.message : String(e));
   }
-  void STATE_PREFIX;
-  void memoryFallback;
 }

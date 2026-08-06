@@ -13,6 +13,9 @@ import {
   OpenUrlPayloadSchema,
   PairConfirmPayloadSchema,
   PairRequestPayloadSchema,
+  ScreenFramePayloadSchema,
+  ScreenShareRequestPayloadSchema,
+  ScreenShareStopPayloadSchema,
   TransferChunkPayloadSchema,
   TransferOfferPayloadSchema,
   type ClipboardItem,
@@ -20,6 +23,9 @@ import {
   type Envelope,
   type FileEntry,
   type PairingPayload,
+  type ScreenFramePayload,
+  type ScreenShareAcceptPayload,
+  type ScreenShareRequestPayload,
 } from "@lyra-sync-app/protocol";
 
 import type { AuthSession } from "./auth";
@@ -88,6 +94,25 @@ export type FsReadHandler = (
 export type FsDeleteHandler = (path: string) => void | Promise<void>;
 export type FsRenameHandler = (path: string, newName: string) => string | Promise<string>;
 
+export type ScreenShareRequestHandler = (
+  request: ScreenShareRequestPayload,
+  fromDeviceId: string,
+) =>
+  | Promise<ScreenShareAcceptPayload | { reject: true; reason: string }>
+  | ScreenShareAcceptPayload
+  | { reject: true; reason: string };
+
+export type ScreenFrameHandler = (
+  frame: ScreenFramePayload,
+  fromDeviceId: string,
+) => void | Promise<void>;
+
+export type ScreenShareStopHandler = (
+  sessionId: string,
+  fromDeviceId: string,
+  reason?: string,
+) => void | Promise<void>;
+
 export type MessageHandlerContext = {
   identity: DeviceIdentity;
   /** Trusted peer lookup for auth secrets is separate; this is app callbacks */
@@ -111,6 +136,12 @@ export type MessageHandlerContext = {
   onFsRead?: FsReadHandler;
   onFsDelete?: FsDeleteHandler;
   onFsRename?: FsRenameHandler;
+  /** Incoming screen share request (we are the source). */
+  onScreenShareRequest?: ScreenShareRequestHandler;
+  /** Incoming frame while we are the viewer. */
+  onScreenFrame?: ScreenFrameHandler;
+  /** Peer stopped sharing. */
+  onScreenShareStop?: ScreenShareStopHandler;
   /**
    * Optional factory for disk-backed receive state (Node peer server).
    * When omitted, small transfers stay in memory.
@@ -244,6 +275,58 @@ export async function handlePeerEnvelope(
         toDeviceId: from,
         payload: { url: parsed.data.url, opened },
       });
+    }
+
+    case "screen_share_request": {
+      if (!session) return { ok: false, error: "Auth required" };
+      const parsed = ScreenShareRequestPayloadSchema.safeParse(envelope.payload);
+      if (!parsed.success) return { ok: false, error: "Invalid screen_share_request" };
+      if (!ctx.onScreenShareRequest) {
+        return createEnvelope({
+          type: "screen_share_reject",
+          fromDeviceId: ctx.identity.id,
+          toDeviceId: from,
+          payload: {
+            sessionId: parsed.data.sessionId,
+            reason: "Screen share not supported on this peer",
+          },
+        });
+      }
+      const decision = await ctx.onScreenShareRequest(parsed.data, from);
+      if ("reject" in decision && decision.reject) {
+        return createEnvelope({
+          type: "screen_share_reject",
+          fromDeviceId: ctx.identity.id,
+          toDeviceId: from,
+          payload: {
+            sessionId: parsed.data.sessionId,
+            reason: decision.reason,
+          },
+        });
+      }
+      const accept = decision as ScreenShareAcceptPayload;
+      return createEnvelope({
+        type: "screen_share_accept",
+        fromDeviceId: ctx.identity.id,
+        toDeviceId: from,
+        payload: accept,
+      });
+    }
+
+    case "screen_frame": {
+      if (!session) return { ok: false, error: "Auth required" };
+      const parsed = ScreenFramePayloadSchema.safeParse(envelope.payload);
+      if (!parsed.success) return { ok: false, error: "Invalid screen_frame" };
+      await ctx.onScreenFrame?.(parsed.data, from);
+      return { ok: true, seq: parsed.data.seq };
+    }
+
+    case "screen_share_stop": {
+      if (!session) return { ok: false, error: "Auth required" };
+      const parsed = ScreenShareStopPayloadSchema.safeParse(envelope.payload);
+      if (!parsed.success) return { ok: false, error: "Invalid screen_share_stop" };
+      await ctx.onScreenShareStop?.(parsed.data.sessionId, from, parsed.data.reason);
+      return { ok: true };
     }
 
     case "fs_list": {

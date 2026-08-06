@@ -8,8 +8,33 @@ Hosts the **local HTTP(S) peer server** and **UDP multicast discovery**, and loa
 # Terminal 1 — web UI
 pnpm run dev:web   # http://localhost:3001
 
-# Terminal 2 — desktop shell
-pnpm --filter desktop dev
+# Terminal 2 — desktop shell (Dev variant by default)
+pnpm run dev:desktop
+# or: pnpm run dev:desktop:preview  /  pnpm run dev:desktop:prod
+```
+
+## App variants (side-by-side)
+
+Like the mobile app, desktop has **dev / preview / prod** identities so you can run them together without uninstalling or fighting over peer ports.
+
+| Variant | Window title | App id | userData | Default peer port |
+|---------|--------------|--------|----------|-------------------|
+| `development` | Lyra Dev | `app.lyra.desktop.dev` | `lyra-desktop-dev` | **53317** |
+| `preview` | Lyra Preview | `app.lyra.desktop.preview` | `lyra-desktop-preview` | **53327** |
+| `production` | Lyra | `app.lyra.desktop` | `lyra-desktop` | **53337** |
+
+```bash
+pnpm run dev:desktop           # Dev
+pnpm run dev:desktop:preview   # Preview (same machine, other port + profile)
+pnpm run dev:desktop:prod      # Prod identity (still uses Vite UI in dev)
+```
+
+Packaged artifacts are version-stamped from `apps/desktop/package.json` (currently **0.2.3**):
+
+```bash
+pnpm run dist:desktop:dev       # → release/Lyra-0.2.3-dev.AppImage
+pnpm run dist:desktop:preview   # → release/Lyra-0.2.3-preview.AppImage
+pnpm run dist:desktop           # → release/Lyra-0.2.3-prod.AppImage
 ```
 
 ## Single-PC pairing test (no phone / Android)
@@ -37,15 +62,16 @@ pnpm run dev:pair-b   # Computer B · port 53319
 
 Then in **A**: Pair → Show code. In **B**: Enter code → Start pairing. Accept on **A**.
 
-Uses `LYRA_ALLOW_MULTI=1` + separate `userData` so both windows keep their own identity.
+Uses `LYRA_ALLOW_MULTI=1` + separate `userData` so both windows keep their own identity (same **development** variant).
 
 ## Environment
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
+| `LYRA_VARIANT` / `APP_VARIANT` | `development` in dev scripts; baked at package time | `development` \| `preview` \| `production` |
 | `LYRA_WEB_URL` | `http://localhost:3001` | Renderer URL |
-| `LYRA_PORT` | `53317` | Peer HTTP(S) listen port |
-| `LYRA_NAME` | `Lyra Desktop` | Device display name |
+| `LYRA_PORT` | variant default (53317 / 53327 / 53337) | Peer HTTP(S) listen port |
+| `LYRA_NAME` | variant device name | Device display name |
 | `LYRA_TLS` | unset | Set `1` to enable HTTPS with self-signed cert (requires `openssl` on PATH) |
 | `LYRA_ALLOW_MULTI` | unset | `1` = allow second Electron window (pairing tests) |
 | `LYRA_INSTANCE` | unset | Isolates `userData` (`a` / `b`) so two windows don’t share state |

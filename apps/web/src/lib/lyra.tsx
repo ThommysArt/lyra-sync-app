@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { useCallback } from "react";
 
 import { getDesktopApi } from "./desktop-bridge";
+import { installScreenSessionSync } from "./screen-session-sync";
 
 export { useLyraSelector, useLyraState, useLyraStore };
 
@@ -19,8 +20,21 @@ function shouldSeedDemo(): boolean {
 
 export function LyraProvider({ children }: { children: ReactNode }) {
   const onStoreReady = useCallback((store: import("@lyra-sync-app/core").LyraStore) => {
+    // Recheck mutual trust on startup (web + desktop)
+    const trustTimer = setTimeout(() => {
+      void store.recheckPairedTrust();
+    }, 2000);
+
+    // Multi-window mirror: keep screenSessions in sync across popups / BrowserWindows
+    const unsubScreenSync = installScreenSessionSync(store);
+
     const api = getDesktopApi();
-    if (!api) return;
+    if (!api) {
+      return () => {
+        clearTimeout(trustTimer);
+        unsubScreenSync();
+      };
+    }
 
     let didInitialScan = false;
     const onPeerStatus = (status: {
@@ -52,7 +66,7 @@ export function LyraProvider({ children }: { children: ReactNode }) {
 
     // Sync trusted peers whenever devices change (pair / unpair)
     const syncTrust = () => {
-      if (!api.syncTrustedPeers) return;
+      if (!api.syncTrustedPeers) return Promise.resolve();
       const peers = store
         .getState()
         .devices.filter((d) => d.authSecret)
@@ -62,9 +76,9 @@ export function LyraProvider({ children }: { children: ReactNode }) {
           publicKey: d.publicKey,
           authSecret: d.authSecret!,
         }));
-      void api.syncTrustedPeers(peers);
+      return api.syncTrustedPeers(peers).catch(() => undefined) as Promise<unknown>;
     };
-    syncTrust();
+    void syncTrust();
 
     // Advertise active pairing code hash on desktop peer /lyra/info
     let lastOfferKey = "";
@@ -101,9 +115,19 @@ export function LyraProvider({ children }: { children: ReactNode }) {
     syncPairingAndIdentity();
 
     // Wire host Accept/Decline → peer-server long-poll resolution
-    store.setPairDecisionResolver?.((payload) => {
+    // Ensure trustedPeers are synced BEFORE resolving pair_confirm (fix race where
+    // joiner's immediate probe gets 401 because main hasn't yet stored the new authSecret)
+    store.setPairDecisionResolver?.(async (payload) => {
       if (!api.resolvePairRequest) {
-        return Promise.resolve({ ok: false as const, error: "Desktop bridge missing resolvePairRequest" });
+        return { ok: false as const, error: "Desktop bridge missing resolvePairRequest" };
+      }
+      if (payload.accepted) {
+        // Host accepted — ensure main's trustedPeers includes the new device before unblocking joiner
+        try {
+          await syncTrust();
+          // Brief yield to let main process IPC queue
+          await new Promise((r) => setTimeout(r, 80));
+        } catch {}
       }
       return api.resolvePairRequest(payload);
     });
@@ -145,7 +169,16 @@ export function LyraProvider({ children }: { children: ReactNode }) {
     });
 
     const unsubClip = api.onClipboardPush?.((item) => {
-      store.receiveClipboardItem(item as import("@lyra-sync-app/protocol").ClipboardItem);
+      const clip = item as import("@lyra-sync-app/protocol").ClipboardItem;
+      store.receiveClipboardItem(clip);
+      const auto =
+        store.getState().settings.autoAcceptClipboard ||
+        store.getState().settings.clipboardSyncEnabled;
+      if (auto && clip.type === "text" && clip.text) {
+        void import("./clipboard").then(({ writeSystemClipboard }) =>
+          writeSystemClipboard(clip.text!).catch(() => undefined),
+        );
+      }
     });
 
     const unsubTs = api.onTailscalePeers?.((peers) => {
@@ -186,7 +219,49 @@ export function LyraProvider({ children }: { children: ReactNode }) {
       });
     });
 
+    // P2P screen frames (viewer) from peer server in main process
+    const unsubFrame = api.onScreenFrame?.(({ frame, fromDeviceId }) => {
+      store.ingestScreenFrame(fromDeviceId, {
+        sessionId: frame.sessionId,
+        seq: frame.seq,
+        width: frame.width,
+        height: frame.height,
+        mimeType: frame.mimeType,
+        dataBase64: frame.dataBase64,
+        capturedAt: frame.capturedAt,
+      });
+    });
+
+    const unsubShareStop = api.onScreenShareStop?.(({ sessionId }) => {
+      const sessions = store.getState().screenSessions;
+      for (const [deviceId, session] of Object.entries(sessions)) {
+        if (session.sessionId === sessionId && session.status === "active") {
+          void store.stopScreenMirror(deviceId);
+        }
+      }
+    });
+
+    const unsubScrcpyExit = api.onScrcpyExit?.(({ deviceId, code, stderr }) => {
+      if (code === 0 || code === null) return;
+      const session = store.getState().screenSessions[deviceId];
+      if (session && session.status === "active" && session.mode === "scrcpy") {
+        store.applyScreenSessions({
+          ...store.getState().screenSessions,
+          [deviceId]: {
+            ...session,
+            status: "error",
+            error:
+              stderr?.trim() ||
+              `scrcpy exited (${code}). Check wireless debugging / adb connect.`,
+            updatedAt: Date.now(),
+          },
+        });
+      }
+    });
+
     return () => {
+      clearTimeout(trustTimer);
+      unsubScreenSync();
       unsubStatus();
       unsubStore();
       unsubDl();
@@ -196,6 +271,9 @@ export function LyraProvider({ children }: { children: ReactNode }) {
       unsubTs?.();
       unsubDisc?.();
       unsubTx?.();
+      unsubFrame?.();
+      unsubShareStop?.();
+      unsubScrcpyExit?.();
       store.setPairDecisionResolver?.(null);
       store.setDiscoveryAnnouncer?.(null);
     };

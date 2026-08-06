@@ -6,7 +6,7 @@ test.describe("Lyra web smoke", () => {
     page.on("pageerror", (err) => errors.push(err.message));
 
     await page.goto("/");
-    await expect(page.getByRole("heading", { name: "Devices", exact: true })).toBeVisible({
+    await expect(page.getByRole("main").getByRole("heading", { name: "Devices", exact: true })).toBeVisible({
       timeout: 30_000,
     });
     await expect(page.getByPlaceholder("Search devices…")).toBeVisible();
@@ -19,7 +19,7 @@ test.describe("Lyra web smoke", () => {
 
   test("settings network card and integrity toggle", async ({ page }) => {
     await page.goto("/settings");
-    await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
+    await expect(page.getByRole("main").getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
     await expect(page.getByText("Network", { exact: true })).toBeVisible();
     await expect(page.getByText("Peer server idle")).toBeVisible();
     await expect(page.getByText("Verify transfer integrity")).toBeVisible();
@@ -28,10 +28,11 @@ test.describe("Lyra web smoke", () => {
 
   test("transfers demo resume creates paused session", async ({ page }) => {
     await page.goto("/transfers");
-    await expect(page.getByRole("heading", { name: "Transfers", exact: true })).toBeVisible();
+    await expect(page.getByRole("main").getByRole("heading", { name: "Transfers", exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Demo resume" }).click();
     await expect(page.getByText(/Resumable from|paused|movie\.mp4/i).first()).toBeVisible({
       timeout: 10_000,
     });
   });
 });
+

@@ -68,6 +68,79 @@ describe("createLyraStore", () => {
     assert.ok(store.getState().lastProbeSummary);
   });
 
+  it("adds Tailscale peers with 100.x host and connectionType", async () => {
+    const store = createLyraStore({
+      storage: memoryStorage(),
+      seedDemo: false,
+      platformHint: "web",
+    });
+    await store.hydrate();
+    const added = store.addManualPeer({
+      host: "100.83.145.32",
+      name: "Pixel 6",
+      asTailscale: true,
+    });
+    assert.equal(added.ok, true);
+    if (!added.ok) throw new Error("expected ok");
+    assert.equal(added.device.connectionType, "tailscale");
+    assert.equal(added.device.tailscaleHost, "100.83.145.32");
+    assert.equal(added.device.preferredAddress, "tailscale");
+
+    const updated = store.updateDeviceAddress(added.device.id, {
+      host: "192.168.1.50",
+      tailscaleHost: "100.83.145.32",
+      preferredAddress: "auto",
+    });
+    assert.equal(updated.ok, true);
+    const d = store.getState().devices.find((x) => x.id === added.device.id)!;
+    assert.equal(d.host, "192.168.1.50");
+    assert.equal(d.tailscaleHost, "100.83.145.32");
+    assert.equal(d.connectionType, "both");
+  });
+
+  it("parses host:port in addManualPeer", async () => {
+    const store = createLyraStore({
+      storage: memoryStorage(),
+      seedDemo: false,
+      platformHint: "web",
+    });
+    await store.hydrate();
+    const added = store.addManualPeer({
+      host: "100.83.145.32:53319",
+      asTailscale: true,
+    });
+    assert.equal(added.ok, true);
+    if (!added.ok) throw new Error("expected ok");
+    assert.equal(added.device.host, "100.83.145.32");
+    assert.equal(added.device.port, 53319);
+  });
+
+  it("starts and stops demo screen mirror with frames", async () => {
+    const store = createLyraStore({
+      storage: memoryStorage(),
+      seedDemo: true,
+      platformHint: "web",
+    });
+    await store.hydrate();
+    const peer =
+      store.getState().devices.find((d) => d.id === "demo_pixel") ??
+      store.getState().devices[0]!;
+    const start = await store.startScreenMirror(peer.id, { mode: "demo" });
+    assert.equal(start.ok, true);
+    if (!start.ok) throw new Error("expected start ok");
+    // Allow a couple of frame ticks
+    await new Promise((r) => setTimeout(r, 250));
+    const session = store.getState().screenSessions[peer.id];
+    assert.ok(session);
+    assert.equal(session!.status, "active");
+    assert.equal(session!.mode, "demo");
+    assert.ok(session!.frameCount >= 1);
+    assert.ok(session!.lastFrameDataUrl?.startsWith("data:"));
+    await store.stopScreenMirror(peer.id);
+    const ended = store.getState().screenSessions[peer.id];
+    assert.equal(ended?.status, "ended");
+  });
+
   it("respects discovery disabled", async () => {
     const store = createLyraStore({
       storage: memoryStorage(),

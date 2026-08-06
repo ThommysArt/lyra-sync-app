@@ -13,7 +13,7 @@
   },
   "scripts": {
     "check-types": "tsc --noEmit",
-    "test": "tsx --test src/auth.test.ts src/integrity.test.ts src/node/peer-server.test.ts src/node/discovery.test.ts",
+    "test": "tsx --test src/auth.test.ts src/integrity.test.ts src/peer-http-core.test.ts src/node/peer-server.test.ts src/node/discovery.test.ts",
     "peer-server": "tsx src/node/cli.ts"
   },
   "dependencies": {

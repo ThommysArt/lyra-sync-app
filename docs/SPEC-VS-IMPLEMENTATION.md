@@ -211,7 +211,8 @@ Screenshots: `docs/verification-artifacts/native_*.png`
 
 ### Non-goals (correctly absent)
 
-Accounts/cloud backend, continuous folder sync, full remote desktop, SMS/call mirroring, OS network mounts, screen mirroring — **aligned** (not built).
+Accounts/cloud backend, continuous folder sync, full remote desktop, SMS/call mirroring, OS network mounts — **aligned** (not built).
+Screen mirroring — **partial (2026-07-22):** demo/P2P protocol + Xcode-style bezel UI + optional scrcpy on desktop (Sefirah-style).
 
 ---
 

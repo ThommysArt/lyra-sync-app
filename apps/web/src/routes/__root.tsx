@@ -1,7 +1,13 @@
 import { Toaster } from "@lyra-sync-app/ui/components/sonner";
-import { HeadContent, Outlet, createRootRouteWithContext } from "@tanstack/react-router";
+import {
+  HeadContent,
+  Outlet,
+  createRootRouteWithContext,
+  useRouterState,
+} from "@tanstack/react-router";
 
 import { AppShell } from "@/components/app-shell";
+import { ScreenShareHost } from "@/components/screen-share-host";
 import { ThemeProvider } from "@/components/theme-provider";
 import { LyraProvider } from "@/lib/lyra";
 
@@ -36,12 +42,25 @@ function RootComponent() {
         storageKey="lyra-ui-theme"
       >
         <LyraProvider>
-          <AppShell>
-            <Outlet />
-          </AppShell>
+          <ShellOrMirror />
+          <ScreenShareHost />
           <Toaster richColors position="bottom-right" />
         </LyraProvider>
       </ThemeProvider>
     </>
+  );
+}
+
+/** Mirror windows skip the sidebar chrome for a clean device cast. */
+function ShellOrMirror() {
+  const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const isMirror = pathname.startsWith("/mirror/");
+  if (isMirror) {
+    return <Outlet />;
+  }
+  return (
+    <AppShell>
+      <Outlet />
+    </AppShell>
   );
 }

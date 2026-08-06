@@ -24,7 +24,7 @@ export type LyraProviderProps = {
   children: ReactNode;
   storage?: StorageLike | null;
   seedDemo?: boolean;
-  platformHint?: "web" | "native";
+  platformHint?: "web" | "native" | "android" | "ios";
   /** Optional loading UI while hydrate() runs */
   fallback?: ReactNode;
   /**

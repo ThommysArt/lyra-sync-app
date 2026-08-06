@@ -40,22 +40,23 @@ export function isLikelyTailscaleHost(host: string): boolean {
 /**
  * Probe a peer HTTP endpoint (/lyra/info).
  * Works from browser (CORS-enabled servers) and Node.
+ *
+ * Uses transport-level timeoutMs (starts after native socket slot is acquired)
+ * so concurrent discovery scans do not abort probes that are only queued.
  */
 export async function probePeer(
   endpoint: PeerUrl,
-  opts?: { timeoutMs?: number; preferTailscale?: boolean },
+  opts?: { timeoutMs?: number; preferTailscale?: boolean; lane?: number },
 ): Promise<ProbeResult> {
   const host = endpoint.host.trim();
   const port = endpoint.port ?? LYRA_DEFAULT_PORT;
   const timeoutMs = opts?.timeoutMs ?? 2500;
   const started = Date.now();
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const info = await fetchPeerInfo(
       { host, port, protocol: endpoint.protocol ?? "http" },
-      { signal: controller.signal },
+      { timeoutMs, lane: opts?.lane },
     );
     const latencyMs = Date.now() - started;
     if (!info.ok) {
@@ -83,8 +84,6 @@ export async function probePeer(
       error: e instanceof Error ? e.message : String(e),
       latencyMs: Date.now() - started,
     };
-  } finally {
-    clearTimeout(timer);
   }
 }
 
@@ -179,6 +178,12 @@ export function expandLanCandidates(
       add("127.0.0.1", port);
       continue;
     }
+    // Tailscale CGNAT is 100.64/10 — a single /24 expansion almost never covers
+    // other tailnet peers (different 100.x.y). Only probe the seed itself;
+    // pair / manual add / MagicDNS scan supplies the rest.
+    if (a === 100 && b >= 64 && b <= 127) {
+      continue;
+    }
     for (let d = 1; d <= 254; d++) {
       add(`${a}.${b}.${c}.${d}`, port);
     }
@@ -186,18 +191,49 @@ export function expandLanCandidates(
   return [...out.values()];
 }
 
+/** Common Lyra peer ports across variants + EADDRINUSE fallbacks. */
+export const LYRA_SCAN_PORTS = [
+  LYRA_DEFAULT_PORT, // 53317 dev
+  LYRA_DEFAULT_PORT + 2, // 53319 multi-instance
+  LYRA_DEFAULT_PORT + 4, // 53321 multi-instance
+  53327, // preview
+  53337, // production
+] as const;
+
 /**
  * HTTP subnet scan (LocalSend HttpScanDiscovery).
  * Probes /lyra/info on every host in the same /24 as each seed address.
  * Used as a reliable fallback when UDP multicast is blocked or flaky.
+ *
+ * Strategy (mobile-friendly):
+ * 1. Full /24 on a small set of "expand" ports (primary + default) — finds LAN peers fast
+ * 2. Exact seed hosts + .1 gateway of each /24 on the full port matrix — catches
+ *    multi-instance desktops (53319/53321) and variants without exploding the scan
+ *
+ * Timeout is transport-level (starts after native socket slot acquisition).
  */
 export async function scanLanForPeers(input: {
   /** Seed IPs (local addresses or known peers) — each expands to /24 */
   seedHosts: string[];
+  /** Primary port (also used when `ports` is omitted) */
   port?: number;
+  /** Optional multi-port scan for exact seeds / gateways (capped). */
+  ports?: number[];
+  /**
+   * Ports used for full /24 expansion. Defaults to primary + default only so
+   * mobile TCP scans finish in a reasonable time. Extra variant ports are still
+   * tried on exact seed IPs and gateways.
+   */
+  expandPorts?: number[];
   timeoutMs?: number;
   concurrency?: number;
   localDeviceId?: string;
+  /**
+   * Do not open TCP to these host:port pairs (own peer server).
+   * Scanning ourselves floods the native TCP server and races write/destroy
+   * (Android: IllegalArgumentException No socket with id).
+   */
+  skipEndpoints?: Array<{ host: string; port?: number }>;
 }): Promise<
   Array<{
     host: string;
@@ -212,14 +248,77 @@ export async function scanLanForPeers(input: {
     };
   }>
 > {
-  const port = input.port ?? LYRA_DEFAULT_PORT;
-  const seeds = input.seedHosts
-    .map((h) => h.trim())
-    .filter(Boolean)
-    .map((host) => ({ host, port }));
+  const primaryPort = input.port ?? LYRA_DEFAULT_PORT;
+  const allPorts = [
+    ...new Set(
+      (input.ports?.length ? input.ports : [...LYRA_SCAN_PORTS, primaryPort])
+        .map((p) => Number(p))
+        .filter((p) => p > 0 && p <= 65535),
+    ),
+  ].slice(0, 6);
+  if (allPorts.length === 0) allPorts.push(primaryPort);
+
+  const expandPorts = [
+    ...new Set(
+      (input.expandPorts?.length
+        ? input.expandPorts
+        : [primaryPort, LYRA_DEFAULT_PORT]
+      )
+        .map((p) => Number(p))
+        .filter((p) => p > 0 && p <= 65535),
+    ),
+  ].slice(0, 3);
+  if (expandPorts.length === 0) expandPorts.push(primaryPort);
+
+  const seeds = input.seedHosts.map((h) => h.trim()).filter(Boolean);
   if (seeds.length === 0) return [];
 
-  const candidates = expandLanCandidates(seeds, port);
+  const skip = new Set<string>();
+  for (const ep of input.skipEndpoints ?? []) {
+    const h = ep.host?.trim();
+    if (!h) continue;
+    const p = ep.port && ep.port > 0 ? ep.port : primaryPort;
+    skip.add(`${h}:${p}`);
+    // Also skip all scan ports on our own host
+    for (const sp of allPorts) skip.add(`${h}:${sp}`);
+    for (const sp of expandPorts) skip.add(`${h}:${sp}`);
+  }
+
+  const candidates: PeerUrl[] = [];
+  const seenEp = new Set<string>();
+  const addEp = (host: string, port: number) => {
+    const h = host.trim();
+    if (!h) return;
+    const key = `${h}:${port}`;
+    if (seenEp.has(key) || skip.has(key)) return;
+    seenEp.add(key);
+    candidates.push({ host: h, port });
+  };
+
+  // Exact seeds + full port matrix first (high value: known peers / our IP / TS)
+  for (const seed of seeds) {
+    for (const p of allPorts) addEp(seed, p);
+  }
+
+  // Expand private /24s for LAN discovery
+  const hostCandidates = expandLanCandidates(
+    seeds.map((host) => ({ host, port: primaryPort })),
+    primaryPort,
+  );
+  const slash24Gateways = new Set<string>();
+  for (const ep of hostCandidates) {
+    const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(ep.host);
+    if (m) {
+      slash24Gateways.add(`${m[1]}.${m[2]}.${m[3]}.1`);
+    }
+    // Full /24 only on expandPorts (not every variant)
+    for (const p of expandPorts) addEp(ep.host, p);
+  }
+  // Gateway + all ports: multi-instance desktops often share the LAN with us
+  for (const gw of slash24Gateways) {
+    for (const p of allPorts) addEp(gw, p);
+  }
+
   const concurrency = Math.max(1, input.concurrency ?? 50);
   const timeoutMs = input.timeoutMs ?? 500;
   const found: Array<{
@@ -242,21 +341,22 @@ export async function scanLanForPeers(input: {
       const i = next++;
       const ep = candidates[i]!;
       const host = ep.host.trim();
-      const p = ep.port ?? port;
+      const p = ep.port ?? primaryPort;
       try {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        // Transport-level timeout only — must not start before socket slot is free
+        // (native TCP is concurrency-limited; lane SCAN yields to interactive).
         const info = await fetchPeerInfo(
           { host, port: p, protocol: "http" },
-          { signal: controller.signal },
-        ).finally(() => clearTimeout(timer));
+          { timeoutMs, lane: 2 },
+        );
         if (!info.ok) continue;
         if (input.localDeviceId && info.identity.id === input.localDeviceId) continue;
         if (seen.has(info.identity.id)) continue;
         seen.add(info.identity.id);
+        // Prefer the address we actually connected to (not a possibly-stale advert)
         found.push({
-          host: info.host && info.host !== "0.0.0.0" ? info.host : host,
-          port: info.port && info.port > 0 ? info.port : p,
+          host,
+          port: info.port && info.port > 0 && info.port === p ? info.port : p,
           identity: {
             id: info.identity.id,
             name: info.identity.name,
@@ -304,12 +404,10 @@ export async function findPeerByPairingCode(input: {
       const port = ep.port ?? LYRA_DEFAULT_PORT;
       if (!host) continue;
       try {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), timeoutMs);
         const info = await fetchPeerInfo(
           { host, port, protocol: ep.protocol ?? "http" },
-          { signal: controller.signal },
-        ).finally(() => clearTimeout(timer));
+          { timeoutMs, lane: 2 },
+        );
         if (!info.ok || !info.pairing) continue;
         if (info.pairing.codeHash !== input.codeHash) continue;
         if (info.pairing.expiresAt < Date.now()) continue;

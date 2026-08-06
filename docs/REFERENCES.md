@@ -35,8 +35,9 @@ git clone --depth 1 https://github.com/localsend/localsend.git ~/Works/examples/
 | Device linking before clipboard | Explicit trust | Pairing + `authSecret` before sealed clipboard |
 | Storage access | Browse + pull | Smart folders + `fs_list` (real OS on desktop peer) |
 | Lightweight device status | Status channel | Protocol `status` type (periodic still light) |
+| Screen mirroring | scrcpy + ADB TCP/IP | Protocol `screen_share_*` / `screen_frame` + demo bezel UI; desktop can spawn scrcpy (`--tcpip=` Tailscale IP) |
 
-**What we did not take:** C# / Android source trees as dependencies. No Sefirah code is vendored.
+**What we did not take:** C# / Android source trees as dependencies. No Sefirah code is vendored. Scrcpy remains an optional external binary (same as Sefirah).
 
 ## Policy
 

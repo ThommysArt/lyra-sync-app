@@ -21,6 +21,13 @@ contextBridge.exposeInMainWorld("lyraDesktop", {
   revokeDevice: (deviceId) => ipcRenderer.invoke("lyra:revoke-device", deviceId),
   quit: () => ipcRenderer.invoke("lyra:quit"),
   scanTailscale: () => ipcRenderer.invoke("lyra:scan-tailscale"),
+  startScrcpy: (opts) => ipcRenderer.invoke("lyra:start-scrcpy", opts),
+  stopScrcpy: (deviceId) => ipcRenderer.invoke("lyra:stop-scrcpy", deviceId),
+  checkAdb: (opts) => ipcRenderer.invoke("lyra:check-adb", opts ?? {}),
+  openMirrorWindow: (opts) => ipcRenderer.invoke("lyra:open-mirror-window", opts),
+  resizeMirrorWindow: (opts) => ipcRenderer.invoke("lyra:resize-mirror-window", opts),
+  closeMirrorWindow: (deviceId) => ipcRenderer.invoke("lyra:close-mirror-window", deviceId),
+  respondScreenShare: (payload) => ipcRenderer.invoke("lyra:screen-share-decision", payload),
   // Custom window chrome (frameless shell)
   windowMinimize: () => ipcRenderer.invoke("lyra:window-minimize"),
   windowMaximizeToggle: () => ipcRenderer.invoke("lyra:window-maximize-toggle"),
@@ -70,5 +77,25 @@ contextBridge.exposeInMainWorld("lyraDesktop", {
     const listener = (_event, data) => handler(data);
     ipcRenderer.on("lyra:transfer-complete", listener);
     return () => ipcRenderer.removeListener("lyra:transfer-complete", listener);
+  },
+  onScreenShareRequest: (handler) => {
+    const listener = (_event, payload) => handler(payload);
+    ipcRenderer.on("lyra:screen-share-request", listener);
+    return () => ipcRenderer.removeListener("lyra:screen-share-request", listener);
+  },
+  onScreenFrame: (handler) => {
+    const listener = (_event, payload) => handler(payload);
+    ipcRenderer.on("lyra:screen-frame", listener);
+    return () => ipcRenderer.removeListener("lyra:screen-frame", listener);
+  },
+  onScreenShareStop: (handler) => {
+    const listener = (_event, payload) => handler(payload);
+    ipcRenderer.on("lyra:screen-share-stop", listener);
+    return () => ipcRenderer.removeListener("lyra:screen-share-stop", listener);
+  },
+  onScrcpyExit: (handler) => {
+    const listener = (_event, payload) => handler(payload);
+    ipcRenderer.on("lyra:scrcpy-exit", listener);
+    return () => ipcRenderer.removeListener("lyra:scrcpy-exit", listener);
   },
 });

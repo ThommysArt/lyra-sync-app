@@ -72,14 +72,52 @@ export const PairedDeviceSchema = z.object({
   host: z.string().optional(),
   port: z.number().int().positive().optional(),
   /**
+   * Optional alternate Tailscale / MagicDNS address (100.x or *.ts.net).
+   * Used when LAN host is stale or devices are only reachable over Tailscale.
+   */
+  tailscaleHost: z.string().optional(),
+  /** Preferred connection path when both LAN and Tailscale are set. */
+  preferredAddress: z.enum(["auto", "lan", "tailscale"]).optional(),
+  /**
    * Pairing-derived shared secret for wire auth (never leave device storage).
    * Omitted for demo-seeded peers until a real handshake runs.
    */
   authSecret: z.string().optional(),
   /** Last successful probe latency in ms */
   lastProbeLatencyMs: z.number().nonnegative().optional(),
+  /**
+   * Last host:port that successfully answered /lyra/info or completed auth.
+   * Always tried first for clipboard/transfers so we don't thrash stale LAN/TS IPs.
+   */
+  lastReachableHost: z.string().optional(),
+  lastReachablePort: z.number().int().positive().optional(),
+  /**
+   * Optional ADB serial / host:port for scrcpy (Sefirah-style Android mirror).
+   * Example: `100.83.145.32:5555` over Tailscale.
+   */
+  adbSerial: z.string().optional(),
 });
 export type PairedDevice = z.infer<typeof PairedDeviceSchema>;
+
+/** Active or recent screen-mirror session (viewer or source). */
+export const ScreenSessionSchema = z.object({
+  sessionId: z.string(),
+  deviceId: z.string(),
+  role: z.enum(["viewer", "source"]),
+  status: z.enum(["requesting", "active", "stopping", "error", "ended"]),
+  mode: z.enum(["demo", "p2p", "scrcpy", "unavailable"]),
+  width: z.number().int().positive().optional(),
+  height: z.number().int().positive().optional(),
+  fps: z.number().nonnegative().optional(),
+  /** Latest frame as data URL for UI rendering. */
+  lastFrameDataUrl: z.string().optional(),
+  lastFrameAt: z.number().int().nonnegative().optional(),
+  frameCount: z.number().int().nonnegative().default(0),
+  error: z.string().optional(),
+  startedAt: z.number().int().nonnegative(),
+  updatedAt: z.number().int().nonnegative(),
+});
+export type ScreenSession = z.infer<typeof ScreenSessionSchema>;
 
 /** Well-known peer listen endpoint (P2 transport). */
 export const PeerEndpointSchema = z.object({
@@ -102,6 +140,16 @@ export const ClipboardItemSchema = z.object({
   sourceDeviceName: z.string(),
   createdAt: z.number().int().nonnegative(),
   pinned: z.boolean(),
+  /**
+   * Outbound delivery status for items this device pushed.
+   * Incoming items use `local` / omitted.
+   */
+  deliveryStatus: z
+    .enum(["pending", "sending", "sent", "failed", "local"])
+    .optional(),
+  deliveryError: z.string().optional(),
+  /** Device ids that successfully received this item over the wire */
+  deliveredTo: z.array(z.string()).optional(),
 });
 export type ClipboardItem = z.infer<typeof ClipboardItemSchema>;
 
@@ -201,9 +249,21 @@ export const PairingPayloadSchema = z.object({
   token: z.string(),
   host: z.string().optional(),
   port: z.number().int().optional(),
+  /** Alternate Tailscale / MagicDNS address when host is LAN (or vice versa). */
+  tailscaleHost: z.string().optional(),
   expiresAt: z.number().int().nonnegative(),
 });
 export type PairingPayload = z.infer<typeof PairingPayloadSchema>;
+
+/** Delivery state for outbound clipboard items (per device or aggregate). */
+export const ClipboardDeliveryStatusSchema = z.enum([
+  "pending",
+  "sending",
+  "sent",
+  "failed",
+  "local",
+]);
+export type ClipboardDeliveryStatus = z.infer<typeof ClipboardDeliveryStatusSchema>;
 
 export const AppSettingsSchema = z.object({
   clipboardHistoryLimit: z.number().int().min(5).max(200).default(40),
@@ -222,6 +282,17 @@ export const AppSettingsSchema = z.object({
   theme: z.enum(["system", "light", "dark"]).default("system"),
   discoveryEnabled: z.boolean().default(true),
   tailscaleEnabled: z.boolean().default(false),
+  /**
+   * Path to scrcpy binary for high-quality Android mirroring (Sefirah-style).
+   * Empty = auto-detect `scrcpy` on PATH.
+   */
+  scrcpyPath: z.string().optional(),
+  /** Extra scrcpy CLI args (advanced). */
+  scrcpyExtraArgs: z.string().optional(),
+  /** Soft max FPS for in-app P2P screen share. */
+  screenShareFps: z.number().int().min(1).max(30).default(12),
+  /** Max long-edge for P2P screen frames. */
+  screenShareMaxEdge: z.number().int().min(360).max(1920).default(720),
   /** Verify SHA-256 after transfers complete (desktop/native peer path) */
   verifyTransferIntegrity: z.boolean().default(true),
   /** Preferred local peer listen port (Electron / Node peer server) */

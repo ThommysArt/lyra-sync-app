@@ -7,3 +7,15 @@ export * from "./crypto-util";
 export * from "./seal";
 export * from "./transfer-wire";
 export * from "./message-handlers";
+export * from "./peer-http-core";
+export * from "./httpCodec";
+export * from "./transport/priorityQueue";
+export {
+  setHttpTransport,
+  getHttpTransport,
+  hasCustomHttpTransport,
+  fetchAsTransport,
+  type HttpTransport,
+  type HttpRequestInit,
+  type HttpResponse,
+} from "./http-transport";

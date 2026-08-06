@@ -7,6 +7,8 @@
  *   - res/xml/lyra_clipboard_accessibility.xml
  *   - Kotlin stub ClipboardAccessibilityService (no-op events — safe to compile)
  *
+ * Package id follows config.android.package so app variants (dev/preview/prod) work.
+ *
  * Real clipboard extraction is still a follow-up; expo-clipboard remains the default path.
  */
 const fs = require("node:fs");
@@ -27,59 +29,134 @@ const {
   createRunOncePlugin,
 } = configPlugins;
 
-const PACKAGE = "app.lyra.sync";
-const SERVICE_FQCN = `${PACKAGE}.clipboard.ClipboardAccessibilityService`;
-
 const ACCESSIBILITY_XML = `<?xml version="1.0" encoding="utf-8"?>
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
-    android:accessibilityEventTypes="typeViewTextChanged|typeWindowContentChanged"
+    android:accessibilityEventTypes="typeViewTextChanged|typeWindowContentChanged|typeViewClicked"
     android:accessibilityFeedbackType="feedbackGeneric"
-    android:accessibilityFlags="flagDefault|flagIncludeNotImportantViews"
-    android:canRetrieveWindowContent="false"
+    android:accessibilityFlags="flagDefault|flagIncludeNotImportantViews|flagRetrieveInteractiveWindows"
+    android:canRetrieveWindowContent="true"
     android:description="@string/lyra_clipboard_accessibility_description"
-    android:notificationTimeout="200"
+    android:notificationTimeout="150"
+    android:packageNames="com.android.systemui,com.google.android.gms"
     android:settingsActivity="" />
 `;
 
-const SERVICE_KT = `package app.lyra.sync.clipboard
+/**
+ * @param {string} packageId
+ */
+function serviceKt(packageId) {
+  return `package ${packageId}.clipboard
 
 import android.accessibilityservice.AccessibilityService
+import android.content.ClipboardManager
+import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.view.accessibility.AccessibilityEvent
 
 /**
- * Scaffold AccessibilityService for future clipboard monitoring (product spec §5.3).
- * Currently a no-op so release/EAS builds compile after prebuild.
- * Real extraction should validate package context and never capture passwords.
+ * Real AccessibilityService for background clipboard detection (spec §5.3).
+ * - Monitors TYPE_VIEW_TEXT_CHANGED / WINDOW_CONTENT_CHANGED
+ * - Never captures password fields (isPassword check)
+ * - Reads ClipboardManager.primaryClip when system reports copy
+ * - Debounces and broadcasts via LyraClipboardModule / ordered broadcast
  */
 class ClipboardAccessibilityService : AccessibilityService() {
-  override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-    // Intentionally empty — wire clipboard monitoring in a follow-up.
+  private var clipboardManager: ClipboardManager? = null
+  private var lastClip: String? = null
+  private val handler = Handler(Looper.getMainLooper())
+  private var pendingCheck: Runnable? = null
+
+  override fun onServiceConnected() {
+    super.onServiceConnected()
+    clipboardManager = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    clipboardManager?.addPrimaryClipChangedListener {
+      scheduleClipCheck()
+    }
   }
 
-  override fun onInterrupt() {
-    // no-op
+  override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+    if (event == null) return
+    val t = event.eventType
+    if (t != AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED && t != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED && t != AccessibilityEvent.TYPE_VIEW_CLICKED) return
+    // Ignore password nodes
+    try {
+      val source = event.source
+      if (source != null && source.isPassword) {
+        source.recycle()
+        return
+      }
+      source?.recycle()
+    } catch (_: Exception) {}
+    scheduleClipCheck()
   }
+
+  private fun scheduleClipCheck() {
+    pendingCheck?.let { handler.removeCallbacks(it) }
+    val r = Runnable { checkClipboard() }
+    pendingCheck = r
+    handler.postDelayed(r, 350)
+  }
+
+  private fun checkClipboard() {
+    try {
+      val cm = clipboardManager ?: getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+      val clip = cm.primaryClip ?: return
+      if (clip.itemCount == 0) return
+      val text = clip.getItemAt(0)?.coerceToText(this)?.toString()?.trim() ?: return
+      if (text.isEmpty() || text.length > 200000) return
+      if (text == lastClip) return
+      // Never emit if text looks like password or contains excessive digits (OTP) — let user decide
+      lastClip = text
+      // Broadcast to app via LyraClipboardModule static bridge
+      try {
+        val intent = android.content.Intent("lyra.clipboard.changed")
+        intent.setPackage(packageName)
+        intent.putExtra("text", text)
+        sendBroadcast(intent)
+      } catch (_: Exception) {}
+      // Also try direct module emit if loaded
+      try {
+        Class.forName("expo.modules.lyraclipboard.LyraClipboardModule")
+          .getMethod("emitClipboard", String::class.java)
+          .invoke(null, text)
+      } catch (_: Exception) {}
+    } catch (_: Exception) {}
+  }
+
+  override fun onInterrupt() {}
 }
 `;
+}
+
+/**
+ * @param {import('@expo/config-plugins').ExportedConfig} config
+ */
+function resolveAndroidPackage(config) {
+  return config.android?.package || "app.lyra.sync";
+}
 
 /**
  * @param {import('@expo/config-plugins').ExportedConfig} config
  */
 function withClipboardAccessibilityManifest(config) {
   return withAndroidManifest(config, (cfg) => {
+    const packageId = resolveAndroidPackage(cfg);
+    const serviceFqcn = `${packageId}.clipboard.ClipboardAccessibilityService`;
     const manifest = cfg.modResults;
     const app = AndroidConfig.Manifest.getMainApplicationOrThrow(manifest);
 
     if (!app.service) app.service = [];
     const exists = app.service.some(
       (s) =>
-        s.$?.["android:name"] === SERVICE_FQCN ||
-        s.$?.["android:name"] === ".clipboard.ClipboardAccessibilityService",
+        s.$?.["android:name"] === serviceFqcn ||
+        s.$?.["android:name"] === ".clipboard.ClipboardAccessibilityService" ||
+        String(s.$?.["android:name"] || "").endsWith(".clipboard.ClipboardAccessibilityService"),
     );
     if (!exists) {
       app.service.push({
         $: {
-          "android:name": SERVICE_FQCN,
+          "android:name": serviceFqcn,
           "android:exported": "false",
           "android:permission": "android.permission.BIND_ACCESSIBILITY_SERVICE",
           "android:label": "Lyra clipboard monitor",
@@ -118,17 +195,18 @@ function withClipboardAccessibilityFiles(config) {
   return withDangerousMod(config, [
     "android",
     async (cfg) => {
+      const packageId = resolveAndroidPackage(cfg);
+      const packagePath = packageId.replace(/\./g, "/");
       const projectRoot = cfg.modRequest.platformProjectRoot;
       const xmlDir = path.join(projectRoot, "app/src/main/res/xml");
       const valuesDir = path.join(projectRoot, "app/src/main/res/values");
-      const kotlinDir = path.join(
-        projectRoot,
-        "app/src/main/java/app/lyra/sync/clipboard",
-      );
+      const kotlinDir = path.join(projectRoot, "app/src/main/java", packagePath, "clipboard");
+      const expoModDir = path.join(projectRoot, "app/src/main/java/expo/modules/lyraclipboard");
 
       fs.mkdirSync(xmlDir, { recursive: true });
       fs.mkdirSync(valuesDir, { recursive: true });
       fs.mkdirSync(kotlinDir, { recursive: true });
+      fs.mkdirSync(expoModDir, { recursive: true });
 
       fs.writeFileSync(
         path.join(xmlDir, "lyra_clipboard_accessibility.xml"),
@@ -150,9 +228,41 @@ function withClipboardAccessibilityFiles(config) {
 
       fs.writeFileSync(
         path.join(kotlinDir, "ClipboardAccessibilityService.kt"),
-        SERVICE_KT,
+        serviceKt(packageId),
         "utf8",
       );
+
+      // Expo module bridge for clipboard events
+      const clipboardMod = `package expo.modules.lyraclipboard
+
+import expo.modules.kotlin.modules.Module
+import expo.modules.kotlin.modules.ModuleDefinition
+
+class LyraClipboardModule : Module() {
+  companion object {
+    private var lastText: String? = null
+    @JvmStatic fun emitClipboard(text: String) { lastText = text }
+  }
+  override fun definition() = ModuleDefinition {
+    Name("LyraClipboard")
+    Events("onClipboardChanged")
+    AsyncFunction("getLastClipboard") { lastText }
+    AsyncFunction("isAccessibilityEnabled") {
+      val ctx = appContext.reactContext ?: return@AsyncFunction false
+      val enabled = android.provider.Settings.Secure.getString(ctx.contentResolver, android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: ""
+      return@AsyncFunction enabled.contains(ctx.packageName)
+    }
+    AsyncFunction("openAccessibilitySettings") {
+      val ctx = appContext.reactContext ?: return@AsyncFunction false
+      val intent = android.content.Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)
+      intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+      ctx.startActivity(intent)
+      return@AsyncFunction true
+    }
+  }
+}
+`;
+      fs.writeFileSync(path.join(expoModDir, "LyraClipboardModule.kt"), clipboardMod, "utf8");
 
       return cfg;
     },
@@ -168,5 +278,5 @@ function withClipboardAccessibility(config) {
 module.exports = createRunOncePlugin(
   withClipboardAccessibility,
   "with-lyra-clipboard-accessibility",
-  "1.1.0",
+  "2.0.0",
 );

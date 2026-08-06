@@ -1,0 +1,4 @@
+release/
+dist-electron/
+electron-builder.variant.json
+*.AppImage
