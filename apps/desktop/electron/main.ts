@@ -1745,6 +1745,43 @@ app.whenReady().then(async () => {
     };
   });
 
+  // SQLite KV store (replaces localStorage for Electron)
+  try {
+    const { kvGet, kvSet, kvRemove, kvGetAll, closeDb } = await import("./sqlite-store.js");
+    ipcMain.handle("lyra:kv-get", (_e, key: string) => {
+      if (!key) return null;
+      const v = kvGet(key);
+      return v;
+    });
+    ipcMain.handle("lyra:kv-set", (_e, key: string, value: string) => {
+      if (!key) return { ok: false, error: "key required" };
+      try {
+        kvSet(key, value);
+        return { ok: true };
+      } catch (e) {
+        console.error("[lyra sqlite] kv-set failed", e);
+        return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      }
+    });
+    ipcMain.handle("lyra:kv-remove", (_e, key: string) => {
+      kvRemove(key);
+      return { ok: true };
+    });
+    ipcMain.handle("lyra:kv-getAll", () => {
+      return kvGetAll();
+    });
+    ipcMain.handle("lyra:kv-keys", () => {
+      const all = kvGetAll();
+      return Object.keys(all);
+    });
+    app.on("before-quit", () => {
+      try { closeDb(); } catch {}
+    });
+    console.log("[lyra sqlite] IPC handlers registered");
+  } catch (e) {
+    console.error("[lyra sqlite] failed to init", e instanceof Error ? e.message : String(e));
+  }
+
   // Show the window first so a peer-port conflict can't leave users with no UI.
   createWindow();
   void startNetworking().catch((e) => {

@@ -27,15 +27,15 @@ export function adaptiveChunkSize(opts: {
   if (opts.preferred && opts.preferred >= MIN_CHUNK_SIZE && opts.preferred <= MAX_CHUNK_SIZE) {
     return opts.preferred;
   }
-  // On mobile without SubtleCrypto (JS SHA) keep chunks smaller to avoid per-chunk CPU stutter
-  const slowCrypto = !hasSubtleSync();
-  if (opts.totalBytes >= 100 * 1024 * 1024) return slowCrypto ? 512 * 1024 : 1024 * 1024;
-  if (opts.totalBytes >= 20 * 1024 * 1024) return 512 * 1024;
-  if (opts.totalBytes >= 5 * 1024 * 1024) return slowCrypto ? 512 * 1024 : 1024 * 1024;
-  if (opts.totalBytes >= 1024 * 1024) return 512 * 1024;
-  if (opts.availableRamHint && opts.availableRamHint < 400 * 1024 * 1024) return 256 * 1024;
+  // With AES-GCM (v1b) crypto is fast — use larger chunks for LAN throughput.
+  // Keep smaller chunks only when RAM is critically low or RTT is high.
+  if (opts.availableRamHint && opts.availableRamHint < 400 * 1024 * 1024) return 512 * 1024;
   if (opts.rttMsHint && opts.rttMsHint > 120) return 512 * 1024;
-  return slowCrypto ? 512 * 1024 : DEFAULT_CHUNK_SIZE;
+  if (opts.totalBytes >= 100 * 1024 * 1024) return 2 * 1024 * 1024;
+  if (opts.totalBytes >= 20 * 1024 * 1024) return 1 * 1024 * 1024;
+  if (opts.totalBytes >= 5 * 1024 * 1024) return 1 * 1024 * 1024;
+  if (opts.totalBytes >= 1024 * 1024) return 1 * 1024 * 1024;
+  return hasSubtleSync() ? 1 * 1024 * 1024 : 512 * 1024;
 }
 
 function estimateAvailableRam(): number | undefined {
@@ -112,7 +112,8 @@ export async function sendFilesOverWire(
     rttMsHint: input.rttMsHint,
     preferred: input.chunkSize,
   });
-  const defaultWindow = hasSubtleSync() ? DEFAULT_WINDOW_SIZE : 4;
+  // LAN: larger window for throughput; AES-GCM is fast so we can pipeline more.
+  const defaultWindow = hasSubtleSync() ? 12 : 8;
   const windowSize = Math.max(1, Math.min(16, input.windowSize ?? defaultWindow));
 
   const offerFiles: TransferFile[] = input.files.map((f) => ({

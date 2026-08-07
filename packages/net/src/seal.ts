@@ -129,27 +129,26 @@ async function sealJsonV1(sharedSecret: string, plaintext: Uint8Array): Promise<
   const cipher = new Uint8Array(cipherBuf);
   return `v1b.${bytesToB64(iv)}.${bytesToB64(cipher)}`;
 }
-// Keep for future v1b negotiation — prevent noUnusedLocals error
-void sealJsonV1;
 
-/** Sealed blob: `v1.<ivHex>.<cipherHex>` (AES-GCM) or `v2` (pure-JS) or `v0` (legacy)
- * For now always use v2 for cross-platform compatibility (mobile without SubtleCrypto cannot open v1b).
- * Keep v1b open support for future negotiation when both sides advertise v1b capability.
- */
+
+/** Sealed blob: `v1b` (AES-GCM base64, preferred) or `v2` (pure-JS hex fallback) or `v0` (legacy). */
 export async function sealJson(
   sharedSecret: string,
   value: unknown,
 ): Promise<string> {
   const plaintext = textEncoder.encode(JSON.stringify(value));
-  // Always use v2 for now — ensures desktop<->mobile interop without requiring quick-crypto prebuild
+  // Prefer hardware AES-GCM (v1b) — ~50× faster and 2× smaller than v2 hex.
+  // Falls back to v2 only when WebCrypto is unavailable (should not happen with quick-crypto polyfill).
+  if (hasSubtle()) {
+    try {
+      return await sealJsonV1(sharedSecret, plaintext);
+    } catch (e) {
+      console.error("[lyra seal] AES-GCM seal failed, falling back to v2", e instanceof Error ? e.message : String(e));
+    }
+  } else {
+    console.warn("[lyra seal] WebCrypto unavailable — using slow v2 seal (install react-native-quick-crypto)");
+  }
   return sealJsonV2(sharedSecret, plaintext);
-  // TODO: enable v1b when both peers support it (e.g., via transfer_offer capability flag)
-  // if (hasSubtle()) {
-  //   try {
-  //     return await sealJsonV1(sharedSecret, plaintext);
-  //   } catch {}
-  // }
-  // return sealJsonV2(sharedSecret, plaintext);
 }
 
 export async function openSealedJson(

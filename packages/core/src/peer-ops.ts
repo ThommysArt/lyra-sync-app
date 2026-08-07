@@ -110,6 +110,10 @@ export function deviceEndpointCandidates(
     push(lanHost);
     push(hostField);
   }
+  // Always include loopback for same-host testing (2 Electron instances on one laptop)
+  // — ensures 127.0.0.1:53317/53319/53321 candidates are probed even when device.host is LAN.
+  push("127.0.0.1");
+  push("localhost");
 
   // Keep the matrix small but cover variants + multi-instance offsets
   // (desktop often binds 53319/53321 when 53317 is taken by LocalSend etc.)
@@ -125,11 +129,15 @@ export function deviceEndpointCandidates(
         LYRA_DEFAULT_PORT + 2,
         LYRA_DEFAULT_PORT + 4,
         53327,
+        53319,
+        53321,
+        53329,
         53337,
+        53339,
         ...(opts?.extraPorts ?? []),
       ].filter((p) => typeof p === "number" && p > 0 && p <= 65535),
     ),
-  ].slice(0, 6);
+  ].slice(0, 8);
   const out: PeerUrl[] = [];
   // Prefer sticky host:port combo first
   if (device.lastReachableHost && device.lastReachablePort) {
@@ -207,38 +215,64 @@ export async function ensureSession(input: {
   const candidates = deviceEndpointCandidates(input.device);
   if (candidates.length === 0) return { ok: false, error: "Peer has no host" };
 
-  // Probe-first: only run auth against endpoints that answer GET /lyra/info.
-  // Avoids burning timeouts on dead Tailscale/LAN addresses and surfaces
-  // real auth errors instead of "Failed to fetch".
   const { probePeer } = await import("@lyra-sync-app/net");
-  const reachable: PeerUrl[] = [];
   const seen = new Set<string>();
-  for (const endpoint of candidates) {
-    const key = `${endpoint.host}:${endpoint.port ?? LYRA_DEFAULT_PORT}`;
+  const deduped: PeerUrl[] = [];
+  for (const ep of candidates) {
+    const key = `${ep.host}:${ep.port ?? LYRA_DEFAULT_PORT}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    const probe = await probePeer(
-      { host: endpoint.host, port: endpoint.port, protocol: "http" },
-      {
-        timeoutMs: 2500,
-        preferTailscale: isLikelyTailscaleHost(endpoint.host),
-        lane: 1,
-      },
-    );
-    if (probe.ok) {
-      reachable.push({
-        host: probe.host,
-        port: probe.port,
-        protocol: "http",
-      });
-      // Two live endpoints is enough — auth the best one first
-      if (reachable.length >= 2) break;
-    }
+    deduped.push(ep);
   }
 
-  let lastError = reachable.length === 0 ? "Peer unreachable (probe failed) — will try auth anyway" : "Auth failed";
-  const orderedTry = reachable.length > 0 ? [...reachable, ...candidates.filter((c) => !reachable.some((r) => r.host === c.host && r.port === c.port))] : candidates;
+  // Parallel probe — was sequential and took 2.5s × N (up to 20s). Now race 8 at a time.
+  const probeConcurrency = 8;
+  const reachable: PeerUrl[] = [];
+  let probeIdx = 0;
+  const probeErrors: string[] = [];
+  async function probeWorker() {
+    while (true) {
+      const i = probeIdx++;
+      if (i >= deduped.length) return;
+      if (reachable.length >= 2) return;
+      const endpoint = deduped[i]!;
+      try {
+        const probe = await probePeer(
+          { host: endpoint.host, port: endpoint.port, protocol: "http" },
+          {
+            timeoutMs: 1500,
+            preferTailscale: isLikelyTailscaleHost(endpoint.host),
+            lane: 1,
+          },
+        );
+        if (probe.ok) {
+          reachable.push({
+            host: probe.host,
+            port: probe.port,
+            protocol: "http",
+          });
+        } else {
+          probeErrors.push(`${endpoint.host}:${endpoint.port ?? LYRA_DEFAULT_PORT} → ${probe.error}`);
+        }
+      } catch (e) {
+        probeErrors.push(`${endpoint.host}:${endpoint.port ?? LYRA_DEFAULT_PORT} → ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(probeConcurrency, deduped.length) }, () => probeWorker()));
+
+  if (reachable.length > 0) {
+    console.info(`[lyra ensureSession] probe found ${reachable.length} reachable endpoint(s) out of ${deduped.length} candidates for ${input.device.id.slice(0, 8)}:`, reachable.map((r) => `${r.host}:${r.port}`).join(", "));
+  } else {
+    console.warn(`[lyra ensureSession] no reachable probe for ${input.device.id.slice(0, 8)} — tried ${deduped.length} candidates: ${probeErrors.slice(0, 3).join("; ")} — will try direct auth anyway`);
+  }
+
+  let lastError = reachable.length === 0 ? `Peer unreachable (tried ${deduped.length} endpoint(s): ${probeErrors.slice(0, 3).join("; ")})` : "Auth failed";
+  const orderedTry = reachable.length > 0 ? [...reachable, ...deduped.filter((c) => !reachable.some((r) => r.host === c.host && r.port === c.port))] : deduped;
+
+  // Try auth in order, but with shorter timeouts and clearer errors
   for (const endpoint of orderedTry.slice(0, 8)) {
+    const started = Date.now();
     const session = await getOrCreatePeerSession({
       endpoint,
       identity: input.identity,
@@ -247,13 +281,16 @@ export async function ensureSession(input: {
       peerDeviceId: input.device.id,
     });
     if (session.ok) {
+      const ms = Date.now() - started;
+      console.info(`[lyra ensureSession] auth ok ${endpoint.host}:${endpoint.port} in ${ms}ms for ${input.device.id.slice(0, 8)}`);
       return { ok: true, sessionToken: session.sessionToken, endpoint };
     }
     lastError = session.error;
-    // If auth failed due to timeout, try next candidate quickly
+    console.warn(`[lyra ensureSession] auth failed ${endpoint.host}:${endpoint.port} (${session.error}) for ${input.device.id.slice(0, 8)}`);
     if (/timed out|Timeout|Aborted/i.test(session.error)) continue;
   }
-  return { ok: false, error: lastError };
+  const attempted = orderedTry.slice(0, 8).map((e) => `${e.host}:${e.port}`).join(", ");
+  return { ok: false, error: `${lastError} — tried endpoints: ${attempted}` };
 }
 
 export async function wirePushClipboard(input: {
@@ -359,70 +396,104 @@ export async function wireSendFiles(input: {
           return new Uint8Array(buf);
         }
         if (f.uri) {
-          // Verify file still exists and size (catches cache eviction)
+          // Verify file still exists (catches cache eviction) — fast path via modern File API (dynamic import to avoid bundling in desktop)
           try {
-            const loadLegacyInfo = new Function('return import("expo-file-system/legacy")') as () => Promise<unknown>;
-            const FSInfo = (await loadLegacyInfo()) as unknown as { getInfoAsync: (uri: string) => Promise<{ exists: boolean; size?: number }> };
-            try {
-              const info = await FSInfo.getInfoAsync(f.uri!);
-              if (!info.exists) throw new Error(`File not found at ${f.uri?.slice(0, 60)} (evicted from cache). Re-pick file.`);
-              if (typeof info.size === "number" && offset >= info.size) return new Uint8Array(0);
-            } catch {}
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const loadFSProbe = new Function('return import("expo-file-system")') as () => Promise<any>;
+            const FSNext = await loadFSProbe() as unknown as { File?: new (uri: string) => { exists: boolean; info: () => { exists: boolean; size?: number } | null; size?: number } };
+            if (FSNext.File) {
+              try {
+                const probe = new FSNext.File(f.uri!);
+                // Prefer info() if available
+                const info = (probe as unknown as { info?: () => { exists: boolean; size?: number } }).info?.() ?? null;
+                if (info && !info.exists) throw new Error(`File not found at ${f.uri?.slice(0, 60)} (evicted from cache). Re-pick file.`);
+                // Also check size for EOF
+                const sz = (info?.size ?? (probe as unknown as { size?: number }).size) as number | undefined;
+                if (typeof sz === "number" && offset >= sz) return new Uint8Array(0);
+              } catch {}
+            }
           } catch {}
           let lastErr: unknown = null;
           for (let attempt = 0; attempt < 3; attempt++) {
+            // 1) Modern File API — slice (SDK 52+) — preferred, no base64, handles file:// correctly
             try {
-              // Try modern File API slice first
-              try {
-                const loadFS = new Function('return import("expo-file-system")') as () => Promise<unknown>;
-                const mod = (await loadFS()) as unknown as { File?: new (uri: string) => { slice?: (s: number, e: number) => { arrayBuffer?: () => Promise<ArrayBuffer> }; open?: (mode?: string) => { readBytes: (len: number) => Uint8Array; close: () => void; offset?: number | null } }; FileMode?: { ReadOnly: string } };
-                const FileCls = mod.File;
-                if (FileCls) {
-                  const fileObj = new FileCls(f.uri!);
-                  try {
-                    const sliced = (fileObj as unknown as { slice?: (s: number, e: number) => unknown }).slice?.(offset, offset + len) as { arrayBuffer?: () => Promise<ArrayBuffer> } | undefined;
-                    if (sliced?.arrayBuffer) {
-                      const ab = await sliced.arrayBuffer();
-                      if (ab.byteLength > 0) return new Uint8Array(ab);
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const loadFS = new Function('return import("expo-file-system")') as () => Promise<any>;
+              const mod = await loadFS() as unknown as {
+                File?: new (uri: string) => {
+                  slice: (start: number, end: number) => { arrayBuffer: () => Promise<ArrayBuffer> };
+                  open?: (mode?: string) => { readBytes: (len: number) => Uint8Array; close: () => void; offset?: number | null };
+                  exists: boolean;
+                };
+                FileMode?: { ReadOnly: string };
+              };
+              const FileCls = mod.File;
+              if (FileCls) {
+                const fileObj = new FileCls(f.uri!);
+                if (!fileObj.exists) throw new Error(`File not found at ${f.uri?.slice(0, 60)} (not in cache). Re-pick with copyToCacheDirectory:true.`);
+                // Try slice first (most reliable for file://)
+                try {
+                  const sliced = fileObj.slice(offset, offset + len) as unknown as { arrayBuffer: () => Promise<ArrayBuffer> };
+                  if (sliced?.arrayBuffer) {
+                    const ab = await sliced.arrayBuffer();
+                    if (ab.byteLength > 0) return new Uint8Array(ab);
+                    if (ab.byteLength === 0 && len > 0) {
+                      // Empty slice at non-EOF is unexpected — fall through to next method
+                      lastErr = new Error("slice returned 0 bytes");
                     }
-                  } catch (e) { lastErr = e; }
-                  try {
-                    const handle = (fileObj as unknown as { open?: (mode?: unknown) => { readBytes: (len: number) => Uint8Array; close: () => void; offset?: number | null } }).open?.((mod as unknown as { FileMode?: { ReadOnly: string } }).FileMode?.ReadOnly ?? "r");
-                    if (handle) {
-                      try {
-                        if (typeof handle.offset === "number") handle.offset = offset;
-                        const bytes = handle.readBytes(len);
-                        if (bytes.byteLength > 0) return bytes;
-                      } finally {
-                        try { handle.close(); } catch {}
-                      }
+                  }
+                } catch (e) {
+                  lastErr = e;
+                  console.warn(`[lyra transfer] File.slice failed ${f.name} @${offset}:${len} attempt ${attempt + 1}`, e instanceof Error ? e.message : String(e));
+                }
+                // Try open/readBytes as second modern path (avoids loading whole file)
+                try {
+                  const handle = (fileObj as unknown as { open?: (mode?: unknown) => { readBytes: (len: number) => Uint8Array; close: () => void; offset?: number | null } }).open?.(mod.FileMode?.ReadOnly ?? "r");
+                  if (handle) {
+                    try {
+                      if (typeof handle.offset === "number") handle.offset = offset;
+                      const bytes = handle.readBytes(len);
+                      if (bytes.byteLength > 0) return bytes;
+                    } finally {
+                      try { handle.close(); } catch {}
                     }
-                  } catch (e) { lastErr = e; }
+                  }
+                } catch (e) {
+                  lastErr = e;
                 }
-              } catch (e) { lastErr = e; }
-              // Fallback: legacy readAsStringAsync with position/length
-              try {
-                const loadLegacy = new Function('return import("expo-file-system/legacy")') as () => Promise<unknown>;
-                const FS = (await loadLegacy()) as unknown as { readAsStringAsync: (uri: string, opts: unknown) => Promise<string>; EncodingType: { Base64: string } };
-                const { readAsStringAsync, EncodingType } = FS;
-                const b64 = await (readAsStringAsync as unknown as (uri: string, opts: { encoding: string; position: number; length: number }) => Promise<string>)(f.uri!, { encoding: EncodingType.Base64, position: offset, length: len });
-                const approx = Math.ceil(b64.length * 0.75);
-                if (approx <= len + 16 && approx > 0) {
-                  const Buf = (globalThis as { Buffer?: { from: (s: string, e: string) => Uint8Array } }).Buffer;
-                  return Buf ? new Uint8Array(Buf.from(b64, "base64")) : Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-                }
-              } catch (e) { lastErr = e; }
-              if ((f.size ?? 0) < 10 * 1024 * 1024) {
-                const res = await fetch(f.uri!);
-                if (!res.ok) throw new Error(`fetch ${f.uri} failed ${res.status}`);
-                const ab = await res.arrayBuffer();
-                const full = new Uint8Array(ab);
-                return full.subarray(offset, offset + len);
               }
-            } catch (e) { lastErr = e; }
-            if (attempt < 2) await new Promise((r) => setTimeout(r, 150 * (attempt + 1)));
+            } catch (e) {
+              lastErr = e;
+            }
+            // 2) For content:// URIs, fetch can handle them on Android when copyToCacheDirectory is true file:// may also work
+            //    We try fetch for small files as fallback, but for large files we avoid OOM by NOT fetching whole file.
+            //    Instead, we fail with actionable error.
+            if ((f.size ?? 0) < 10 * 1024 * 1024) {
+              try {
+                const res = await fetch(f.uri!);
+                if (res.ok) {
+                  const ab = await res.arrayBuffer();
+                  const full = new Uint8Array(ab);
+                  if (full.byteLength >= offset + len || full.byteLength > 0) {
+                    return full.subarray(offset, Math.min(full.byteLength, offset + len));
+                  }
+                } else {
+                  lastErr = new Error(`fetch ${f.uri?.slice(0,60)} failed ${res.status}`);
+                }
+              } catch (e) {
+                lastErr = e;
+              }
+            }
+            if (attempt < 2) await new Promise((r) => setTimeout(r, 120 * (attempt + 1)));
           }
-          throw new Error(`Unable to read chunk at ${offset} len ${len} for ${f.name} (uri ${f.uri?.slice(0, 60)}) after 3 attempts: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}. Try re-picking file with copyToCacheDirectory:true.`);
+          console.error(`[lyra transfer] Unable to read chunk at ${offset} len ${len} for ${f.name} (uri ${f.uri?.slice(0, 60)}) after 3 attempts: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`, {
+            transferId: input.transferId,
+            file: f.name,
+            uri: f.uri?.slice(0, 80),
+            size: f.size,
+            error: lastErr instanceof Error ? lastErr.message : String(lastErr),
+          });
+          throw new Error(`Unable to read chunk at ${offset} len ${len} for ${f.name} after 3 attempts: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}. Try re-picking file with copyToCacheDirectory:true and ensure file is not evicted.`);
         }
         throw new Error(`No bytes or uri for ${f.name}`);
       };

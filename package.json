@@ -77,12 +77,9 @@
       "zxing-wasm": "link:apps/native/vendor/zxing-wasm-stub"
     },
     "onlyBuiltDependencies": [
-      "electron",
-      "electron-winstaller",
+      "better-sqlite3",
       "esbuild",
-      "sharp",
-      "@parcel/watcher",
-      "unrs-resolver"
+      "sharp"
     ]
   }
 }

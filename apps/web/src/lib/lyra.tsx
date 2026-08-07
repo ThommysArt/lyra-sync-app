@@ -4,6 +4,7 @@ import { useCallback } from "react";
 
 import { getDesktopApi } from "./desktop-bridge";
 import { installScreenSessionSync } from "./screen-session-sync";
+import { createSqliteLyraStorage } from "./sqlite-storage";
 
 export { useLyraSelector, useLyraState, useLyraStore };
 
@@ -325,9 +326,24 @@ export function LyraProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  // Electron: use SQLite via IPC (replaces localStorage). Browser fallback remains localStorage for PWA.
+  const storage = (() => {
+    const api = getDesktopApi();
+    // If desktop bridge with kv* exists, use SQLite
+    if (api && typeof (api as unknown as { kvGet?: unknown }).kvGet === "function") {
+      try {
+        return createSqliteLyraStorage();
+      } catch (e) {
+        console.error("[lyra] sqlite storage init failed, falling back to localStorage", e);
+      }
+    }
+    if (typeof localStorage !== "undefined") return localStorage;
+    return null;
+  })();
+
   return (
     <BaseLyraProvider
-      storage={typeof localStorage !== "undefined" ? localStorage : null}
+      storage={storage}
       seedDemo={shouldSeedDemo()}
       platformHint="web"
       onStoreReady={onStoreReady}

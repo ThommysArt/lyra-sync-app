@@ -121,22 +121,17 @@ function createNativeDiskTransfer() {
 					if (offset < received) return;
 					throw new Error(`gap ${received} vs ${offset}`);
 				}
-				// Append via File.write with append:true (efficient, no base64)
+				// Append via File.write with append:true (efficient, no base64) — fail fast if unavailable
 				try {
-					// New API: write with append
-					(tmpFile as unknown as { write: (data: Uint8Array, opts?: unknown) => void }).write(bytes, { append: true });
-				} catch {
-					// Fallback: read existing + append via base64 (legacy)
-					const { writeAsStringAsync, readAsStringAsync, EncodingType } = await import("expo-file-system/legacy");
-					const existingB64 = tmpFile.exists ? await readAsStringAsync(tmpFile.uri, { encoding: EncodingType.Base64 }).catch(() => "") : "";
-					const existing = existingB64 ? Uint8Array.from(atob(existingB64), c => c.charCodeAt(0)) : new Uint8Array(0);
-					const merged = new Uint8Array(existing.byteLength + bytes.byteLength);
-					merged.set(existing, 0);
-					merged.set(bytes, existing.byteLength);
-					const outB64 = (globalThis as { Buffer?: { from: (b: Uint8Array) => { toString: (e: string) => string } } }).Buffer
-						? (globalThis as { Buffer?: { from: (b: Uint8Array) => { toString: (e: string) => string } } }).Buffer!.from(merged).toString("base64")
-						: (() => { let s=""; const ch=0x8000; for(let i=0;i<merged.length;i+=ch) s+=String.fromCharCode(...merged.subarray(i,i+ch)); return btoa(s); })();
-					await writeAsStringAsync(tmpFile.uri, outB64, { encoding: EncodingType.Base64 });
+					// New API: write with append (SDK 52+)
+					const writer = tmpFile as unknown as { write: (data: Uint8Array, opts?: unknown) => void };
+					if (typeof writer.write !== "function") throw new Error("File.write not available — need expo-file-system with File API");
+					writer.write(bytes, { append: true });
+					console.info(`[lyra peer] appendChunk ${input.transferId.slice(0,8)} offset=${offset} len=${bytes.byteLength} ok`);
+				} catch (e) {
+					// Do NOT fallback to read-whole-file O(n²) — that caused 150KB/s and OOM.
+					console.error(`[lyra peer] appendChunk failed ${input.transferId.slice(0,8)} @${offset} len=${bytes.byteLength}: ${e instanceof Error ? e.message : String(e)} — rebuild with expo-file-system File API`);
+					throw new Error(`Disk append failed: ${e instanceof Error ? e.message : String(e)} — update expo-file-system`);
 				}
 				received += bytes.byteLength;
 				(state as { receivedBytes: number }).receivedBytes = received;

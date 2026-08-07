@@ -162,6 +162,11 @@ export type LyraDesktopApi = {
   pauseTransfer?: (transferId: string) => Promise<{ ok: boolean }>;
   resumeTransfer?: (transferId: string, offset?: number) => Promise<{ ok: boolean }>;
   cancelTransfer?: (transferId: string) => Promise<{ ok: boolean }>;
+  kvGet?: (key: string) => Promise<string | null>;
+  kvSet?: (key: string, value: string) => Promise<{ ok: boolean; error?: string }>;
+  kvRemove?: (key: string) => Promise<{ ok: boolean }>;
+  kvGetAll?: () => Promise<Record<string, string>>;
+  kvKeys?: () => Promise<string[]>;
   /** Incoming peer request to capture *this* desktop's screen. */
   onScreenShareRequest?: (
     handler: (payload: {
