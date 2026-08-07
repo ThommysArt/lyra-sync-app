@@ -156,6 +156,14 @@ export type MessageHandlerContext = {
   /** In-memory / disk transfer buffers keyed by transferId */
   transfers?: Map<string, TransferReceiveState>;
   onTransferComplete?: (state: TransferReceiveState) => void | Promise<void>;
+  /** Called when a new transfer offer arrives (receiver) — create UI card/toast */
+  onTransferOffer?: (state: TransferReceiveState, fromDeviceId: string, fromDeviceName?: string) => void | Promise<void>;
+  /** Called on each received chunk — update progress */
+  onTransferChunk?: (state: TransferReceiveState, fromDeviceId: string) => void | Promise<void>;
+  /** Called when peer pauses/resumes/cancels a transfer */
+  onTransferPaused?: (transferId: string, fromDeviceId: string) => void | Promise<void>;
+  onTransferResumed?: (transferId: string, fromDeviceId: string, resumeOffset: number) => void | Promise<void>;
+  onTransferCancelled?: (transferId: string, fromDeviceId: string) => void | Promise<void>;
   /** Drop sessions for device (server wires this) */
   revokeDeviceSessions?: (deviceId: string) => number;
 };
@@ -496,6 +504,10 @@ export async function handlePeerEnvelope(
         };
       }
       transfers.set(parsed.data.id, state);
+      // Notify UI to create/update incoming transfer card + toast
+      try {
+        await ctx.onTransferOffer?.(state, from, (parsed.data as { deviceName?: string }).deviceName);
+      } catch {}
       return createEnvelope({
         type: "transfer_accept",
         fromDeviceId: ctx.identity.id,
@@ -548,6 +560,9 @@ export async function handlePeerEnvelope(
         state.chunks.push(bytes);
         state.receivedBytes = parsed.data.offset + bytes.byteLength;
       }
+      try {
+        await ctx.onTransferChunk?.(state, from);
+      } catch {}
       return createEnvelope({
         type: "transfer_chunk_ack",
         fromDeviceId: ctx.identity.id,
@@ -610,6 +625,9 @@ export async function handlePeerEnvelope(
         const state = transfers.get(payload.transferId);
         await state?.cleanupDisk?.();
         transfers.delete(payload.transferId);
+        try {
+          await ctx.onTransferCancelled?.(payload.transferId, from);
+        } catch {}
       }
       return { ok: true };
     }
@@ -626,6 +644,11 @@ export async function handlePeerEnvelope(
       const payload = envelope.payload as { transferId?: string };
       const state = payload.transferId ? transfers.get(payload.transferId) : undefined;
       if (state) state.paused = true;
+      if (payload.transferId) {
+        try {
+          await ctx.onTransferPaused?.(payload.transferId, from);
+        } catch {}
+      }
       return {
         ok: true,
         paused: true,
@@ -642,6 +665,11 @@ export async function handlePeerEnvelope(
         if (typeof payload.offset === "number") {
           state.receivedBytes = payload.offset;
         }
+      }
+      if (payload.transferId) {
+        try {
+          await ctx.onTransferResumed?.(payload.transferId, from, state?.receivedBytes ?? payload.offset ?? 0);
+        } catch {}
       }
       return createEnvelope({
         type: "transfer_accept",

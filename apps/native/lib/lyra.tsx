@@ -274,6 +274,28 @@ export function LyraProvider({ children }: { children: ReactNode }) {
                 return false;
               }
             },
+            onTransferOffer: (state, fromDeviceId, fromDeviceName) => {
+              store.handleIncomingTransferOffer({
+                transferId: state.transferId,
+                files: state.files,
+                totalBytes: state.totalBytes,
+                fromDeviceId,
+                fromDeviceName,
+                resumeOffset: state.receivedBytes,
+              });
+            },
+            onTransferChunk: (state) => {
+              store.updateIncomingTransferProgress(state.transferId, state.receivedBytes, state.totalBytes);
+            },
+            onTransferPaused: (transferId) => {
+              store.handleTransferPaused(transferId);
+            },
+            onTransferResumed: (transferId, _from, resumeOffset) => {
+              store.handleTransferResumed(transferId, resumeOffset);
+            },
+            onTransferCancelled: (transferId) => {
+              store.handleTransferCancelled(transferId);
+            },
             onTransferComplete: (state) => {
               void (async () => {
                 let savedPaths: string[] | undefined;
@@ -293,6 +315,9 @@ export function LyraProvider({ children }: { children: ReactNode }) {
                     if (errors.length) {
                       console.warn("[lyra] save transfer errors", errors);
                     }
+                  } else if (state.diskPath) {
+                    // Disk-backed transfer: file already saved to temp, record it
+                    savedPaths = [state.diskPath];
                   }
                 } catch (e) {
                   console.warn(
@@ -331,6 +356,11 @@ export function LyraProvider({ children }: { children: ReactNode }) {
         }
 
         peerHandle = peer;
+        store.setTransferControl({
+          pause: (id) => peer.pauseTransfer(id),
+          resume: (id, offset) => peer.resumeTransfer(id, offset),
+          cancel: (id) => peer.cancelTransfer(id),
+        });
         detachPeer = attachNativePeerToStore(store, peer);
         // Native multicast discovery (LocalSend-style) — instant LAN discovery without HTTP scan
         try {
@@ -423,6 +453,7 @@ export function LyraProvider({ children }: { children: ReactNode }) {
       }
       detachPeer?.();
       detachPeer = null;
+      store.setTransferControl(null);
       void peerHandle?.stop();
       peerHandle = null;
       void discoveryHandle?.stop();

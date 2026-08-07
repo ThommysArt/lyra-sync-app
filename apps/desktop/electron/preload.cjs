@@ -79,6 +79,34 @@ contextBridge.exposeInMainWorld("lyraDesktop", {
     ipcRenderer.on("lyra:transfer-complete", listener);
     return () => ipcRenderer.removeListener("lyra:transfer-complete", listener);
   },
+  onTransferOffer: (handler) => {
+    const listener = (_event, data) => handler(data);
+    ipcRenderer.on("lyra:transfer-offer", listener);
+    return () => ipcRenderer.removeListener("lyra:transfer-offer", listener);
+  },
+  onTransferChunk: (handler) => {
+    const listener = (_event, data) => handler(data);
+    ipcRenderer.on("lyra:transfer-chunk", listener);
+    return () => ipcRenderer.removeListener("lyra:transfer-chunk", listener);
+  },
+  onTransferPaused: (handler) => {
+    const listener = (_event, data) => handler(data);
+    ipcRenderer.on("lyra:transfer-paused", listener);
+    return () => ipcRenderer.removeListener("lyra:transfer-paused", listener);
+  },
+  onTransferResumed: (handler) => {
+    const listener = (_event, data) => handler(data);
+    ipcRenderer.on("lyra:transfer-resumed", listener);
+    return () => ipcRenderer.removeListener("lyra:transfer-resumed", listener);
+  },
+  onTransferCancelled: (handler) => {
+    const listener = (_event, data) => handler(data);
+    ipcRenderer.on("lyra:transfer-cancelled", listener);
+    return () => ipcRenderer.removeListener("lyra:transfer-cancelled", listener);
+  },
+  pauseTransfer: (transferId) => ipcRenderer.invoke("lyra:pause-transfer", transferId),
+  resumeTransfer: (transferId, offset) => ipcRenderer.invoke("lyra:resume-transfer", transferId, offset),
+  cancelTransfer: (transferId) => ipcRenderer.invoke("lyra:cancel-transfer", transferId),
   onScreenShareRequest: (handler) => {
     const listener = (_event, payload) => handler(payload);
     ipcRenderer.on("lyra:screen-share-request", listener);

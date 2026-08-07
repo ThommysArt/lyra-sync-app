@@ -89,6 +89,11 @@ export type PeerHttpCore = {
   ) => boolean;
   /** Pending pair waiters (for diagnostics) */
   pendingPairCount: () => number;
+  /** Transfer control for UI pause/resume/cancel */
+  getTransfers: () => Map<string, TransferReceiveState>;
+  pauseTransfer: (transferId: string) => boolean;
+  resumeTransfer: (transferId: string, offset?: number) => boolean;
+  cancelTransfer: (transferId: string) => boolean;
 };
 
 export type PeerPairDecision =
@@ -468,5 +473,28 @@ export function createPeerHttpCore(options: PeerHttpCoreOptions): PeerHttpCore {
     },
     resolvePairRequest,
     pendingPairCount: () => pendingPairs.size,
+    getTransfers: () => transfers,
+    pauseTransfer: (transferId: string) => {
+      const s = transfers.get(transferId);
+      if (!s) return false;
+      s.paused = true;
+      return true;
+    },
+    resumeTransfer: (transferId: string, offset?: number) => {
+      const s = transfers.get(transferId);
+      if (!s) return false;
+      s.paused = false;
+      if (typeof offset === "number") s.receivedBytes = offset;
+      return true;
+    },
+    cancelTransfer: (transferId: string) => {
+      const s = transfers.get(transferId);
+      if (s) {
+        void s.cleanupDisk?.();
+        transfers.delete(transferId);
+        return true;
+      }
+      return false;
+    },
   };
 }

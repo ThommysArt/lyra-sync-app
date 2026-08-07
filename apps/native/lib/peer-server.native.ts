@@ -45,6 +45,10 @@ export type NativePeerHandle = {
     key: { deviceId?: string; token?: string },
     decision: PeerPairDecision,
   ) => boolean;
+  /** Transfer control for UI */
+  pauseTransfer: (transferId: string) => boolean;
+  resumeTransfer: (transferId: string, offset?: number) => boolean;
+  cancelTransfer: (transferId: string) => boolean;
   /** Refresh advertised LAN/Tailscale host (Wi‑Fi / VPN changes). */
   refreshLanHost: () => Promise<string | null>;
 };
@@ -468,6 +472,9 @@ export async function startNativePeerServer(
       };
     },
     resolvePairRequest: (key, decision) => core.resolvePairRequest(key, decision),
+    pauseTransfer: (transferId: string) => core.pauseTransfer(transferId),
+    resumeTransfer: (transferId: string, offset?: number) => core.resumeTransfer(transferId, offset),
+    cancelTransfer: (transferId: string) => core.cancelTransfer(transferId),
     refreshLanHost,
     stop: () =>
       new Promise((resolve) => {

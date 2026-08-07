@@ -137,6 +137,24 @@ export function LyraProvider({ children }: { children: ReactNode }) {
       void api.announceDiscovery?.();
     });
 
+    // Transfer control for incoming (receiver) pause/resume/cancel via main's server
+    if (api.pauseTransfer && api.resumeTransfer && api.cancelTransfer) {
+      store.setTransferControl({
+        pause: (transferId: string) => {
+          void api.pauseTransfer?.(transferId);
+          return true;
+        },
+        resume: (transferId: string, offset?: number) => {
+          void api.resumeTransfer?.(transferId, offset);
+          return true;
+        },
+        cancel: (transferId: string) => {
+          void api.cancelTransfer?.(transferId);
+          return true;
+        },
+      });
+    }
+
     // Sync download directory preference to Electron shell
     let lastDl = store.getState().settings.downloadDirectory ?? "";
     const syncDownloadDir = () => {
@@ -209,6 +227,28 @@ export function LyraProvider({ children }: { children: ReactNode }) {
       });
     });
 
+    const unsubOffer = api.onTransferOffer?.((data) => {
+      store.handleIncomingTransferOffer({
+        transferId: data.transferId,
+        files: data.files,
+        totalBytes: data.totalBytes,
+        fromDeviceId: data.fromDeviceId,
+        fromDeviceName: data.fromDeviceName,
+        resumeOffset: data.receivedBytes,
+      });
+    });
+    const unsubChunk = api.onTransferChunk?.((data) => {
+      store.updateIncomingTransferProgress(data.transferId, data.receivedBytes, data.totalBytes);
+    });
+    const unsubPaused = api.onTransferPaused?.((data) => {
+      store.handleTransferPaused(data.transferId);
+    });
+    const unsubResumed = api.onTransferResumed?.((data) => {
+      store.handleTransferResumed(data.transferId, data.resumeOffset);
+    });
+    const unsubCancelled = api.onTransferCancelled?.((data) => {
+      store.handleTransferCancelled(data.transferId);
+    });
     const unsubTx = api.onTransferComplete?.((data) => {
       store.recordReceivedTransfer({
         transferId: data.transferId,
@@ -270,12 +310,18 @@ export function LyraProvider({ children }: { children: ReactNode }) {
       unsubClip?.();
       unsubTs?.();
       unsubDisc?.();
+      unsubOffer?.();
+      unsubChunk?.();
+      unsubPaused?.();
+      unsubResumed?.();
+      unsubCancelled?.();
       unsubTx?.();
       unsubFrame?.();
       unsubShareStop?.();
       unsubScrcpyExit?.();
       store.setPairDecisionResolver?.(null);
       store.setDiscoveryAnnouncer?.(null);
+      store.setTransferControl?.(null);
     };
   }, []);
 

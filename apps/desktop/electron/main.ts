@@ -528,6 +528,32 @@ async function startNetworking() {
                 reason,
               });
             },
+            onTransferOffer: (state, fromDeviceId, fromDeviceName) => {
+              mainWindow?.webContents.send("lyra:transfer-offer", {
+                transferId: state.transferId,
+                files: state.files,
+                totalBytes: state.totalBytes,
+                fromDeviceId,
+                fromDeviceName,
+                receivedBytes: state.receivedBytes,
+              });
+            },
+            onTransferChunk: (state) => {
+              mainWindow?.webContents.send("lyra:transfer-chunk", {
+                transferId: state.transferId,
+                receivedBytes: state.receivedBytes,
+                totalBytes: state.totalBytes,
+              });
+            },
+            onTransferPaused: (transferId) => {
+              mainWindow?.webContents.send("lyra:transfer-paused", { transferId });
+            },
+            onTransferResumed: (transferId, _from, resumeOffset) => {
+              mainWindow?.webContents.send("lyra:transfer-resumed", { transferId, resumeOffset });
+            },
+            onTransferCancelled: (transferId) => {
+              mainWindow?.webContents.send("lyra:transfer-cancelled", { transferId });
+            },
             onTransferComplete: async (state) => {
               const destDir = resolveDownloadDir();
               try {
@@ -1293,6 +1319,19 @@ app.whenReady().then(async () => {
     trustedPeers.delete(deviceId);
     const n = peer?.revokeDevice(deviceId) ?? 0;
     return { revokedSessions: n };
+  });
+
+  ipcMain.handle("lyra:pause-transfer", (_e, transferId: string) => {
+    const ok = peer?.pauseTransfer(transferId) ?? false;
+    return { ok };
+  });
+  ipcMain.handle("lyra:resume-transfer", (_e, transferId: string, offset?: number) => {
+    const ok = peer?.resumeTransfer(transferId, offset) ?? false;
+    return { ok };
+  });
+  ipcMain.handle("lyra:cancel-transfer", (_e, transferId: string) => {
+    const ok = peer?.cancelTransfer(transferId) ?? false;
+    return { ok };
   });
 
   ipcMain.handle("lyra:quit", () => {

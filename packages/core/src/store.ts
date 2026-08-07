@@ -40,12 +40,15 @@ import {
   deviceEndpointCandidates,
   isLivePeer,
   resolveDeviceHost,
+  wireCancelTransfer,
   wireListRemoteFiles,
   wireOpenUrl,
+  wirePauseTransfer,
   wirePushClipboard,
-  wireRequestScreenShare,
-  wireSendFiles,
   wireReadRemoteFile,
+  wireRequestScreenShare,
+  wireResumeTransfer,
+  wireSendFiles,
   wireSendPairRequest,
   wireStopScreenShare,
   wireTrustHandshake,
@@ -225,6 +228,12 @@ export type LyraStore = {
    * (LocalSend-style) when the user taps Refresh discovery.
    */
   setDiscoveryAnnouncer: (fn: (() => void) | null) => void;
+  /** Peer server installs transfer pause/resume/cancel control for incoming transfers */
+  setTransferControl: (control: {
+    pause: (transferId: string) => boolean;
+    resume: (transferId: string, offset?: number) => boolean;
+    cancel: (transferId: string) => boolean;
+  } | null) => void;
   /** Remove local trust. Set silent to skip remote notify (already revoked by peer). */
   unpairDevice: (deviceId: string, opts?: { silent?: boolean }) => void;
   /**
@@ -322,6 +331,19 @@ export type LyraStore = {
     receivedBytes: number;
     savedPaths?: string[];
   }) => void;
+  /** Create or update an incoming (received) transfer on offer/chunk */
+  handleIncomingTransferOffer: (input: {
+    transferId: string;
+    files: { name: string; size: number }[];
+    totalBytes: number;
+    fromDeviceId: string;
+    fromDeviceName?: string;
+    resumeOffset?: number;
+  }) => void;
+  updateIncomingTransferProgress: (transferId: string, receivedBytes: number, totalBytes?: number) => void;
+  handleTransferPaused: (transferId: string) => void;
+  handleTransferResumed: (transferId: string, resumeOffset: number) => void;
+  handleTransferCancelled: (transferId: string) => void;
   /** Apply a remote device status payload (from status envelope / probe). */
   applyRemoteStatus: (deviceId: string, status: NonNullable<PairedDevice["status"]>) => void;
   /** Download remote file bytes when peer has real FS */
@@ -922,6 +944,16 @@ export function createLyraStore(options?: {
   let pairDecisionResolver: PairDecisionResolver | null = null;
   /** Installed by desktop bridge to fire UDP announce burst */
   let discoveryAnnouncer: (() => void) | null = null;
+  /** Active wire transfer abort controllers (per transferId) */
+  const transferControllers = new Map<string, AbortController>();
+  /** File bytes for resumable wire transfers (per transferId) */
+  const transferFileBytes = new Map<string, { name: string; size: number; mimeType?: string; checksum?: string; bytes: Uint8Array }[]>();
+  /** Peer server transfer control for incoming (receiver) pause/resume/cancel */
+  let transferControl: {
+    pause: (transferId: string) => boolean;
+    resume: (transferId: string, offset?: number) => boolean;
+    cancel: (transferId: string) => boolean;
+  } | null = null;
 
   const emit = () => {
     for (const l of listeners) l();
@@ -1121,6 +1153,9 @@ export function createLyraStore(options?: {
     },
     setDiscoveryAnnouncer: (fn) => {
       discoveryAnnouncer = fn;
+    },
+    setTransferControl: (control) => {
+      transferControl = control;
     },
     submitPairingCode: async (code, opts) => {
       const s0 = getState();
@@ -2834,7 +2869,240 @@ export function createLyraStore(options?: {
         input.savedPaths?.[0] != null
           ? ` → ${input.savedPaths.length === 1 ? input.savedPaths[0] : `${input.savedPaths.length} files`}`
           : "";
+      // If a receiving transfer already exists for this id, mark it completed
+      const existing = getState().transfers.find((t) => t.id === input.transferId);
+      if (existing && existing.direction === "received" && existing.status === "transferring") {
+        set((st) => ({
+          ...st,
+          transfers: st.transfers.map((t) =>
+            t.id === input.transferId
+              ? {
+                  ...t,
+                  transferredBytes: totalBytes,
+                  totalBytes,
+                  status: "completed" as const,
+                  completedAt: now,
+                  durationMs: now - t.createdAt,
+                  averageSpeedBps: totalBytes / Math.max(0.001, (now - t.createdAt) / 1000),
+                  currentSpeedBps: undefined,
+                  etaSeconds: 0,
+                  updatedAt: now,
+                }
+              : t,
+          ),
+        }));
+      } else {
+        set((st) => ({
+          ...st,
+          transfers: [tx, ...st.transfers.filter((t) => t.id !== tx.id)],
+        }));
+      }
+      persist();
       notify(set, `Received ${input.files.map((f) => f.name).join(", ")}${where}`, "success");
+    },
+    handleIncomingTransferOffer: (input) => {
+      const now = Date.now();
+      const existing = getState().transfers.find((t) => t.id === input.transferId);
+      if (existing) {
+        // Update existing (e.g., resume)
+        set((st) => ({
+          ...st,
+          transfers: st.transfers.map((t) =>
+            t.id === input.transferId
+              ? {
+                  ...t,
+                  files: input.files.map((f) => ({ name: f.name, size: f.size })),
+                  totalBytes: input.totalBytes,
+                  transferredBytes: input.resumeOffset ?? t.transferredBytes,
+                  status: "transferring" as const,
+                  updatedAt: now,
+                }
+              : t,
+          ),
+        }));
+        return;
+      }
+      const device = getState().devices.find((d) => d.id === input.fromDeviceId);
+      const tx: Transfer = {
+        id: input.transferId,
+        direction: "received" as const,
+        deviceId: input.fromDeviceId,
+        deviceName: input.fromDeviceName || device?.nickname || device?.name || "Peer",
+        files: input.files.map((f) => ({ name: f.name, size: f.size })),
+        totalBytes: input.totalBytes,
+        transferredBytes: input.resumeOffset ?? 0,
+        status: "transferring" as const,
+        createdAt: now,
+        updatedAt: now,
+        overWire: true,
+      };
+      set((st) => ({ ...st, transfers: [tx, ...st.transfers] }));
+      persist();
+      const names = input.files.map((f) => f.name).join(", ");
+      notify(set, `Receiving ${names} from ${tx.deviceName}`, "info");
+    },
+    updateIncomingTransferProgress: (transferId, receivedBytes, totalBytes) => {
+      const now = Date.now();
+      set((st) => ({
+        ...st,
+        transfers: st.transfers.map((t) => {
+          if (t.id !== transferId || t.direction !== "received") return t;
+          const patch = applyChunkProgress(t, receivedBytes);
+          const elapsed = Math.max(0.001, (now - t.createdAt) / 1000);
+          const progress = Math.max(0, receivedBytes - (t.resumeOffset ?? 0));
+          const currentSpeedBps = progress / elapsed;
+          const remaining = Math.max(0, (totalBytes ?? t.totalBytes) - receivedBytes);
+          const etaSeconds = currentSpeedBps > 0 ? remaining / currentSpeedBps : 0;
+          return {
+            ...t,
+            ...patch,
+            currentSpeedBps,
+            etaSeconds,
+            updatedAt: now,
+          };
+        }),
+      }));
+    },
+    handleTransferPaused: (transferId) => {
+      set((st) => ({
+        ...st,
+        transfers: st.transfers.map((t) =>
+          t.id === transferId
+            ? { ...t, status: "paused" as const, resumeOffset: t.transferredBytes, updatedAt: Date.now() }
+            : t,
+        ),
+      }));
+      persist();
+      notify(set, "Transfer paused", "info");
+    },
+    handleTransferResumed: (transferId, resumeOffset) => {
+      const tx = getState().transfers.find((t) => t.id === transferId);
+      set((st) => ({
+        ...st,
+        transfers: st.transfers.map((t) =>
+          t.id === transferId
+            ? { ...t, status: "transferring" as const, resumeOffset, updatedAt: Date.now() }
+            : t,
+        ),
+      }));
+      persist();
+      notify(set, "Transfer resumed", "info");
+      // If this is a sent transfer that was paused, restart sending
+      if (tx && tx.direction === "sent" && tx.overWire && tx.status === "paused") {
+        const device = getState().devices.find((d) => d.id === tx.deviceId);
+        const s = getState();
+        const filesWithBytes = transferFileBytes.get(transferId);
+        if (device && s.identity && s.privateKey && filesWithBytes) {
+          const controller = new AbortController();
+          transferControllers.set(transferId, controller);
+          void wireSendFiles({
+            device,
+            identity: s.identity,
+            privateKey: s.privateKey,
+            transferId,
+            files: filesWithBytes,
+            resumeOffset,
+            signal: controller.signal,
+            onProgress: (p) => {
+              set((st) => ({
+                ...st,
+                transfers: st.transfers.map((t) =>
+                  t.id === transferId
+                    ? {
+                        ...t,
+                        ...applyChunkProgress(t, p.transferredBytes),
+                        currentSpeedBps: p.currentSpeedBps,
+                        etaSeconds: p.etaSeconds,
+                        status: "transferring" as const,
+                      }
+                    : t,
+                ),
+              }));
+            },
+          }).then((res) => {
+            transferControllers.delete(transferId);
+            if (!res.ok) {
+              const cur = getState().transfers.find((t) => t.id === transferId);
+              if (cur?.status === "paused" || cur?.status === "cancelled") return;
+              if (res.error === "Transfer paused by peer") {
+                set((st) => ({
+                  ...st,
+                  transfers: st.transfers.map((t) =>
+                    t.id === transferId
+                      ? {
+                          ...t,
+                          status: "paused" as const,
+                          resumeOffset: t.transferredBytes,
+                          updatedAt: Date.now(),
+                        }
+                      : t,
+                  ),
+                }));
+                persist();
+                notify(set, "Transfer paused by peer", "info");
+                return;
+              }
+              if (res.error === "Aborted") return;
+              set((st) => ({
+                ...st,
+                transfers: st.transfers.map((t) =>
+                  t.id === transferId
+                    ? {
+                        ...t,
+                        status: "failed" as const,
+                        error: res.error,
+                        updatedAt: Date.now(),
+                      }
+                    : t,
+                ),
+              }));
+              persist();
+              notify(set, `Transfer failed: ${res.error}`, "error");
+              return;
+            }
+            set((st) => ({
+              ...st,
+              transfers: st.transfers.map((t) =>
+                t.id === transferId
+                  ? {
+                      ...t,
+                      ...applyChunkProgress(t, t.totalBytes),
+                      status: "completed" as const,
+                      completedAt: Date.now(),
+                      durationMs: Date.now() - t.createdAt,
+                      averageSpeedBps:
+                        t.totalBytes / Math.max(0.001, (Date.now() - t.createdAt) / 1000),
+                      currentSpeedBps: undefined,
+                      etaSeconds: 0,
+                      overWire: true,
+                      updatedAt: Date.now(),
+                    }
+                  : t,
+              ),
+            }));
+            transferFileBytes.delete(transferId);
+            persist();
+            notify(set, "Transfer complete (wire)", "success");
+          });
+        }
+      }
+    },
+    handleTransferCancelled: (transferId) => {
+      const tx = getState().transfers.find((t) => t.id === transferId);
+      // Clean up server-side state is handled in message-handlers; just update UI
+      transferControllers.get(transferId)?.abort();
+      transferControllers.delete(transferId);
+      transferFileBytes.delete(transferId);
+      set((st) => ({
+        ...st,
+        transfers: st.transfers.map((t) =>
+          t.id === transferId
+            ? { ...t, status: "cancelled" as const, updatedAt: Date.now() }
+            : t,
+        ),
+      }));
+      persist();
+      notify(set, tx ? `Transfer ${tx.files[0]?.name ?? ""} cancelled` : "Transfer cancelled", "info");
     },
     trustDevice: async (deviceId) => {
       const s = getState();
@@ -2974,6 +3242,198 @@ export function createLyraStore(options?: {
         return;
       }
       const offset = tx.transferredBytes;
+      // Wire resume
+      if (tx.overWire) {
+        const device = getState().devices.find((d) => d.id === tx.deviceId);
+        const s = getState();
+        if (!device || !s.identity || !s.privateKey) {
+          notify(set, "Cannot resume: peer not found", "error");
+          return;
+        }
+        if (tx.direction === "sent") {
+          const filesWithBytes = transferFileBytes.get(id);
+          if (!filesWithBytes) {
+            notify(set, "Cannot resume: file data not available", "error");
+            return;
+          }
+          set((st) => ({
+            ...st,
+            transfers: st.transfers.map((t) =>
+              t.id === id
+                ? {
+                    ...t,
+                    status: "transferring" as const,
+                    resumeOffset: offset,
+                    updatedAt: Date.now(),
+                    error: undefined,
+                  }
+                : t,
+            ),
+          }));
+          persist();
+          notify(
+            set,
+            offset > 0
+              ? `Resuming from ${Math.round((offset / Math.max(1, tx.totalBytes)) * 100)}%…`
+              : "Resuming transfer…",
+            "info",
+          );
+          void (async () => {
+            const resumeRes = await wireResumeTransfer({
+              device,
+              identity: s.identity!,
+              privateKey: s.privateKey!,
+              transferId: id,
+              offset,
+            });
+            const resumeOffset = resumeRes.ok ? (resumeRes.resumeOffset ?? offset) : offset;
+            if (!resumeRes.ok) {
+              notify(set, `Resume failed: ${resumeRes.error}`, "error");
+            }
+            set((st) => ({
+              ...st,
+              transfers: st.transfers.map((t) =>
+                t.id === id ? { ...t, resumeOffset, updatedAt: Date.now() } : t,
+              ),
+            }));
+            const controller = new AbortController();
+            transferControllers.set(id, controller);
+            const res = await wireSendFiles({
+              device,
+              identity: s.identity!,
+              privateKey: s.privateKey!,
+              transferId: id,
+              files: filesWithBytes,
+              resumeOffset,
+              signal: controller.signal,
+              onProgress: (p) => {
+                set((st) => ({
+                  ...st,
+                  transfers: st.transfers.map((t) =>
+                    t.id === id
+                      ? {
+                          ...t,
+                          ...applyChunkProgress(t, p.transferredBytes),
+                          currentSpeedBps: p.currentSpeedBps,
+                          etaSeconds: p.etaSeconds,
+                          status: "transferring" as const,
+                        }
+                      : t,
+                  ),
+                }));
+              },
+            });
+            transferControllers.delete(id);
+            if (!res.ok) {
+              const cur = getState().transfers.find((t) => t.id === id);
+              if (cur?.status === "paused" || cur?.status === "cancelled") return;
+              if (res.error === "Transfer paused by peer") {
+                set((st) => ({
+                  ...st,
+                  transfers: st.transfers.map((t) =>
+                    t.id === id
+                      ? {
+                          ...t,
+                          status: "paused" as const,
+                          resumeOffset: t.transferredBytes,
+                          updatedAt: Date.now(),
+                        }
+                      : t,
+                  ),
+                }));
+                persist();
+                notify(set, "Transfer paused by peer", "info");
+                return;
+              }
+              if (res.error === "Aborted") return;
+              set((st) => ({
+                ...st,
+                transfers: st.transfers.map((t) =>
+                  t.id === id
+                    ? {
+                        ...t,
+                        status: "failed" as const,
+                        error: res.error,
+                        updatedAt: Date.now(),
+                      }
+                    : t,
+                ),
+              }));
+              persist();
+              notify(set, `Transfer failed: ${res.error}`, "error");
+              return;
+            }
+            if (res.endpoint) {
+              set((st) => ({
+                ...st,
+                devices: st.devices.map((d) =>
+                  d.id === device.id ? applyReachableEndpoint(d, res.endpoint!) : d,
+                ),
+              }));
+            }
+            const verify = tx.verifyIntegrity ?? getState().settings.verifyTransferIntegrity;
+            set((st) => ({
+              ...st,
+              transfers: st.transfers.map((t) =>
+                t.id === id
+                  ? {
+                      ...t,
+                      ...applyChunkProgress(t, t.totalBytes),
+                      status: "completed" as const,
+                      completedAt: Date.now(),
+                      durationMs: Date.now() - t.createdAt,
+                      averageSpeedBps:
+                        t.totalBytes / Math.max(0.001, (Date.now() - t.createdAt) / 1000),
+                      currentSpeedBps: undefined,
+                      etaSeconds: 0,
+                      integrityOk: verify ? true : undefined,
+                      overWire: true,
+                      updatedAt: Date.now(),
+                    }
+                  : t,
+              ),
+            }));
+            transferFileBytes.delete(id);
+            persist();
+            notify(set, "Transfer complete (wire)", "success");
+          })();
+          return;
+        } else {
+          // Received direction: resume local server and notify sender
+          transferControl?.resume(id, offset);
+          // Also notify sender to resume (best-effort)
+          void wireResumeTransfer({
+            device,
+            identity: s.identity!,
+            privateKey: s.privateKey!,
+            transferId: id,
+            offset,
+          }).catch(() => {});
+          set((st) => ({
+            ...st,
+            transfers: st.transfers.map((t) =>
+              t.id === id
+                ? {
+                    ...t,
+                    status: "transferring" as const,
+                    resumeOffset: offset,
+                    updatedAt: Date.now(),
+                    error: undefined,
+                  }
+                : t,
+            ),
+          }));
+          persist();
+          notify(
+            set,
+            offset > 0
+              ? `Resuming from ${Math.round((offset / Math.max(1, tx.totalBytes)) * 100)}%…`
+              : "Resuming transfer…",
+            "info",
+          );
+          return;
+        }
+      }
       set((st) => ({
         ...st,
         transfers: st.transfers.map((t) =>
@@ -3341,6 +3801,22 @@ export function createLyraStore(options?: {
         }
         return base;
       });
+      // Store bytes for wire resume and controllers
+      for (const tx of newTransfers) {
+        if (tx.overWire) {
+          // Store original files with bytes for this transferId
+          transferFileBytes.set(
+            tx.id,
+            files.map((f) => ({
+              name: f.name,
+              size: f.size,
+              mimeType: f.mimeType,
+              checksum: f.checksum,
+              bytes: f.bytes!,
+            })),
+          );
+        }
+      }
       set((st) => ({ ...st, transfers: [...newTransfers, ...st.transfers] }));
       persist();
       if (forceConflict) {
@@ -3410,6 +3886,8 @@ export function createLyraStore(options?: {
             notify(set, "Transfer failed: file contents could not be read", "error");
             continue;
           }
+          const controller = new AbortController();
+          transferControllers.set(tx.id, controller);
           void wireSendFiles({
             device,
             identity: s.identity,
@@ -3417,6 +3895,7 @@ export function createLyraStore(options?: {
             transferId: tx.id,
             files,
             resumeOffset: tx.resumeOffset,
+            signal: controller.signal,
             onProgress: (p) => {
               set((st) => ({
                 ...st,
@@ -3434,7 +3913,34 @@ export function createLyraStore(options?: {
               }));
             },
           }).then((res) => {
+            transferControllers.delete(tx.id);
             if (!res.ok) {
+              // If locally paused/cancelled, don't overwrite
+              const cur = getState().transfers.find((t) => t.id === tx.id);
+              if (cur?.status === "paused" || cur?.status === "cancelled") return;
+              // Receiver paused us
+              if (res.error === "Transfer paused by peer") {
+                set((st) => ({
+                  ...st,
+                  transfers: st.transfers.map((t) =>
+                    t.id === tx.id
+                      ? {
+                          ...t,
+                          status: "paused" as const,
+                          resumeOffset: t.transferredBytes,
+                          updatedAt: Date.now(),
+                        }
+                      : t,
+                  ),
+                }));
+                persist();
+                notify(set, "Transfer paused by peer", "info");
+                return;
+              }
+              if (res.error === "Aborted") {
+                // Local abort for pause/cancel already handled via setTransferStatus
+                return;
+              }
               set((st) => ({
                 ...st,
                 transfers: st.transfers.map((t) =>
@@ -3483,6 +3989,7 @@ export function createLyraStore(options?: {
                   : t,
               ),
             }));
+            transferFileBytes.delete(tx.id);
             persist();
             notify(set, "Transfer complete (wire)", "success");
           });
@@ -3513,6 +4020,63 @@ export function createLyraStore(options?: {
     },
     setTransferStatus: (id, status) => {
       const prev = getState().transfers.find((t) => t.id === id);
+      const isWire = Boolean(prev?.overWire);
+      // Handle wire pause/cancel
+      if (isWire && prev && (status === "paused" || status === "cancelled")) {
+        const s = getState();
+        if (prev.direction === "received") {
+          // Receiver pausing/cancelling: control local server map
+          if (status === "paused") {
+            transferControl?.pause(id);
+          } else if (status === "cancelled") {
+            transferControl?.cancel(id);
+            // Also notify sender to cancel its send
+            const device = getState().devices.find((d) => d.id === prev.deviceId);
+            if (device && s.identity && s.privateKey) {
+              void wireCancelTransfer({
+                device,
+                identity: s.identity,
+                privateKey: s.privateKey,
+                transferId: id,
+              }).catch(() => {});
+            }
+          }
+        } else {
+          // Sender pausing/cancelling: abort and notify receiver
+          const device = getState().devices.find((d) => d.id === prev.deviceId);
+          if (device && s.identity && s.privateKey) {
+            const ctrl = transferControllers.get(id);
+            if (ctrl) {
+              ctrl.abort();
+              transferControllers.delete(id);
+            }
+            if (status === "paused") {
+              void wirePauseTransfer({
+                device,
+                identity: s.identity,
+                privateKey: s.privateKey,
+                transferId: id,
+              }).catch(() => {});
+            } else if (status === "cancelled") {
+              void wireCancelTransfer({
+                device,
+                identity: s.identity,
+                privateKey: s.privateKey,
+                transferId: id,
+              }).catch(() => {});
+              transferFileBytes.delete(id);
+            }
+          } else {
+            // Still abort controller even if device not found
+            const ctrl = transferControllers.get(id);
+            if (ctrl) {
+              ctrl.abort();
+              transferControllers.delete(id);
+            }
+            if (status === "cancelled") transferFileBytes.delete(id);
+          }
+        }
+      }
       set((s) => ({
         ...s,
         transfers: s.transfers.map((t) => {
@@ -3539,8 +4103,23 @@ export function createLyraStore(options?: {
         }),
       }));
       persist();
+      if (status === "cancelled" && isWire) {
+        transferControllers.delete(id);
+        transferFileBytes.delete(id);
+        notify(set, "Transfer cancelled", "info");
+        return;
+      }
+      if (status === "paused" && isWire) {
+        notify(set, "Transfer paused", "info");
+        return;
+      }
       // Resume simulation only when entering transferring from a non-active state
       if (status === "transferring" && prev && prev.status !== "transferring") {
+        if (isWire) {
+          // Delegate to wire resume
+          void store.resumeTransfer(id);
+          return;
+        }
         simulateTransferProgress(store, set, id);
       }
     },
