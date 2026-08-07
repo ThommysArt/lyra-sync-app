@@ -132,8 +132,9 @@ function jsonResponse(
   };
   if (cors) {
     headers["access-control-allow-origin"] = "*";
-    headers["access-control-allow-headers"] = "content-type, authorization";
+    headers["access-control-allow-headers"] = "content-type, authorization, access-control-request-private-network, access-control-request-headers";
     headers["access-control-allow-methods"] = "GET, POST, OPTIONS";
+    headers["access-control-allow-private-network"] = "true";
   }
   const text = status === 204 ? "" : JSON.stringify(body);
   if (text) {

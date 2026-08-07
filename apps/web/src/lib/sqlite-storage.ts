@@ -106,6 +106,8 @@ export function createSqliteLyraStorage(): StorageLike & { hydrate?: () => Promi
     }
   };
 
+  // Track pending writes so flush() can await them
+  const pendingWrites = new Map<string, Promise<unknown>>();
   return {
     hydrate: () => {
       if (hydratePromise) return hydratePromise;
@@ -114,7 +116,13 @@ export function createSqliteLyraStorage(): StorageLike & { hydrate?: () => Promi
       return hydratePromise;
     },
     flush: async () => {
-      // SQLite is sync in main, nothing to flush
+      // Wait for all pending IPC writes to complete
+      const pending = [...pendingWrites.values()];
+      if (pending.length > 0) {
+        console.log(`[lyra sqlite] flush waiting for ${pending.length} pending writes`);
+        await Promise.all(pending.map((p) => p.catch(() => {})));
+        console.log(`[lyra sqlite] flush complete`);
+      }
     },
     getItem: (key) => {
       if (!hydrated) {
@@ -124,22 +132,36 @@ export function createSqliteLyraStorage(): StorageLike & { hydrate?: () => Promi
         const v = cache.get(key);
         return v ?? null;
       }
-      // Fallback: sync cache miss — we don't block; return null and hydrate will fill later
-      // For critical hydrate path we rely on hydrate() having run first (LyraProvider does)
       return null;
     },
     setItem: (key, value) => {
       cache.set(key, value);
-      // Fire-and-forget to main; lyra core persist() may await via flush() but we keep cache sync
-      void kv.kvSet(key, value).catch((e) => {
+      console.log(`[lyra sqlite] setItem ${key} (${value.length} chars)`);
+      const p = kv.kvSet(key, value).then((res) => {
+        if (res && typeof res === "object" && "ok" in res && !(res as { ok: boolean }).ok) {
+          console.error(`[lyra sqlite] kvSet failed for ${key}:`, (res as { error?: string }).error);
+        } else {
+          console.log(`[lyra sqlite] kvSet ok for ${key}`);
+        }
+        pendingWrites.delete(key);
+        return res;
+      }).catch((e) => {
         console.error("[lyra sqlite] kvSet failed", key, e instanceof Error ? e.message : String(e));
+        pendingWrites.delete(key);
+        throw e;
       });
+      pendingWrites.set(key, p);
+      return p as unknown as void;
     },
     removeItem: (key) => {
       cache.delete(key);
-      void kv.kvRemove(key).catch((e) => {
+      console.log(`[lyra sqlite] removeItem ${key}`);
+      const p = kv.kvRemove(key).catch((e) => {
         console.error("[lyra sqlite] kvRemove failed", key, e);
+        throw e;
       });
+      // Don't track remove in pendingWrites for simplicity
+      return p as unknown as void;
     },
   };
 }

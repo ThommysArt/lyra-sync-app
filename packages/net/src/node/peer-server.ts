@@ -148,19 +148,28 @@ function applyCors(
 ) {
   if (cors === false) return;
   const origin = req.headers.origin;
+  // Private Network Access (Chrome 94+): browser sends Access-Control-Request-Private-Network: true
+  // for localhost -> 192.168.x fetches; server must echo Allow-Private-Network.
+  const wantsPrivateNetwork = req.headers["access-control-request-private-network"] === "true";
   if (cors === true || cors === undefined) {
     // Reflect request origin when present (credentials-friendly LAN); else *
     res.setHeader("access-control-allow-origin", origin || "*");
-    res.setHeader("access-control-allow-headers", "content-type, authorization");
+    res.setHeader("access-control-allow-headers", "content-type, authorization, access-control-request-private-network, access-control-request-headers");
     res.setHeader("access-control-allow-methods", "GET, POST, OPTIONS");
-    if (origin) res.setHeader("vary", "Origin");
+    res.setHeader("access-control-allow-private-network", "true");
+    if (wantsPrivateNetwork) res.setHeader("access-control-allow-private-network", "true");
+    if (origin) res.setHeader("vary", "Origin, Access-Control-Request-Private-Network");
     return;
   }
   if (Array.isArray(cors) && origin && cors.includes(origin)) {
     res.setHeader("access-control-allow-origin", origin);
-    res.setHeader("access-control-allow-headers", "content-type, authorization");
+    res.setHeader("access-control-allow-headers", "content-type, authorization, access-control-request-private-network, access-control-request-headers");
     res.setHeader("access-control-allow-methods", "GET, POST, OPTIONS");
-    res.setHeader("vary", "Origin");
+    res.setHeader("access-control-allow-private-network", "true");
+    res.setHeader("vary", "Origin, Access-Control-Request-Private-Network");
+  } else if (wantsPrivateNetwork) {
+    // Even if origin not allowed, still allow private network for preflight to succeed
+    res.setHeader("access-control-allow-private-network", "true");
   }
 }
 
@@ -340,16 +349,18 @@ export async function startPeerServer(options: PeerServerOptions): Promise<PeerS
     const url = new URL(req.url ?? "/", `${protocol}://${req.headers.host ?? "localhost"}`);
     const logDone = (status: number, note?: string) => {
       const path = url.pathname;
-      // Always log pair/auth/message; sample /lyra/info probes (discovery floods)
+      // Always log POST (transfers, auth, pair) and errors; sample GET /lyra/info probes (discovery floods)
+      const isPost = req.method === "POST";
       const interesting =
-        path !== "/lyra/info" && path !== "/lyra/health"
+        isPost || path !== "/lyra/info" && path !== "/lyra/health"
           ? true
-          : req.method !== "GET" || Boolean(note);
+          : req.method !== "GET" || Boolean(note) || status >= 400;
       if (interesting || Math.random() < 0.05) {
-        console.log(
-          `[lyra peer] ${req.method} ${path} ← ${remote} → ${status} ${Date.now() - started}ms` +
-            (note ? ` · ${note}` : ""),
-        );
+        const level = status >= 400 ? "error" : status >= 300 ? "warn" : "log";
+        const msg = `[lyra peer] ${req.method} ${path} ← ${remote} → ${status} ${Date.now() - started}ms` + (note ? ` · ${note}` : "");
+        if (level === "error") console.error(msg);
+        else if (level === "warn") console.warn(msg);
+        else console.log(msg);
       }
     };
 
@@ -545,7 +556,13 @@ export async function startPeerServer(options: PeerServerOptions): Promise<PeerS
         }
 
         const msgType = envelope.type;
+        // Log every non-trivial envelope to terminal for debugging transfers
+        if (msgType.startsWith("transfer_") || msgType === "pair_request" || msgType === "clipboard_push") {
+          const tid = (envelope.payload as { transferId?: string })?.transferId ?? (envelope.payload as { id?: string })?.id ?? "";
+          console.log(`[lyra peer] <- ${msgType} from ${envelope.fromDeviceId} → ${envelope.toDeviceId ?? "?"} ${tid ? `id=${tid.slice(0,8)}` : ""} ← ${remote} ${session ? `auth:${session.deviceId.slice(0,8)}` : "no-auth"}`);
+        }
         if (requireAuth && !PUBLIC_MESSAGE_TYPES.has(msgType) && !session) {
+          console.warn(`[lyra peer] 401 Auth required for ${msgType} from ${envelope.fromDeviceId} ← ${remote} (no session)`);
           respond(401, { error: "Auth required" }, msgType);
           return;
         }
@@ -563,11 +580,22 @@ export async function startPeerServer(options: PeerServerOptions): Promise<PeerS
         // Built-in protocol handlers (clipboard, transfer chunks, fs, pair, ping…)
         // pair_request blocks here until host Accept/Decline
         const builtin = await handlePeerEnvelope(envelope, session, handlerCtx);
+        // Log errors from handler (e.g., transfer integrity fail, disk full)
+        if (builtin && typeof builtin === "object" && "ok" in builtin && (builtin as { ok: boolean }).ok === false) {
+          console.error(`[lyra peer] handler error for ${msgType} from ${envelope.fromDeviceId}:`, (builtin as { error?: string }).error ?? "unknown");
+        }
         const out = await maybeSealReply(builtin, session, sealReplies);
         const replyType =
           out && typeof out === "object" && out !== null && "type" in out
             ? String((out as { type: string }).type)
             : msgType;
+        // Log transfer progress acks at debug level (too verbose for info)
+        if (msgType === "transfer_chunk" && out && typeof out === "object" && "type" in out) {
+          const p = (out as { payload?: { receivedBytes?: number } }).payload;
+          if (p?.receivedBytes !== undefined) {
+            console.log(`[lyra peer] -> ${replyType} for ${msgType} ${(envelope.payload as { transferId?: string })?.transferId?.slice(0,8) ?? ""} ack offset=${(p as { offset?: number }).offset ?? "?"} received=${p.receivedBytes}`);
+          }
+        }
         respond(200, out, replyType);
         return;
       }

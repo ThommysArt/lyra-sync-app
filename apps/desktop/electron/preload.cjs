@@ -113,6 +113,8 @@ contextBridge.exposeInMainWorld("lyraDesktop", {
   kvRemove: (key) => ipcRenderer.invoke("lyra:kv-remove", key),
   kvGetAll: () => ipcRenderer.invoke("lyra:kv-getAll"),
   kvKeys: () => ipcRenderer.invoke("lyra:kv-keys"),
+  // Forward renderer logs to main terminal
+  log: (level, ns, msg, data) => ipcRenderer.invoke("lyra:log", { level, ns, msg, data }),
   onScreenShareRequest: (handler) => {
     const listener = (_event, payload) => handler(payload);
     ipcRenderer.on("lyra:screen-share-request", listener);

@@ -23,6 +23,18 @@ import type {
 } from "@lyra-sync-app/protocol";
 import { AppSettingsSchema, LYRA_DEFAULT_PORT } from "@lyra-sync-app/protocol";
 
+function forwardLog(level: string, ns: string, msg: string, data?: unknown) {
+  const line = `[${ns}] ${msg}` + (data ? ` ${typeof data === "string" ? data : JSON.stringify(data).slice(0,800)}` : "");
+  if (level === "error") console.error(line);
+  else if (level === "warn") console.warn(line);
+  else console.log(line);
+  try {
+    const g = globalThis as unknown as { window?: { lyraDesktop?: { log?: (l: string, n: string, m: string, d?: unknown) => Promise<unknown> } }; lyraDesktop?: { log?: (l: string, n: string, m: string, d?: unknown) => Promise<unknown> } };
+    const fn = g.window?.lyraDesktop?.log ?? g.lyraDesktop?.log;
+    if (fn) void fn(level, ns, msg, data);
+  } catch {}
+}
+
 import {
   createDemoClipboardHistory,
   createDemoPairedDevices,
@@ -613,7 +625,11 @@ async function finalizePairDevice(
   },
 ): Promise<PairedDevice | null> {
   const s = getState();
-  if (!s.identity || !s.privateKey) return null;
+  if (!s.identity || !s.privateKey) {
+    forwardLog("error", "lyra pair", "finalizePairDevice: no identity/privateKey");
+    return null;
+  }
+  forwardLog("log", "lyra pair", `finalizePairDevice: pairing with ${input.payload.name} (${input.payload.deviceId.slice(0,8)}) via ${input.source}`, { deviceId: input.payload.deviceId, host: input.payload.host, port: input.payload.port, token: input.payload.token.slice(0,8) });
 
   const authSecret = await deriveMutualAuthSecret({
     pairingToken: input.payload.token,
@@ -680,7 +696,9 @@ async function finalizePairDevice(
       (r) => r.payload.deviceId !== device.id && r.payload.fingerprint !== device.fingerprint,
     ),
   }));
+  forwardLog("log", "lyra pair", `finalizePairDevice: added ${device.name} ${device.id.slice(0,8)} host=${device.host}:${device.port} auth=${authSecret.slice(0,8)}... total devices=${getState().devices.length}`);
   await persist();
+  forwardLog("log", "lyra pair", `finalizePairDevice: persist done for ${device.id.slice(0,8)}`);
 
   // Optional legacy notify (prefer long-poll pair_confirm on the host path)
   if (input.notifyRemote && device.host && s.identity) {
@@ -968,7 +986,11 @@ export function createLyraStore(options?: {
   const getState = () => state;
 
   const persist = () => {
-    if (!storage || !state.identity) return;
+    if (!storage || !state.identity) {
+      forwardLog("warn", "lyra store", "persist skipped: no storage or identity", { hasStorage: !!storage, hasIdentity: !!state.identity });
+      return;
+    }
+    forwardLog("log", "lyra store", `persist: ${state.devices.length} devices, ${state.transfers.length} transfers`, { devices: state.devices.map(d=>`${d.name}:${d.id.slice(0,8)}`), identity: state.identity.id.slice(0,8) });
     // Prefer isolating private key under a separate storage key when possible
     // so bulk device/clipboard dumps are less sensitive (web localStorage).
     let p1: unknown;
@@ -978,8 +1000,8 @@ export function createLyraStore(options?: {
       if (state.privateKey && typeof storage.setItem === "function") {
         p1 = storage.setItem(`${STORAGE_KEY}.key`, state.privateKey);
       }
-    } catch {
-      // ignore
+    } catch (e) {
+      forwardLog("error", "lyra store", "persist setItem .key failed", { error: e instanceof Error ? e.message : String(e) });
     }
     const payload = {
       identity: state.identity,
@@ -992,13 +1014,13 @@ export function createLyraStore(options?: {
     };
     try {
       p2 = storage.setItem(STORAGE_KEY, JSON.stringify(payload));
-    } catch {
-      // ignore quota errors
+    } catch (e) {
+      forwardLog("error", "lyra store", "persist setItem failed", { error: e instanceof Error ? e.message : String(e) });
     }
     try {
       if (storage.flush) p3 = storage.flush();
-    } catch {
-      // ignore
+    } catch (e) {
+      forwardLog("error", "lyra store", "persist flush failed", { error: e instanceof Error ? e.message : String(e) });
     }
     const hasAsync = p1 instanceof Promise || p2 instanceof Promise || p3 instanceof Promise;
     if (hasAsync) {
@@ -1009,6 +1031,7 @@ export function createLyraStore(options?: {
   };
 
   const hydrate = async () => {
+    forwardLog("log", "lyra store", "hydrate start", { hasStorage: !!storage, seedDemo, platformHint: options?.platformHint });
     let identity: DeviceIdentity | null = null;
     let privateKey: string | null = null;
     let devices: PairedDevice[] = [];
@@ -1021,10 +1044,14 @@ export function createLyraStore(options?: {
       if (storage.hydrate) {
         try {
           await storage.hydrate();
-        } catch {}
+          forwardLog("log", "lyra store", "storage hydrate done");
+        } catch (e) {
+          forwardLog("error", "lyra store", "storage hydrate failed", { error: e instanceof Error ? e.message : String(e) });
+        }
       }
       try {
         const raw = await Promise.resolve(storage.getItem(STORAGE_KEY));
+        forwardLog("log", "lyra store", `hydrate getItem ${STORAGE_KEY} -> ${raw ? `${raw.length} chars` : "null"}`, { hasRaw: !!raw });
         if (raw) {
           const parsed = JSON.parse(raw) as Partial<typeof state> & { privateKey?: string | null };
           if (parsed.identity) identity = parsed.identity;
@@ -1033,13 +1060,17 @@ export function createLyraStore(options?: {
           if (parsed.clipboardHistory) clipboardHistory = parsed.clipboardHistory;
           if (parsed.transfers) transfers = parsed.transfers;
           if (parsed.settings) settings = AppSettingsSchema.parse(parsed.settings);
+          forwardLog("log", "lyra store", `hydrate parsed: ${devices.length} devices, identity=${identity?.id.slice(0,8) ?? "null"}`);
         }
         // Isolated key slot (preferred)
         const isolated = await Promise.resolve(storage.getItem(`${STORAGE_KEY}.key`));
+        forwardLog("log", "lyra store", `hydrate isolated key -> ${isolated ? `${isolated.length} chars` : "null"}`);
         if (isolated) privateKey = isolated;
-      } catch {
-        // corrupt storage — re-seed
+      } catch (e) {
+        forwardLog("error", "lyra store", "hydrate parse failed, will re-seed", { error: e instanceof Error ? e.message : String(e) });
       }
+    } else {
+      forwardLog("warn", "lyra store", "hydrate: no storage, will create new identity");
     }
 
     if (!identity || !privateKey) {
@@ -1095,7 +1126,9 @@ export function createLyraStore(options?: {
         error: null,
       },
     }));
+    forwardLog("log", "lyra store", `hydrate done: identity=${identity.id.slice(0,8)} devices=${devices.length} transfers=${transfers.length}`, { identity: identity.id.slice(0,8), devices: devices.map(d=>`${d.name}:${d.id.slice(0,8)}`) });
     await persist();
+    forwardLog("log", "lyra store", "hydrate persist done");
   };
 
   const store: LyraStore = {
@@ -3755,7 +3788,11 @@ export function createLyraStore(options?: {
     },
     startFileTransfer: (deviceIds, files, options) => {
       const s = getState();
-      if (!s.identity || files.length === 0 || deviceIds.length === 0) return;
+      forwardLog("log", "lyra transfer", `startFileTransfer: ${files.length} files to ${deviceIds.length} devices, total=${files.reduce((a,f)=>a+f.size,0)} bytes`, { deviceIds, files: files.map(f=>`${f.name}:${f.size}`), identity: s.identity?.id.slice(0,8) });
+      if (!s.identity || files.length === 0 || deviceIds.length === 0) {
+        forwardLog("warn", "lyra transfer", "startFileTransfer aborted: missing identity/files/deviceIds", { hasIdentity: !!s.identity, files: files.length, deviceIds: deviceIds.length });
+        return;
+      }
       const direction = options?.direction ?? "sent";
       const forceConflict = options?.forceConflict ?? false;
       const forceSimulate = options?.forceSimulate ?? false;
@@ -3858,6 +3895,10 @@ export function createLyraStore(options?: {
       for (const tx of newTransfers) {
         if (tx.status !== "transferring") continue;
         const device = getState().devices.find((d) => d.id === tx.deviceId);
+        forwardLog("log", "lyra transfer", `tx ${tx.id.slice(0,8)} overWire=${tx.overWire} device=${device?.name ?? "null"}:${device?.id.slice(0,8) ?? "null"} host=${device?.host}:${device?.port} auth=${!!device?.authSecret} isLive=${device ? isLivePeer(device) : false}`, { transferId: tx.id, deviceId: tx.deviceId, overWire: tx.overWire, host: device?.host, port: device?.port, hasAuth: !!device?.authSecret });
+        if (!tx.overWire) {
+          forwardLog("warn", "lyra transfer", `tx ${tx.id.slice(0,8)} not overWire, will simulate`, { transferId: tx.id, deviceId: tx.deviceId, isLive: device ? isLivePeer(device) : false, hasAuth: !!device?.authSecret });
+        }
         if (tx.overWire && device && s.identity && s.privateKey) {
           if (!device.authSecret) {
             set((st) => ({
@@ -3874,7 +3915,7 @@ export function createLyraStore(options?: {
               ),
             }));
             persist();
-            console.error(`[lyra transfer] failed ${tx.id}: not paired`, {
+            forwardLog("error", "lyra transfer", `failed ${tx.id}: not paired`, {
               transferId: tx.id,
               deviceId: device.id,
             });
@@ -3902,7 +3943,7 @@ export function createLyraStore(options?: {
               ),
             }));
             persist();
-            console.error(`[lyra transfer] failed ${tx.id}: could not read ${missing[0]!.name}`, {
+            forwardLog("error", "lyra transfer", `failed ${tx.id}: could not read ${missing[0]!.name}`, {
               transferId: tx.id,
               file: missing[0]!.name,
             });
@@ -3925,7 +3966,7 @@ export function createLyraStore(options?: {
               ),
             }));
             persist();
-            console.error(`[lyra transfer] failed ${tx.id}: empty file ${emptyBytes[0]!.name}`, {
+            forwardLog("error", "lyra transfer", `failed ${tx.id}: empty file ${emptyBytes[0]!.name}`, {
               transferId: tx.id,
               file: emptyBytes[0]!.name,
             });
@@ -4001,7 +4042,7 @@ export function createLyraStore(options?: {
                 ),
               }));
               persist();
-              console.error(`[lyra transfer] failed ${tx.id}: ${res.error}`, {
+              forwardLog("error", "lyra transfer", `failed ${tx.id}: ${res.error}`, {
                 transferId: tx.id,
                 deviceId: device.id,
                 error: res.error,
@@ -4009,6 +4050,7 @@ export function createLyraStore(options?: {
               notify(set, `Transfer failed: ${res.error}`, "error");
               return;
             }
+            forwardLog("log", "lyra transfer", `wireSendFiles ok ${tx.id} -> ${device.id.slice(0,8)}`, { transferId: tx.id, endpoint: res.endpoint, checksums: res.checksums });
             if (res.endpoint) {
               set((st) => ({
                 ...st,
@@ -4045,6 +4087,7 @@ export function createLyraStore(options?: {
             notify(set, "Transfer complete (wire)", "success");
           });
         } else {
+          forwardLog("log", "lyra transfer", `simulateTransferProgress for ${tx.id.slice(0,8)} (overWire=${tx.overWire}, isLive=${device ? isLivePeer(device) : false})`, { transferId: tx.id, overWire: tx.overWire, deviceId: device?.id.slice(0,8) });
           simulateTransferProgress(store, set, tx.id);
         }
       }

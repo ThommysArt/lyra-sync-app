@@ -5,6 +5,7 @@ allowBuilds:
   esbuild: true
   sharp: true
   better-sqlite3: true
+  electron: true
 catalog:
   dotenv: ^17.4.2
   zod: ^4.4.3

@@ -414,77 +414,167 @@ export async function wireSendFiles(input: {
             }
           } catch {}
           let lastErr: unknown = null;
-          for (let attempt = 0; attempt < 3; attempt++) {
-            // 1) Modern File API — slice (SDK 52+) — preferred, no base64, handles file:// correctly
+          // For DocumentPicker files, ensure we have a stable copy in cache that File API can read reliably.
+          // Some Android content:// or file:// URIs from DocumentPicker are not directly accessible via File.slice on all OS versions.
+          // We try to normalize the uri by copying to a temp File if needed (once per file).
+          let normalizedUri = f.uri!;
+          let didNormalize = false;
+          const tryNormalizeUri = async (): Promise<string> => {
+            if (didNormalize) return normalizedUri;
+            didNormalize = true;
             try {
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const modN = await (new Function('return import("expo-file-system")') as () => Promise<any>)();
+              const FileClsN = modN.File;
+              const PathsN = modN.Paths;
+              if (FileClsN && PathsN?.cache) {
+                const src = new FileClsN(f.uri!);
+                if (!src.exists) {
+                  console.warn(`[lyra transfer] normalize: src not exists ${f.uri?.slice(0,60)}`);
+                  return normalizedUri;
+                }
+                // If file is already in cache and readable via File.info, keep original
+                try {
+                  const info = src.info();
+                  if (info.exists && info.size === f.size) return normalizedUri;
+                } catch {}
+                // Copy to a temp file with proper name in cache for reliable reading
+                try {
+                  const safeName = f.name.replace(/[^\w.\-]/g, "_") || `tmp_${Date.now()}`;
+                  const dest = new FileClsN(PathsN.cache, `lyra-send-${Date.now()}-${safeName}`);
+                  // Ensure parent exists
+                  try { dest.create({ overwrite: true }); } catch {}
+                  await src.copy(dest);
+                  if (dest.exists) {
+                    console.info(`[lyra transfer] normalized ${f.name} ${f.uri?.slice(0,50)} -> ${dest.uri.slice(0,50)}`);
+                    normalizedUri = dest.uri;
+                    return normalizedUri;
+                  }
+                } catch (e) {
+                  console.warn(`[lyra transfer] normalize copy failed ${f.name}`, e instanceof Error ? e.message : String(e));
+                }
+              }
+            } catch {}
+            return normalizedUri;
+          };
+          for (let attempt = 0; attempt < 3; attempt++) {
+            const uriToUse = attempt === 0 ? normalizedUri : await tryNormalizeUri();
+            // 1) Modern File API — open/readBytes streaming (best for large files, no OOM)
+            try {
               const loadFS = new Function('return import("expo-file-system")') as () => Promise<any>;
               const mod = await loadFS() as unknown as {
                 File?: new (uri: string) => {
                   slice: (start: number, end: number) => { arrayBuffer: () => Promise<ArrayBuffer> };
                   open?: (mode?: string) => { readBytes: (len: number) => Uint8Array; close: () => void; offset?: number | null };
                   exists: boolean;
+                  info: () => { exists: boolean; size?: number };
+                  bytes: () => Promise<Uint8Array>;
                 };
                 FileMode?: { ReadOnly: string };
               };
               const FileCls = mod.File;
               if (FileCls) {
-                const fileObj = new FileCls(f.uri!);
-                if (!fileObj.exists) throw new Error(`File not found at ${f.uri?.slice(0, 60)} (not in cache). Re-pick with copyToCacheDirectory:true.`);
-                // Try slice first (most reliable for file://)
-                try {
-                  const sliced = fileObj.slice(offset, offset + len) as unknown as { arrayBuffer: () => Promise<ArrayBuffer> };
-                  if (sliced?.arrayBuffer) {
-                    const ab = await sliced.arrayBuffer();
-                    if (ab.byteLength > 0) return new Uint8Array(ab);
-                    if (ab.byteLength === 0 && len > 0) {
-                      // Empty slice at non-EOF is unexpected — fall through to next method
-                      lastErr = new Error("slice returned 0 bytes");
+                const fileObj = new FileCls(uriToUse);
+                if (!fileObj.exists) {
+                  lastErr = new Error(`File not found at ${uriToUse.slice(0, 60)} (not in cache). Re-pick with copyToCacheDirectory:true.`);
+                  console.warn(`[lyra transfer] File not exists ${f.name} uri=${uriToUse.slice(0,80)} attempt ${attempt+1}`);
+                } else {
+                  // Try open/readBytes first (true streaming, works for 300MB without OOM)
+                  try {
+                    const handle = (fileObj as unknown as { open?: (mode?: unknown) => { readBytes: (len: number) => Uint8Array; close: () => void; offset?: number | null } }).open?.(mod.FileMode?.ReadOnly ?? "r");
+                    if (handle) {
+                      try {
+                        if (typeof handle.offset === "number") handle.offset = offset;
+                        const bytes = handle.readBytes(len);
+                        if (bytes.byteLength > 0) {
+                          if (uriToUse !== f.uri) f.uri = uriToUse; // remember normalized for next chunks
+                          return bytes;
+                        }
+                        if (bytes.byteLength === 0 && len > 0) lastErr = new Error("readBytes returned 0 bytes");
+                      } finally {
+                        try { handle.close(); } catch {}
+                      }
                     }
+                  } catch (e) {
+                    lastErr = e;
+                    console.warn(`[lyra transfer] File.open/readBytes failed ${f.name} @${offset}:${len} attempt ${attempt + 1} uri=${uriToUse.slice(0,40)}`, e instanceof Error ? e.message : String(e), e instanceof Error ? e.stack?.slice(0,200) : "");
                   }
-                } catch (e) {
-                  lastErr = e;
-                  console.warn(`[lyra transfer] File.slice failed ${f.name} @${offset}:${len} attempt ${attempt + 1}`, e instanceof Error ? e.message : String(e));
-                }
-                // Try open/readBytes as second modern path (avoids loading whole file)
-                try {
-                  const handle = (fileObj as unknown as { open?: (mode?: unknown) => { readBytes: (len: number) => Uint8Array; close: () => void; offset?: number | null } }).open?.(mod.FileMode?.ReadOnly ?? "r");
-                  if (handle) {
+                  // Try slice (Blob) as second
+                  try {
+                    const sliced = fileObj.slice(offset, offset + len) as unknown as { arrayBuffer: () => Promise<ArrayBuffer> };
+                    if (sliced?.arrayBuffer) {
+                      const ab = await sliced.arrayBuffer();
+                      if (ab.byteLength > 0) {
+                        if (uriToUse !== f.uri) f.uri = uriToUse;
+                        return new Uint8Array(ab);
+                      }
+                      if (ab.byteLength === 0 && len > 0) lastErr = new Error("slice returned 0 bytes");
+                    }
+                  } catch (e) {
+                    lastErr = e;
+                    console.warn(`[lyra transfer] File.slice failed ${f.name} @${offset}:${len} attempt ${attempt + 1} uri=${uriToUse.slice(0,40)}`, e instanceof Error ? e.message : String(e));
+                  }
+                  // Try bytes() for files <50MB (whole file then slice)
+                  if ((f.size ?? 0) < 50 * 1024 * 1024) {
                     try {
-                      if (typeof handle.offset === "number") handle.offset = offset;
-                      const bytes = handle.readBytes(len);
-                      if (bytes.byteLength > 0) return bytes;
-                    } finally {
-                      try { handle.close(); } catch {}
+                      const all = await fileObj.bytes() as Uint8Array;
+                      if (all.byteLength > offset) {
+                        if (uriToUse !== f.uri) f.uri = uriToUse;
+                        return all.subarray(offset, Math.min(all.byteLength, offset + len));
+                      }
+                    } catch (e) {
+                      lastErr = e;
+                      console.warn(`[lyra transfer] File.bytes fallback failed ${f.name} @${offset}:${len} attempt ${attempt+1}`, e instanceof Error ? e.message : String(e));
                     }
                   }
-                } catch (e) {
-                  lastErr = e;
                 }
               }
             } catch (e) {
               lastErr = e;
+              console.warn(`[lyra transfer] File API overall failed ${f.name} attempt ${attempt+1}`, e instanceof Error ? e.message : String(e));
             }
-            // 2) For content:// URIs, fetch can handle them on Android when copyToCacheDirectory is true file:// may also work
-            //    We try fetch for small files as fallback, but for large files we avoid OOM by NOT fetching whole file.
-            //    Instead, we fail with actionable error.
-            if ((f.size ?? 0) < 10 * 1024 * 1024) {
+            // 2) Fallback: fetch (works for file:// on Android via React Native fetch) for <100MB
+            if ((f.size ?? 0) < 100 * 1024 * 1024) {
               try {
-                const res = await fetch(f.uri!);
+                const res = await fetch(uriToUse);
                 if (res.ok) {
                   const ab = await res.arrayBuffer();
                   const full = new Uint8Array(ab);
                   if (full.byteLength >= offset + len || full.byteLength > 0) {
+                    if (uriToUse !== f.uri) f.uri = uriToUse;
+                    console.info(`[lyra transfer] fetch fallback succeeded ${f.name} @${offset}:${len} attempt ${attempt+1} bytes=${full.byteLength}`);
                     return full.subarray(offset, Math.min(full.byteLength, offset + len));
                   }
                 } else {
-                  lastErr = new Error(`fetch ${f.uri?.slice(0,60)} failed ${res.status}`);
+                  lastErr = new Error(`fetch ${uriToUse.slice(0,60)} failed ${res.status}`);
                 }
               } catch (e) {
                 lastErr = e;
+                console.warn(`[lyra transfer] fetch fallback failed ${f.name} @${offset}:${len} attempt ${attempt+1} uri=${uriToUse.slice(0,40)}`, e instanceof Error ? e.message : String(e));
               }
             }
-            if (attempt < 2) await new Promise((r) => setTimeout(r, 120 * (attempt + 1)));
+            // 3) Last resort: legacy readAsStringAsync without position (read whole file as base64) for <50MB
+            if ((f.size ?? 0) < 50 * 1024 * 1024) {
+              try {
+                const loadLegacy = new Function('return import("expo-file-system/legacy")') as () => Promise<any>;
+                const FS = await loadLegacy() as { readAsStringAsync: (uri: string, opts: unknown) => Promise<string>; EncodingType: { Base64: string }; getInfoAsync: (uri: string) => Promise<{ exists: boolean; size?: number }> };
+                const info = await FS.getInfoAsync(uriToUse).catch(() => ({ exists: false }));
+                if (!info.exists) {
+                  lastErr = new Error(`legacy getInfo not exists ${uriToUse.slice(0,50)}`);
+                } else {
+                  const b64 = await FS.readAsStringAsync(uriToUse, { encoding: FS.EncodingType.Base64 });
+                  const bin = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+                  if (bin.byteLength > offset) {
+                    if (uriToUse !== f.uri) f.uri = uriToUse;
+                    console.info(`[lyra transfer] legacy whole-file fallback succeeded ${f.name} bytes=${bin.byteLength}`);
+                    return bin.subarray(offset, Math.min(bin.byteLength, offset + len));
+                  }
+                }
+              } catch (e) {
+                lastErr = e;
+                console.warn(`[lyra transfer] legacy fallback failed ${f.name} attempt ${attempt+1}`, e instanceof Error ? e.message : String(e));
+              }
+            }
+            if (attempt < 2) await new Promise((r) => setTimeout(r, 250 * (attempt + 1)));
           }
           console.error(`[lyra transfer] Unable to read chunk at ${offset} len ${len} for ${f.name} (uri ${f.uri?.slice(0, 60)}) after 3 attempts: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`, {
             transferId: input.transferId,

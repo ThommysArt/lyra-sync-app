@@ -73,7 +73,9 @@ export function getDb(): DbHandle {
 export function kvGet(key: string): string | null {
   try {
     const row = getDb().prepare("SELECT value FROM kv WHERE key = ?").get(key) as { value: string } | undefined;
-    return row?.value ?? null;
+    const found = row?.value ?? null;
+    console.log(`[lyra sqlite] kvGet ${key} -> ${found ? `${found.length} chars` : "null"}`);
+    return found;
   } catch (e) {
     console.error("[lyra sqlite] kvGet failed", key, e instanceof Error ? e.message : String(e));
     return null;
@@ -82,7 +84,9 @@ export function kvGet(key: string): string | null {
 
 export function kvSet(key: string, value: string): void {
   try {
+    console.log(`[lyra sqlite] kvSet ${key} (${value.length} chars)`);
     getDb().prepare("INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)").run(key, value);
+    console.log(`[lyra sqlite] kvSet ${key} done`);
   } catch (e) {
     console.error("[lyra sqlite] kvSet failed", key, e instanceof Error ? e.message : String(e));
     throw e;

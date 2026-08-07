@@ -65,6 +65,18 @@ export function hasCustomHttpTransport(): boolean {
   return Boolean(customTransport || readGlobal());
 }
 
+function forwardLog(level: string, ns: string, msg: string, data?: unknown) {
+  const line = `[${ns}] ${msg}` + (data ? ` ${typeof data === "string" ? data : JSON.stringify(data).slice(0,800)}` : "");
+  if (level === "error") console.error(line);
+  else if (level === "warn") console.warn(line);
+  else console.log(line);
+  try {
+    const g = globalThis as unknown as { window?: { lyraDesktop?: { log?: (l: string, n: string, m: string, d?: unknown) => Promise<unknown> } }; lyraDesktop?: { log?: (l: string, n: string, m: string, d?: unknown) => Promise<unknown> } };
+    const fn = g.window?.lyraDesktop?.log ?? g.lyraDesktop?.log;
+    if (fn) void fn(level, ns, msg, data);
+  } catch {}
+}
+
 export async function fetchAsTransport(
   url: string,
   init?: HttpRequestInit,
@@ -97,18 +109,34 @@ export async function fetchAsTransport(
       cache: "no-store" as RequestCache,
       keepalive: true,
     };
+    // undici is Node-only; avoid vite bundling it for web by using dynamic eval
     try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const undici = typeof require !== "undefined" ? (require("undici") as { Agent?: new (o: unknown) => unknown }) : null;
-      if (undici?.Agent && typeof (fetchOpts as any).dispatcher === "undefined") {
+      const dynRequire = Function('return typeof require !== "undefined" ? require : null')() as unknown as ((id: string) => unknown) | null;
+      const undici = dynRequire ? (dynRequire("undici") as { Agent?: new (o: unknown) => unknown }) : null;
+      if (undici?.Agent && typeof (fetchOpts as unknown as Record<string, unknown>).dispatcher === "undefined") {
         const g = globalThis as unknown as { __lyraUndiciAgent?: unknown };
         if (!g.__lyraUndiciAgent) {
           g.__lyraUndiciAgent = new undici.Agent({ keepAliveTimeout: 30_000, keepAliveMaxTimeout: 60_000, connections: 16 });
         }
-        (fetchOpts as any).dispatcher = g.__lyraUndiciAgent;
+        (fetchOpts as unknown as Record<string, unknown>).dispatcher = g.__lyraUndiciAgent;
       }
     } catch {}
-    const res = await fetch(url, fetchOpts as RequestInit);
+    let res: Response;
+    try {
+      res = await fetch(url, fetchOpts as RequestInit);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      forwardLog("error", "lyra http", `fetch failed ${init?.method ?? "GET"} ${url}: ${msg}`, { url, method: init?.method, error: msg, stack: e instanceof Error ? e.stack?.slice(0,500) : undefined });
+      throw e;
+    }
+    if (!res.ok) {
+      forwardLog("warn", "lyra http", `${init?.method ?? "GET"} ${url} -> HTTP ${res.status}`, { url, method: init?.method, status: res.status });
+    } else {
+      // Log successful POSTs for transfers at debug level (visible when LYRA_LOG=debug)
+      if (init?.method === "POST" && url.includes("/lyra/message")) {
+        forwardLog("log", "lyra http", `POST ${url} -> ${res.status}`, { url });
+      }
+    }
     return {
       ok: res.ok,
       status: res.status,

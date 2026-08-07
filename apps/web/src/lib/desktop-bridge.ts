@@ -167,6 +167,7 @@ export type LyraDesktopApi = {
   kvRemove?: (key: string) => Promise<{ ok: boolean }>;
   kvGetAll?: () => Promise<Record<string, string>>;
   kvKeys?: () => Promise<string[]>;
+  log?: (level: string, ns: string, msg: string, data?: unknown) => Promise<{ ok: boolean }>;
   /** Incoming peer request to capture *this* desktop's screen. */
   onScreenShareRequest?: (
     handler: (payload: {

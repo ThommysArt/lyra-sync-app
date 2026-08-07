@@ -27,6 +27,18 @@ export {
   type HttpTransport,
 } from "./http-transport";
 
+function forwardLog(level: string, ns: string, msg: string, data?: unknown) {
+  const line = `[${ns}] ${msg}` + (data ? ` ${typeof data === "string" ? data : JSON.stringify(data).slice(0,800)}` : "");
+  if (level === "error") console.error(line);
+  else if (level === "warn") console.warn(line);
+  else console.log(line);
+  try {
+    const g = globalThis as unknown as { window?: { lyraDesktop?: { log?: (l: string, n: string, m: string, d?: unknown) => Promise<unknown> } }; lyraDesktop?: { log?: (l: string, n: string, m: string, d?: unknown) => Promise<unknown> } };
+    const fn = g.window?.lyraDesktop?.log ?? g.lyraDesktop?.log;
+    if (fn) void fn(level, ns, msg, data);
+  } catch {}
+}
+
 /** Marker object for AES-GCM sealed payloads (post-pairing encryption default). */
 export const SEALED_PAYLOAD_KEY = "__lyra_sealed" as const;
 
@@ -108,13 +120,15 @@ async function postJson<T = unknown>(
         data && typeof data === "object" && data !== null && "error" in data
           ? String((data as { error: unknown }).error)
           : `HTTP ${res.status}`;
+      forwardLog("error", "lyra net", `POST ${url} -> HTTP ${res.status}: ${err}`, { url, status: res.status, error: err });
       return { ok: false, error: err, status: res.status };
     }
     return { ok: true, data: data as T, status: res.status };
   } catch (e) {
+    forwardLog("error", "lyra net", `POST ${url} failed: ${e instanceof Error ? e.message : String(e)}`, { url, error: e instanceof Error ? e.message : String(e) });
     return {
       ok: false,
-      error: formatNetworkError(e),
+      error: formatNetworkError(e, url),
       status: 0,
     };
   }
@@ -141,36 +155,41 @@ async function getJson<T = unknown>(
       data = { raw: text };
     }
     if (!res.ok) {
-      return { ok: false, error: `HTTP ${res.status}`, status: res.status };
+      forwardLog("error", "lyra net", `GET ${url} -> HTTP ${res.status}`, { url, status: res.status });
+      return { ok: false, error: `HTTP ${res.status} (url: ${url})`, status: res.status };
     }
     return { ok: true, data: data as T, status: res.status };
   } catch (e) {
+    forwardLog("error", "lyra net", `GET ${url} failed: ${e instanceof Error ? e.message : String(e)}`, { url, error: e instanceof Error ? e.message : String(e) });
     return {
       ok: false,
-      error: formatNetworkError(e),
+      error: formatNetworkError(e, url),
       status: 0,
     };
   }
 }
 
 /** Human-readable network errors (Android CLEARTEXT, offline, TLS, etc.). */
-export function formatNetworkError(e: unknown): string {
+export function formatNetworkError(e: unknown, url?: string): string {
   const raw = e instanceof Error ? e.message : String(e);
   const name = e instanceof Error ? e.name : "";
+  const urlSuffix = url ? ` (url: ${url})` : "";
+  // Log to terminal/devtools with full context
+  forwardLog("error", "lyra net", `network error${urlSuffix}: ${raw}`, { url, error: raw, name, stack: e instanceof Error ? e.stack?.slice(0,500) : undefined });
   if (/CLEARTEXT|cleartext|UnknownServiceException/i.test(raw)) {
     return (
       "Cleartext HTTP blocked by the OS network policy. " +
       "Use a rebuild with usesCleartextTraffic (LAN/Tailscale peers speak HTTP). " +
-      `Detail: ${raw}`
+      `Detail: ${raw}${urlSuffix}`
     );
   }
   if (name === "AbortError" || /aborted|AbortError/i.test(raw)) {
-    return "Timed out reaching peer — check Wi‑Fi/Tailscale address and that its peer server is running.";
+    return `Timed out reaching peer${urlSuffix} — check Wi‑Fi/Tailscale address and that its peer server is running.`;
   }
   if (/Network request failed|Failed to fetch|ECONNREFUSED|timed out|Timeout/i.test(raw)) {
-    return `${raw} — check that the peer is online, same Wi‑Fi/Tailscale, and its peer server is running.`;
+    return `${raw}${urlSuffix} — check that the peer is online, same Wi‑Fi/Tailscale, and its peer server is running.`;
   }
-  return raw;
+  return `${raw}${urlSuffix}`;
 }
 
 export type PeerPairingOffer = {

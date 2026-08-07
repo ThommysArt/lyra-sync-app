@@ -8,6 +8,12 @@ export default defineConfig({
   // Relative asset URLs so packaged Electron loadFile() works (file:// protocol).
   // Absolute "/assets/..." breaks under AppImage/asar resources.
   base: "./",
+  optimizeDeps: {
+    exclude: ["undici"],
+  },
+  ssr: {
+    external: ["undici"],
+  },
   server: {
     // Listen on 0.0.0.0 so LAN / Tailscale can reach the UI (same as `vite --host`).
     host: true,

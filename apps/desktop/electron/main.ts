@@ -427,6 +427,7 @@ async function startNetworking() {
           resolvePeerAuth: ({ deviceId, fingerprint }) => {
             const byId = trustedPeers.get(deviceId);
             if (byId) {
+              console.log(`[lyra main] resolvePeerAuth hit byId ${deviceId.slice(0,8)} -> authSecret ${byId.authSecret.slice(0,8)}... trusted=${trustedPeers.size}`);
               return {
                 sharedSecret: byId.authSecret,
                 expectedFingerprint: byId.fingerprint,
@@ -435,6 +436,7 @@ async function startNetworking() {
             }
             for (const t of trustedPeers.values()) {
               if (t.fingerprint === fingerprint) {
+                console.log(`[lyra main] resolvePeerAuth hit byFp ${fingerprint.slice(0,8)} -> ${t.deviceId.slice(0,8)}`);
                 return {
                   sharedSecret: t.authSecret,
                   expectedFingerprint: t.fingerprint,
@@ -442,6 +444,7 @@ async function startNetworking() {
                 };
               }
             }
+            console.log(`[lyra main] resolvePeerAuth miss for ${deviceId.slice(0,8)}/${fingerprint.slice(0,8)} trusted=${trustedPeers.size} -> first-contact`);
             // First contact allowed for pairing handshake
             return {};
           },
@@ -1268,6 +1271,7 @@ app.whenReady().then(async () => {
         authSecret: string;
       }>,
     ) => {
+      console.log(`[lyra main] syncTrustedPeers: ${peers.length} peers -> trusted=${peers.map(p=>p.deviceId.slice(0,8)).join(",")}`);
       trustedPeers.clear();
       for (const p of peers) {
         if (p.authSecret) {
@@ -1279,6 +1283,7 @@ app.whenReady().then(async () => {
           });
         }
       }
+      console.log(`[lyra main] syncTrustedPeers done: trusted=${trustedPeers.size} ids=${[...trustedPeers.keys()].map(k=>k.slice(0,8)).join(",")}`);
       return { count: trustedPeers.size };
     },
   );
@@ -1773,6 +1778,15 @@ app.whenReady().then(async () => {
     ipcMain.handle("lyra:kv-keys", () => {
       const all = kvGetAll();
       return Object.keys(all);
+    });
+    // Forward renderer logs to main terminal
+    ipcMain.handle("lyra:log", (_e, payload: { level: string; ns: string; msg: string; data?: unknown }) => {
+      const { level, ns, msg, data } = payload;
+      const line = `[${ns}] ${msg}` + (data ? ` ${typeof data === "string" ? data : JSON.stringify(data).slice(0,500)}` : "");
+      if (level === "error") console.error(line);
+      else if (level === "warn") console.warn(line);
+      else console.log(line);
+      return { ok: true };
     });
     app.on("before-quit", () => {
       try { closeDb(); } catch {}
