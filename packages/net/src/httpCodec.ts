@@ -1,14 +1,7 @@
 /**
  * Shared HTTP/1.1 codec for React Native TCP client + server.
- * Extracted from duplicated parsers in
- *   apps/native/lib/peer-server.native.ts:115-235
- *   apps/native/lib/tcp-http-client.ts:86-110
- *
- * Single source of truth for header search, concat, request/response building
- * and incremental parsing. Byte-safe (UTF-8 multi-byte handled via Uint8Array).
  */
 
-/** Locate \r\n\r\n, returns offset of first \r or -1. */
 export function indexOfHeaderEnd(buf: Uint8Array): number {
   for (let i = 0; i < buf.byteLength - 3; i++) {
     if (buf[i] === 13 && buf[i + 1] === 10 && buf[i + 2] === 13 && buf[i + 3] === 10) {
@@ -41,9 +34,7 @@ export function toUint8Array(data: unknown): Uint8Array {
   if (data && typeof data === "object" && "length" in (data as object)) {
     try {
       return Uint8Array.from(data as ArrayLike<number>);
-    } catch {
-      // fall through
-    }
+    } catch {}
   }
   return new TextEncoder().encode(String(data ?? ""));
 }
@@ -63,11 +54,6 @@ export type ParsedResponse = {
   consumed: number;
 };
 
-/**
- * Parse one HTTP request from raw bytes. Returns null if incomplete.
- * When Content-Length exceeds `maxBodyBytes`, consumed = -1 signals
- * caller to reject with 413.
- */
 export function parseHttpRequestBytes(
   raw: Uint8Array,
   maxBodyBytes: number = Number.POSITIVE_INFINITY,
@@ -112,7 +98,6 @@ export function parseHttpRequestBytes(
   }
   if (raw.byteLength === bodyStart) return null;
   const bodyBytes = raw.subarray(bodyStart);
-  // For POST without CL, treat buffered trailing as body (caller may also handle 'end' fallback)
   if (bodyBytes.byteLength > maxBodyBytes) {
     return { method, path, headers, body: "", consumed: -1 };
   }
@@ -144,7 +129,6 @@ export function parseHttpResponseBytes(raw: Uint8Array): ParsedResponse | null {
     const bodyBytes = raw.subarray(bodyStart, bodyStart + cl);
     return { status, headers, body: new TextDecoder().decode(bodyBytes), consumed: bodyStart + cl };
   }
-  // No CL — caller should buffer until 'close' then return trailing bytes
   return null;
 }
 
@@ -155,12 +139,16 @@ export function buildHttpRequest(opts: {
   port: number;
   headers?: Record<string, string>;
   body?: string;
+  keepAlive?: boolean;
 }): string {
   const headers: Record<string, string> = {
     accept: "application/json",
-    connection: "close",
+    connection: opts.keepAlive === false ? "close" : "keep-alive",
     ...opts.headers,
   };
+  if (opts.keepAlive !== undefined && !headers["connection"] && !headers["Connection"]) {
+    headers["connection"] = opts.keepAlive ? "keep-alive" : "close";
+  }
   if (opts.body && !headers["content-type"] && !headers["Content-Type"]) {
     headers["content-type"] = "application/json";
   }
@@ -182,7 +170,7 @@ export function buildHttpResponse(status: number, headers: Record<string, string
   const h = { ...(headers ?? {}) };
   const bodyBytes = new TextEncoder().encode(body);
   if (body && !h["content-length"] && !h["Content-Length"]) h["content-length"] = String(bodyBytes.byteLength);
-  if (!h["connection"] && !h["Connection"]) h["connection"] = "close";
+  if (!h["connection"] && !h["Connection"]) h["connection"] = "keep-alive";
   const lines = [`HTTP/1.1 ${status} ${statusLine(status)}`];
   for (const [k, v] of Object.entries(h)) lines.push(`${k}: ${v}`);
   lines.push("", body);

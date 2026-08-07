@@ -405,8 +405,9 @@ export type LyraStore = {
       mimeType?: string;
       checksum?: string;
       relativePath?: string;
-      /** Optional raw bytes for real wire transfer */
       bytes?: Uint8Array;
+      uri?: string;
+      file?: unknown;
     }[],
     options?: {
       direction?: "sent" | "received";
@@ -946,8 +947,8 @@ export function createLyraStore(options?: {
   let discoveryAnnouncer: (() => void) | null = null;
   /** Active wire transfer abort controllers (per transferId) */
   const transferControllers = new Map<string, AbortController>();
-  /** File bytes for resumable wire transfers (per transferId) */
-  const transferFileBytes = new Map<string, { name: string; size: number; mimeType?: string; checksum?: string; bytes: Uint8Array }[]>();
+  /** File bytes/uris for resumable wire transfers (per transferId) — streaming avoids OOM */
+  const transferFileBytes = new Map<string, { name: string; size: number; mimeType?: string; checksum?: string; bytes?: Uint8Array; uri?: string; file?: unknown }[]>();
   /** Peer server transfer control for incoming (receiver) pause/resume/cancel */
   let transferControl: {
     pause: (transferId: string) => boolean;
@@ -3801,10 +3802,9 @@ export function createLyraStore(options?: {
         }
         return base;
       });
-      // Store bytes for wire resume and controllers
+      // Store file handles for wire resume (supports streaming uri/file to avoid OOM)
       for (const tx of newTransfers) {
         if (tx.overWire) {
-          // Store original files with bytes for this transferId
           transferFileBytes.set(
             tx.id,
             files.map((f) => ({
@@ -3812,7 +3812,9 @@ export function createLyraStore(options?: {
               size: f.size,
               mimeType: f.mimeType,
               checksum: f.checksum,
-              bytes: f.bytes!,
+              bytes: f.bytes,
+              uri: (f as { uri?: string }).uri,
+              file: (f as { file?: unknown }).file,
             })),
           );
         }
@@ -3868,7 +3870,13 @@ export function createLyraStore(options?: {
             notify(set, "Pair the device before transferring files", "error");
             continue;
           }
-          if (files.some((f) => !f.bytes || f.bytes.byteLength === 0)) {
+          const missing = files.filter((f) => {
+            const hasBytes = f.bytes && f.bytes.byteLength > 0;
+            const hasUri = Boolean((f as { uri?: string }).uri);
+            const hasFile = Boolean((f as { file?: unknown }).file);
+            return !hasBytes && !hasUri && !hasFile;
+          });
+          if (missing.length > 0) {
             set((st) => ({
               ...st,
               transfers: st.transfers.map((t) =>
@@ -3876,7 +3884,7 @@ export function createLyraStore(options?: {
                   ? {
                       ...t,
                       status: "failed" as const,
-                      error: "Could not read file bytes for wire transfer",
+                      error: `Could not read file for "${missing[0]!.name}"`,
                       updatedAt: Date.now(),
                     }
                   : t,
@@ -3884,6 +3892,25 @@ export function createLyraStore(options?: {
             }));
             persist();
             notify(set, "Transfer failed: file contents could not be read", "error");
+            continue;
+          }
+          const emptyBytes = files.filter((f) => f.bytes && f.bytes.byteLength === 0 && !(f as { uri?: string }).uri && !(f as { file?: unknown }).file);
+          if (emptyBytes.length) {
+            set((st) => ({
+              ...st,
+              transfers: st.transfers.map((t) =>
+                t.id === tx.id
+                  ? {
+                      ...t,
+                      status: "failed" as const,
+                      error: `Empty file "${emptyBytes[0]!.name}"`,
+                      updatedAt: Date.now(),
+                    }
+                  : t,
+              ),
+            }));
+            persist();
+            notify(set, "Transfer failed: empty file", "error");
             continue;
           }
           const controller = new AbortController();

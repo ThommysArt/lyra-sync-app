@@ -137,7 +137,7 @@ export function createTcpHttpTransport(): HttpTransport | null {
 				const body = init?.body ?? "";
 				const headers: Record<string, string> = {
 					accept: "application/json",
-					connection: "close",
+					connection: "keep-alive",
 					...(init?.headers ?? {}),
 				};
 				if (body && !headers["content-type"] && !headers["Content-Type"]) {
@@ -311,6 +311,7 @@ export function createTcpHttpTransport(): HttpTransport | null {
 								port,
 								headers,
 								body,
+								keepAlive: true,
 							});
 							try {
 								let againDestroyed = false;
@@ -370,7 +371,8 @@ export function createTcpHttpTransport(): HttpTransport | null {
 							host,
 							port,
 							reuseAddress: true,
-							// Fail connect faster than full request budget when possible
+							noDelay: true,
+							keepAlive: true,
 							connectTimeout: Math.min(
 								Math.max(timeoutMs, 1),
 								isLongPoll ? 15_000 : Math.min(timeoutMs, 8_000),
@@ -381,6 +383,11 @@ export function createTcpHttpTransport(): HttpTransport | null {
 							if (SocketCtor) {
 								try {
 									socket = new SocketCtor();
+									try {
+										const s = socket as unknown as { setNoDelay?: (v: boolean) => void; setKeepAlive?: (v: boolean, d?: number) => void };
+										s.setNoDelay?.(true);
+										s.setKeepAlive?.(true, 30_000);
+									} catch {}
 								} catch (e) {
 									finishErr(e instanceof Error ? e : new Error(String(e)));
 									return;

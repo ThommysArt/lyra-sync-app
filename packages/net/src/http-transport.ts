@@ -12,17 +12,7 @@ export type HttpRequestInit = {
   headers?: Record<string, string>;
   body?: string;
   signal?: AbortSignal;
-  /**
-   * Wall-clock budget for the request after the transport begins work.
-   * Native TCP transport starts this *after* a concurrency slot is acquired so
-   * LAN scan queue wait does not burn the timeout (critical for mobile discovery).
-   * For pair long-polls, pass waitMs + buffer (e.g. 125_000).
-   */
   timeoutMs?: number;
-  /**
-   * Priority lane for native TCP queue (0=pair, 1=interactive, 2=scan).
-   * Defaults to interactive (1). Scan uses 2 so user actions preempt discovery.
-   */
   lane?: number;
 };
 
@@ -54,14 +44,11 @@ function readGlobal(): HttpTransport | null | undefined {
 function writeGlobal(transport: HttpTransport | null): void {
   try {
     (globalThis as GlobalBag)[GLOBAL_KEY] = transport;
-  } catch {
-    // ignore
-  }
+  } catch {}
 }
 
 let customTransport: HttpTransport | null = null;
 
-/** Install a platform transport (e.g. RN TCP). Pass null to restore fetch. */
 export function setHttpTransport(transport: HttpTransport | null): void {
   customTransport = transport;
   writeGlobal(transport);
@@ -74,7 +61,6 @@ export function getHttpTransport(): HttpTransport {
   return fetchAsTransport;
 }
 
-/** True when a custom (non-fetch) transport is installed. */
 export function hasCustomHttpTransport(): boolean {
   return Boolean(customTransport || readGlobal());
 }
@@ -100,13 +86,29 @@ export async function fetchAsTransport(
   }
 
   try {
-    const res = await fetch(url, {
+    const headers = { ...(init?.headers ?? {}) } as Record<string, string>;
+    const lowerKeys = Object.keys(headers).map((k) => k.toLowerCase());
+    if (!lowerKeys.includes("connection")) headers["connection"] = "keep-alive";
+    const fetchOpts: RequestInit & { keepalive?: boolean; dispatcher?: unknown } = {
       method: init?.method ?? "GET",
-      headers: init?.headers,
+      headers,
       body: init?.body,
       signal: controller?.signal ?? init?.signal,
       cache: "no-store" as RequestCache,
-    });
+      keepalive: true,
+    };
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const undici = typeof require !== "undefined" ? (require("undici") as { Agent?: new (o: unknown) => unknown }) : null;
+      if (undici?.Agent && typeof (fetchOpts as any).dispatcher === "undefined") {
+        const g = globalThis as unknown as { __lyraUndiciAgent?: unknown };
+        if (!g.__lyraUndiciAgent) {
+          g.__lyraUndiciAgent = new undici.Agent({ keepAliveTimeout: 30_000, keepAliveMaxTimeout: 60_000, connections: 16 });
+        }
+        (fetchOpts as any).dispatcher = g.__lyraUndiciAgent;
+      }
+    } catch {}
+    const res = await fetch(url, fetchOpts as RequestInit);
     return {
       ok: res.ok,
       status: res.status,
@@ -117,9 +119,7 @@ export async function fetchAsTransport(
     if (init?.signal && controller) {
       try {
         init.signal.removeEventListener("abort", onExternalAbort);
-      } catch {
-        // ignore
-      }
+      } catch {}
     }
   }
 }

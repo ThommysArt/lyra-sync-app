@@ -13,8 +13,8 @@ export type PickedFile = {
   bytes?: Uint8Array;
 };
 
-/** Default eager-read cap (above this we stream from File on send). */
-export const EAGER_READ_MAX_BYTES = 32 * 1024 * 1024;
+/** Default eager-read cap (above this we stream from File on send). Bumped for 6-12 GB RAM. */
+export const EAGER_READ_MAX_BYTES = 64 * 1024 * 1024;
 
 /** Read a File into Uint8Array (capped for browser memory safety). */
 export async function readFileBytes(
@@ -32,7 +32,7 @@ export async function readFileBytes(
  */
 export async function* readFileInChunks(
   file: File,
-  chunkSize = 256 * 1024,
+  chunkSize = 1024 * 1024,
 ): AsyncGenerator<Uint8Array, void, unknown> {
   // Prefer streams when available
   if (typeof file.stream === "function") {
@@ -69,10 +69,11 @@ export async function* readFileInChunks(
 
 /** Materialize bytes for wire: eager if small, else concatenate streamed chunks (still memory).
  * For multi-GB use `streamFileToWire` in transfer path instead of materializing.
+ * Max bumped for high-RAM dev builds: 512 MiB still safe on 6 GB, streamed path preferred.
  */
 export async function materializeFileBytes(
   file: File,
-  maxMaterialize = 256 * 1024 * 1024,
+  maxMaterialize = 512 * 1024 * 1024,
 ): Promise<Uint8Array | undefined> {
   if (file.size <= EAGER_READ_MAX_BYTES) {
     return readFileBytes(file);

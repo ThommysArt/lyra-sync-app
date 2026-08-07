@@ -64,18 +64,15 @@ export type TransferReceiveState = {
   totalBytes: number;
   receivedBytes: number;
   files: { name: string; size: number }[];
-  /** Concatenated received bytes (memory-backed for small transfers) */
   chunks: Uint8Array[];
-  /** When true, further chunks are rejected until resume */
   paused?: boolean;
-  /** Offered checksums for integrity (file index → hex) */
   checksums?: (string | undefined)[];
-  /** Disk-backed path when large transfer uses temp file */
   diskPath?: string;
-  /** Append callback for disk mode (set by peer-server / Node) */
   appendChunk?: (bytes: Uint8Array, offset: number) => Promise<void>;
   finalizeDisk?: () => Promise<{ sha256?: string; size: number; filePath: string }>;
   cleanupDisk?: () => Promise<void>;
+  pendingChunks?: Map<number, Uint8Array>;
+  _lastChunkNotify?: number;
 };
 
 /** Prefer disk when total bytes exceed this threshold (1 MiB). */
@@ -547,22 +544,56 @@ export async function handlePeerEnvelope(
         });
       }
       const bytes = base64ToBytes(parsed.data.dataBase64);
+      const chunkOffset = parsed.data.offset;
+      const chunkEnd = chunkOffset + bytes.byteLength;
+      if (!state.pendingChunks) state.pendingChunks = new Map();
       if (state.appendChunk) {
-        try {
-          await state.appendChunk(bytes, parsed.data.offset);
-        } catch (e) {
-          return {
-            ok: false,
-            error: e instanceof Error ? e.message : "Disk write failed",
-          };
+        if (chunkOffset === state.receivedBytes) {
+          try {
+            await state.appendChunk(bytes, chunkOffset);
+          } catch (e) {
+            return { ok: false, error: e instanceof Error ? e.message : "Disk write failed" };
+          }
+          while (state.pendingChunks.has(state.receivedBytes)) {
+            const next = state.pendingChunks.get(state.receivedBytes)!;
+            state.pendingChunks.delete(state.receivedBytes);
+            try {
+              await state.appendChunk(next, state.receivedBytes);
+            } catch (e) {
+              return { ok: false, error: e instanceof Error ? e.message : "Disk write failed" };
+            }
+          }
+        } else if (chunkOffset > state.receivedBytes) {
+          if (!state.pendingChunks.has(chunkOffset)) {
+            state.pendingChunks.set(chunkOffset, bytes);
+            if (state.pendingChunks.size > 64) return { ok: false, error: "Too many out-of-order chunks" };
+          }
+        } else {
+          // duplicate
         }
       } else {
-        state.chunks.push(bytes);
-        state.receivedBytes = parsed.data.offset + bytes.byteLength;
+        if (chunkOffset === state.receivedBytes) {
+          state.chunks.push(bytes);
+          state.receivedBytes = chunkEnd;
+          while (state.pendingChunks.has(state.receivedBytes)) {
+            const next = state.pendingChunks.get(state.receivedBytes)!;
+            state.pendingChunks.delete(state.receivedBytes);
+            state.chunks.push(next);
+            state.receivedBytes += next.byteLength;
+          }
+        } else if (chunkOffset > state.receivedBytes) {
+          if (!state.pendingChunks.has(chunkOffset)) state.pendingChunks.set(chunkOffset, bytes);
+        }
       }
-      try {
-        await ctx.onTransferChunk?.(state, from);
-      } catch {}
+      const now = Date.now();
+      const isEof = parsed.data.eof === true;
+      const last = state._lastChunkNotify ?? 0;
+      if (isEof || now - last > 80) {
+        state._lastChunkNotify = now;
+        try {
+          await ctx.onTransferChunk?.(state, from);
+        } catch {}
+      }
       return createEnvelope({
         type: "transfer_chunk_ack",
         fromDeviceId: ctx.identity.id,

@@ -11,9 +11,10 @@ export const Lane = {
 } as const;
 export type Lane = (typeof Lane)[keyof typeof Lane];
 
-export const NATIVE_HTTP_MAX_IN_FLIGHT = 24;
-// How many SCAN slots may be in-flight; reserve 4 for interactive.
-export const MAX_SCAN_IN_FLIGHT = 20;
+export const NATIVE_HTTP_MAX_IN_FLIGHT = 48;
+// Reserve 24 for interactive/transfers (3 parallel files × window 8)
+export const MAX_SCAN_IN_FLIGHT = 24;
+export const MAX_TRANSFER_IN_FLIGHT = 16;
 
 type Waiter = {
   lane: Lane;

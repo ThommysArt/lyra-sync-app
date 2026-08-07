@@ -30,6 +30,7 @@ import {
 import Constants from "expo-constants";
 import * as Network from "expo-network";
 import { Platform } from "react-native";
+import { Directory, File, Paths } from "expo-file-system";
 
 type TcpSocketModule = typeof import("react-native-tcp-socket");
 
@@ -92,15 +93,74 @@ async function pickLanHost(): Promise<string | null> {
 	return null;
 }
 
+function createNativeDiskTransfer() {
+	// Factory for disk-backed receives on native (avoids holding 300MB in RAM)
+	return async (input: { transferId: string; totalBytes: number; files: { name: string; size: number }[]; resumeOffset?: number; checksums?: (string | undefined)[] }) => {
+		const safeId = input.transferId.replace(/[^a-zA-Z0-9_-]/g, "_");
+		const tmpFile = new File(Paths.cache, `lyra-tx-${safeId}-${Date.now()}.bin`);
+		try {
+			tmpFile.create({ overwrite: true });
+		} catch {}
+		let received = input.resumeOffset ?? 0;
+		// If resuming, we need to truncate or keep; for now just start fresh if resume==0
+		if (received === 0) {
+			try { tmpFile.write(new Uint8Array(0)); } catch {}
+		}
+		const state: import("@lyra-sync-app/net").TransferReceiveState = {
+			transferId: input.transferId,
+			totalBytes: input.totalBytes,
+			receivedBytes: received,
+			files: input.files,
+			chunks: [],
+			paused: false,
+			checksums: input.checksums,
+			diskPath: tmpFile.uri,
+			pendingChunks: new Map(),
+			appendChunk: async (bytes: Uint8Array, offset: number) => {
+				if (offset !== received) {
+					if (offset < received) return;
+					throw new Error(`gap ${received} vs ${offset}`);
+				}
+				// Append via File.write with append:true (efficient, no base64)
+				try {
+					// New API: write with append
+					(tmpFile as unknown as { write: (data: Uint8Array, opts?: unknown) => void }).write(bytes, { append: true });
+				} catch {
+					// Fallback: read existing + append via base64 (legacy)
+					const { writeAsStringAsync, readAsStringAsync, EncodingType } = await import("expo-file-system/legacy");
+					const existingB64 = tmpFile.exists ? await readAsStringAsync(tmpFile.uri, { encoding: EncodingType.Base64 }).catch(() => "") : "";
+					const existing = existingB64 ? Uint8Array.from(atob(existingB64), c => c.charCodeAt(0)) : new Uint8Array(0);
+					const merged = new Uint8Array(existing.byteLength + bytes.byteLength);
+					merged.set(existing, 0);
+					merged.set(bytes, existing.byteLength);
+					const outB64 = (globalThis as { Buffer?: { from: (b: Uint8Array) => { toString: (e: string) => string } } }).Buffer
+						? (globalThis as { Buffer?: { from: (b: Uint8Array) => { toString: (e: string) => string } } }).Buffer!.from(merged).toString("base64")
+						: (() => { let s=""; const ch=0x8000; for(let i=0;i<merged.length;i+=ch) s+=String.fromCharCode(...merged.subarray(i,i+ch)); return btoa(s); })();
+					await writeAsStringAsync(tmpFile.uri, outB64, { encoding: EncodingType.Base64 });
+				}
+				received += bytes.byteLength;
+				(state as { receivedBytes: number }).receivedBytes = received;
+			},
+			finalizeDisk: async () => {
+				let size = received;
+				try { size = tmpFile.info().size ?? received; } catch {}
+				return { filePath: tmpFile.uri, size, sha256: undefined };
+			},
+			cleanupDisk: async () => {
+				try { tmpFile.delete(); } catch {}
+			},
+		};
+		return state;
+	};
+}
+
 export type StartNativePeerOptions = {
 	identity: DeviceIdentity;
 	port?: number;
-	/** Prefer this host when advertising (e.g. Tailscale 100.x) */
 	advertiseHost?: string | null;
 	resolvePeerAuth?: PeerHttpCoreOptions["resolvePeerAuth"];
 	handlers?: PeerHttpCoreOptions["handlers"];
 	onEnvelope?: PeerHttpCoreOptions["onEnvelope"];
-	/** Ports to try after preferred (EADDRINUSE / multi-instance on same device rare but possible) */
 	fallbackPorts?: number[];
 };
 
@@ -128,6 +188,11 @@ export async function startNativePeerServer(
 	let lanHost = options.advertiseHost?.trim() || (await pickLanHost());
 	let boundPort = options.port ?? LYRA_DEFAULT_PORT;
 
+	const diskFactory = createNativeDiskTransfer();
+	const mergedHandlers = {
+		...(options.handlers as Record<string, unknown>),
+		createDiskTransfer: (options.handlers as { createDiskTransfer?: unknown })?.createDiskTransfer ?? diskFactory,
+	} as PeerHttpCoreOptions["handlers"];
 	const core = createPeerHttpCore({
 		getIdentity: () => currentIdentity,
 		getPort: () => boundPort,
@@ -138,7 +203,7 @@ export async function startNativePeerServer(
 		},
 		allowFirstContactAuth: true,
 		resolvePeerAuth: options.resolvePeerAuth,
-		handlers: options.handlers,
+		handlers: mergedHandlers,
 		onEnvelope: options.onEnvelope,
 		cors: true,
 	});

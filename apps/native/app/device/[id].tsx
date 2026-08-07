@@ -329,26 +329,12 @@ export default function DeviceDetailScreen() {
                     copyToCacheDirectory: true,
                   });
                   if (result.canceled || !result.assets?.length) return;
-                  const prepared = await Promise.all(
-                    result.assets.map(async (a) => {
-                      let bytes: Uint8Array | undefined;
-                      try {
-                        if (a.uri) {
-                          const res = await fetch(a.uri);
-                          bytes = new Uint8Array(await res.arrayBuffer());
-                        }
-                      } catch (e) {
-                        console.warn("[lyra] pick failed", a.name, e);
-                        bytes = undefined;
-                      }
-                      return {
-                        name: a.name,
-                        size: bytes?.byteLength ?? a.size ?? 1024,
-                        mimeType: a.mimeType ?? undefined,
-                        bytes,
-                      };
-                    }),
-                  );
+                  const prepared = result.assets.map((a) => ({
+                    name: a.name,
+                    size: a.size ?? 1024,
+                    mimeType: a.mimeType ?? undefined,
+                    uri: a.uri,
+                  }));
                   store.startFileTransfer([device.id], prepared);
                 } catch {
                   // cancelled

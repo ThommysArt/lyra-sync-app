@@ -329,10 +329,11 @@ export async function wireSendFiles(input: {
   identity: DeviceIdentity;
   privateKey: string;
   transferId: string;
-  files: { name: string; size: number; mimeType?: string; checksum?: string; bytes?: Uint8Array }[];
+  files: { name: string; size: number; mimeType?: string; checksum?: string; bytes?: Uint8Array; uri?: string; file?: unknown }[];
   resumeOffset?: number;
   onProgress?: (p: WireTransferProgress) => void;
   signal?: AbortSignal;
+  readFileSlice?: (fileIndex: number, offset: number, length: number) => Promise<Uint8Array>;
 }): Promise<
   | { ok: true; checksums: string[]; endpoint: PeerUrl }
   | { ok: false; error: string; endpoint?: PeerUrl }
@@ -340,22 +341,83 @@ export async function wireSendFiles(input: {
   const session = await ensureSession(input);
   if (!session.ok) return session;
 
-  // No synthetic fallback — caller must provide real bytes (streaming). This fixes silent truncation bug
-  // where >32MiB files were sent as 256KiB random bytes while reporting full size.
+  // Build streaming reader if not provided but file/uri present
+  let readSlice = input.readFileSlice;
+  if (!readSlice) {
+    const needsStreaming = input.files.some((f) => !f.bytes && (f.uri || f.file));
+    if (needsStreaming) {
+      readSlice = async (idx, offset, len) => {
+        const f = input.files[idx]!;
+        if (f.bytes) return f.bytes.subarray(offset, offset + len);
+        if (f.file) {
+          const fileObj = f.file as unknown as { slice: (s: number, e: number) => Blob & { arrayBuffer(): Promise<ArrayBuffer> } };
+          const slice = fileObj.slice(offset, offset + len);
+          const buf = await slice.arrayBuffer();
+          return new Uint8Array(buf);
+        }
+        if (f.uri) {
+          try {
+            // Try modern File API first (efficient slice, works for file:// cache URIs)
+            try {
+              const loadFS = new Function('return import("expo-file-system")') as () => Promise<unknown>;
+              const mod = (await loadFS()) as unknown as { File?: new (uri: string) => { slice?: (s: number, e: number) => { arrayBuffer?: () => Promise<ArrayBuffer> } } };
+              const FileCls = mod.File;
+              if (FileCls) {
+                const fileObj = new FileCls(f.uri!);
+                const sliced = (fileObj as unknown as { slice?: (s: number, e: number) => unknown }).slice?.(offset, offset + len) as { arrayBuffer?: () => Promise<ArrayBuffer> } | undefined;
+                if (sliced?.arrayBuffer) {
+                  const ab = await sliced.arrayBuffer();
+                  if (ab.byteLength > 0) return new Uint8Array(ab);
+                }
+              }
+            } catch {}
+            // Fallback: legacy readAsStringAsync with position/length (supports file:// and content://)
+            try {
+              const loadLegacy = new Function('return import("expo-file-system/legacy")') as () => Promise<unknown>;
+              const FS = (await loadLegacy()) as unknown as { readAsStringAsync: (uri: string, opts: unknown) => Promise<string>; EncodingType: { Base64: string } };
+              const { readAsStringAsync, EncodingType } = FS;
+              const b64 = await (readAsStringAsync as unknown as (uri: string, opts: { encoding: string; position: number; length: number }) => Promise<string>)(f.uri!, { encoding: EncodingType.Base64, position: offset, length: len });
+              const approx = Math.ceil(b64.length * 0.75);
+              if (approx <= len + 16 && approx > 0) {
+                const Buf = (globalThis as { Buffer?: { from: (s: string, e: string) => Uint8Array } }).Buffer;
+                return Buf ? new Uint8Array(Buf.from(b64, "base64")) : Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+              }
+            } catch {}
+            // Last resort: fetch whole file only for small files (<20MB) to avoid OOM
+            if ((f.size ?? 0) < 20 * 1024 * 1024) {
+              const res = await fetch(f.uri!);
+              if (!res.ok) throw new Error(`fetch ${f.uri} failed ${res.status}`);
+              const ab = await res.arrayBuffer();
+              const full = new Uint8Array(ab);
+              return full.subarray(offset, offset + len);
+            }
+            throw new Error(`Unable to read chunk at ${offset} len ${len} for ${f.name} (uri ${f.uri?.slice(0, 40)}). Ensure file is in cache (copyToCacheDirectory:true) and expo-file-system is linked.`);
+          } catch (e) {
+            throw e instanceof Error ? e : new Error(String(e));
+          }
+        }
+        throw new Error(`No bytes or uri for ${f.name}`);
+      };
+    }
+  }
+
   for (const f of input.files) {
-    if (!f.bytes) {
+    if (!f.bytes && !f.uri && !f.file && !readSlice) {
       return { ok: false, error: `Missing bytes for "${f.name}" — file picker failed to read. Please retry with system picker.` };
     }
-    if (f.bytes.byteLength === 0 && f.size > 0) {
+    if (f.bytes && f.bytes.byteLength === 0 && f.size > 0) {
       return { ok: false, error: `Empty bytes for "${f.name}"` };
+    }
+    if (!f.bytes && f.size > 550 * 1024 * 1024) {
+      return { ok: false, error: `File too large (>550MB) for streaming` };
     }
   }
   const prepared = input.files.map((f) => ({
     name: f.name,
-    size: f.bytes!.byteLength,
+    size: f.size || f.bytes?.byteLength || 0,
     mimeType: f.mimeType,
     checksum: f.checksum,
-    bytes: f.bytes!,
+    bytes: f.bytes, // may be undefined when streaming
   }));
 
   const sent = await sendFilesOverWire({
@@ -364,11 +426,12 @@ export async function wireSendFiles(input: {
     fromDeviceId: input.identity.id,
     toDeviceId: input.device.id,
     transferId: input.transferId,
-    files: prepared,
+    files: prepared as unknown as { name: string; size: number; mimeType?: string; bytes: Uint8Array; checksum?: string }[],
     resumeOffset: input.resumeOffset,
     onProgress: input.onProgress,
     signal: input.signal,
     sealSecret: input.device.authSecret,
+    readFileSlice: readSlice,
   });
   if (!sent.ok) return { ok: false, error: sent.error, endpoint: session.endpoint };
   return { ok: true, checksums: sent.checksums, endpoint: session.endpoint };
@@ -477,7 +540,7 @@ export async function wireSendScreenFrame(input: {
   });
 }
 
-/** Download remote file in chunks (desktop peer with real FS). */
+/** Download remote file in chunks (desktop peer with real FS). Pipelined. */
 export async function wireReadRemoteFile(input: {
   device: PairedDevice;
   identity: DeviceIdentity;
@@ -488,55 +551,82 @@ export async function wireReadRemoteFile(input: {
   const session = await ensureSession(input);
   if (!session.ok) return session;
   const { createEnvelope, sendEnvelope, base64ToBytes } = await import("@lyra-sync-app/net");
-  const chunks: Uint8Array[] = [];
-  let offset = 0;
-  let size = 0;
+  const endpoint = session.endpoint as PeerUrl;
+  const sessionToken = session.sessionToken as string;
+  const PULL_CHUNK = 1024 * 1024;
+  const PULL_WINDOW = 8;
   const requestIdBase = `fsr_${Date.now()}`;
-  for (let i = 0; i < 10_000; i++) {
-    const envelope = createEnvelope({
-      type: "fs_read",
-      fromDeviceId: input.identity.id,
-      toDeviceId: input.device.id,
-      payload: {
-        path: input.path,
-        requestId: `${requestIdBase}_${i}`,
-        offset,
-        maxBytes: 256 * 1024,
-      },
-    });
-    const res = await sendEnvelope(session.endpoint, envelope, {
-      sessionToken: session.sessionToken,
-      sealSecret: input.device.authSecret,
-    });
-    if (!res.ok) return { ok: false, error: res.error };
-    if (res.envelope?.type !== "fs_read_response") {
-      return { ok: false, error: "Unexpected fs_read response" };
+  let size = 0;
+  const firstEnv = createEnvelope({
+    type: "fs_read",
+    fromDeviceId: input.identity.id,
+    toDeviceId: input.device.id,
+    payload: { path: input.path, requestId: `${requestIdBase}_0`, offset: 0, maxBytes: PULL_CHUNK },
+  });
+  const firstRes = await sendEnvelope(endpoint, firstEnv, { sessionToken, sealSecret: input.device.authSecret });
+  if (!firstRes.ok) return { ok: false, error: firstRes.error };
+  if (firstRes.envelope?.type !== "fs_read_response") return { ok: false, error: "Unexpected fs_read response" };
+  const fp = firstRes.envelope.payload as { dataBase64?: string; eof?: boolean; size?: number; error?: string };
+  if (fp.error) return { ok: false, error: fp.error };
+  if (typeof fp.size === "number") size = fp.size;
+  const firstBytes = fp.dataBase64 ? base64ToBytes(fp.dataBase64) : new Uint8Array(0);
+  input.onChunk?.(firstBytes, 0, Boolean(fp.eof));
+  if (fp.eof || firstBytes.byteLength === 0) return { ok: true, bytes: firstBytes, size: size || firstBytes.byteLength };
+  if (!size || size <= firstBytes.byteLength) {
+    const chunks: Uint8Array[] = [firstBytes];
+    let offset = firstBytes.byteLength;
+    for (let i = 1; i < 10_000; i++) {
+      const env = createEnvelope({ type: "fs_read", fromDeviceId: input.identity.id, toDeviceId: input.device.id, payload: { path: input.path, requestId: `${requestIdBase}_${i}`, offset, maxBytes: PULL_CHUNK } });
+      const res = await sendEnvelope(endpoint, env, { sessionToken, sealSecret: input.device.authSecret });
+      if (!res.ok) return { ok: false, error: res.error };
+      const p = res.envelope?.payload as { dataBase64?: string; eof?: boolean; size?: number; error?: string } | undefined;
+      if (!p || p.error) return { ok: false, error: p?.error ?? "Unexpected fs_read response" };
+      if (typeof p.size === "number") size = p.size;
+      const b = p.dataBase64 ? base64ToBytes(p.dataBase64) : new Uint8Array(0);
+      chunks.push(b);
+      input.onChunk?.(b, offset, Boolean(p.eof));
+      offset += b.byteLength;
+      if (p.eof || b.byteLength === 0) break;
     }
-    const p = res.envelope.payload as {
-      dataBase64?: string;
-      eof?: boolean;
-      size?: number;
-      error?: string;
-      offset?: number;
-    };
-    if (p.error) return { ok: false, error: p.error };
-    if (typeof p.size === "number") size = p.size;
-    if (p.dataBase64) {
-      const bytes = base64ToBytes(p.dataBase64);
-      chunks.push(bytes);
-      input.onChunk?.(bytes, offset, Boolean(p.eof));
-      offset += bytes.byteLength;
-    }
-    if (p.eof) break;
-    if (!p.dataBase64 || p.dataBase64.length === 0) break;
+    const total = chunks.reduce((a, c) => a + c.byteLength, 0);
+    const out = new Uint8Array(total);
+    let o = 0;
+    for (const c of chunks) out.set(c, o), (o += c.byteLength);
+    return { ok: true, bytes: out, size: size || total };
   }
-  const total = chunks.reduce((a, c) => a + c.byteLength, 0);
+  const totalChunks = Math.ceil(size / PULL_CHUNK);
+  const result: Uint8Array[] = new Array(totalChunks);
+  result[0] = firstBytes;
+  let failed: string | null = null;
+  const offsets: number[] = [];
+  for (let idx = 1; idx < totalChunks; idx++) offsets.push(idx * PULL_CHUNK);
+  let next = 0;
+  async function worker() {
+    while (true) {
+      const idx = next++;
+      if (idx >= offsets.length) return;
+      const offset = offsets[idx]!;
+      const chunkIdx = Math.floor(offset / PULL_CHUNK);
+      const env = createEnvelope({ type: "fs_read", fromDeviceId: input.identity.id, toDeviceId: input.device.id, payload: { path: input.path, requestId: `${requestIdBase}_${chunkIdx}`, offset, maxBytes: PULL_CHUNK } });
+      const res = await sendEnvelope(endpoint, env, { sessionToken, sealSecret: input.device.authSecret });
+      if (!res.ok) { failed = res.error; return; }
+      if (res.envelope?.type !== "fs_read_response") { failed = "Unexpected fs_read response"; return; }
+      const p = res.envelope.payload as { dataBase64?: string; eof?: boolean; size?: number; error?: string };
+      if (p.error) { failed = p.error; return; }
+      const b = p.dataBase64 ? base64ToBytes(p.dataBase64) : new Uint8Array(0);
+      result[chunkIdx] = b;
+      input.onChunk?.(b, offset, Boolean(p.eof));
+      if (failed) return;
+    }
+  }
+  const workers = Array.from({ length: Math.min(PULL_WINDOW, offsets.length) }, () => worker());
+  await Promise.all(workers);
+  if (failed) return { ok: false, error: failed };
+  for (let i = 0; i < result.length; i++) if (!result[i]) return { ok: false, error: "Missing chunk in pipelined pull" };
+  const total = result.reduce((a, c) => a + c.byteLength, 0);
   const out = new Uint8Array(total);
   let o = 0;
-  for (const c of chunks) {
-    out.set(c, o);
-    o += c.byteLength;
-  }
+  for (const c of result) out.set(c!, o), (o += c.byteLength);
   return { ok: true, bytes: out, size: size || total };
 }
 

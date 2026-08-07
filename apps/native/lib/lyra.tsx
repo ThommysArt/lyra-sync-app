@@ -3,6 +3,13 @@ import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, AppState, Platform, View } from "react-native";
 import * as Network from "expo-network";
+// Polyfill SubtleCrypto for seal AES-GCM on native (otherwise falls back to slow JS SHA-CTR)
+if (Platform.OS !== "web") {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    require("react-native-quick-crypto");
+  } catch {}
+}
 import { getLanHosts } from "@/lib/network";
 import { startNativeDiscovery, type NativeDiscoveryHandle } from "@/lib/discovery-native";
 
@@ -300,12 +307,21 @@ export function LyraProvider({ children }: { children: ReactNode }) {
               void (async () => {
                 let savedPaths: string[] | undefined;
                 try {
-                  const { saveReceivedTransferFiles, ensureDefaultDownloadDir } =
+                  const { saveReceivedTransferFiles, saveReceivedTransferFromDisk, ensureDefaultDownloadDir } =
                     await import("@/lib/download-location");
                   const dir =
                     store.getState().settings.downloadDirectory ||
                     (await ensureDefaultDownloadDir())?.path;
-                  if (state.chunks?.length && state.files?.length) {
+                  if (state.diskPath) {
+                    const { savedPaths: paths, errors } = await saveReceivedTransferFromDisk(
+                      dir,
+                      state.files,
+                      state.diskPath,
+                      state.totalBytes,
+                    );
+                    if (paths.length) savedPaths = paths;
+                    if (errors.length) console.warn("[lyra] save transfer errors", errors);
+                  } else if (state.chunks?.length && state.files?.length) {
                     const { savedPaths: paths, errors } = await saveReceivedTransferFiles(
                       dir,
                       state.files,
@@ -315,9 +331,6 @@ export function LyraProvider({ children }: { children: ReactNode }) {
                     if (errors.length) {
                       console.warn("[lyra] save transfer errors", errors);
                     }
-                  } else if (state.diskPath) {
-                    // Disk-backed transfer: file already saved to temp, record it
-                    savedPaths = [state.diskPath];
                   }
                 } catch (e) {
                   console.warn(

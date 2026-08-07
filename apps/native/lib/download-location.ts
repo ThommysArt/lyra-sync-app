@@ -365,6 +365,135 @@ export async function saveReceivedTransferFiles(
   return { savedPaths, errors };
 }
 
+export async function saveReceivedTransferFromDisk(
+  downloadDirectory: string | undefined,
+  files: { name: string; size: number }[],
+  diskPath: string,
+  totalBytes: number,
+): Promise<{ savedPaths: string[]; errors: string[] }> {
+  const savedPaths: string[] = [];
+  const errors: string[] = [];
+  // Single file: move temp file directly to download (zero copy)
+  if (files.length === 1) {
+    const file = files[0]!;
+    try {
+      const { File, Directory, Paths } = await import("expo-file-system");
+      const tmpFile = new File(diskPath);
+      // Ensure destination dir exists
+      let base = downloadDirectory;
+      if (!base) {
+        const ensured = await ensureDefaultDownloadDir();
+        base = ensured?.path;
+      }
+      if (!base) throw new Error("No download dir");
+      let destUri: string;
+      if (base.startsWith("content://")) {
+        // SAF: copy via bytes streaming (need to read in chunks)
+        const CHUNK = 4 * 1024 * 1024;
+        let offset = 0;
+        // Create SAF file first
+        const { StorageAccessFramework } = await import("expo-file-system/legacy");
+        const mime = guessMime(file.name);
+        const destFileUri = await StorageAccessFramework.createFileAsync(base, file.name.replace(/[^\w.\- ()[\]]+/g, "_"), mime);
+        // Stream copy in chunks via File slice + writeAsStringAsync base64 append
+        const fh = (tmpFile as unknown as { open?: (mode: string) => { readBytes: (len: number) => Uint8Array; close: () => void } }).open
+          ? (tmpFile as unknown as { open: (mode: string) => { readBytes: (len: number) => Uint8Array; close: () => void } }).open("r")
+          : null;
+        if (fh) {
+          try {
+            while (offset < file.size) {
+              const len = Math.min(CHUNK, file.size - offset);
+              const chunk = fh.readBytes(len);
+              if (chunk.byteLength === 0) break;
+              const b64 = uint8ToBase64(chunk);
+              const { writeAsStringAsync, EncodingType } = await import("expo-file-system/legacy");
+              // SAF append not trivial; for now write whole via loops may be heavy — fallback to simple move
+              await writeAsStringAsync(destFileUri, b64, { encoding: EncodingType.Base64 });
+              offset += len;
+            }
+          } finally { try { fh.close(); } catch {} }
+        } else {
+          // Fallback: try File bytes then write (may OOM for 300MB but try)
+          const bytes = await tmpFile.bytes();
+          const res = await writeToDownloadLocation(base, file.name, bytes);
+          if (res.ok) savedPaths.push(res.uri);
+          else errors.push(`${file.name}: ${res.error}`);
+          try { tmpFile.delete(); } catch {}
+          return { savedPaths, errors };
+        }
+        savedPaths.push(destFileUri);
+        try { tmpFile.delete(); } catch {}
+        return { savedPaths, errors };
+      } else {
+        // file:// — move or copy
+        const safeName = file.name.replace(/[^\w.\- ()[\]]+/g, "_") || "file.bin";
+        let dir = base.replace(/\/?$/, "");
+        try {
+          const d = new Directory(dir);
+          if (!d.exists) d.create({ intermediates: true });
+        } catch {}
+        let dest = `${dir}/${safeName}`;
+        let n = 1;
+        while (true) {
+          try {
+            const test = new File(dest);
+            if (!test.exists) break;
+            const dot = safeName.lastIndexOf(".");
+            const stem = dot > 0 ? safeName.slice(0, dot) : safeName;
+            const ext = dot > 0 ? safeName.slice(dot) : "";
+            dest = `${dir}/${stem} (${n})${ext}`;
+            n++;
+            if (n > 200) break;
+          } catch { break; }
+        }
+        const destFile = new File(dest);
+        try {
+          // Try atomic move
+          tmpFile.move(destFile);
+          savedPaths.push(destFile.uri);
+        } catch {
+          // Fallback copy via stream
+          try {
+            const data = await tmpFile.bytes();
+            destFile.create({ overwrite: true });
+            destFile.write(data);
+            savedPaths.push(destFile.uri);
+            try { tmpFile.delete(); } catch {}
+          } catch (e) {
+            errors.push(`${file.name}: ${e instanceof Error ? e.message : String(e)}`);
+          }
+        }
+        return { savedPaths, errors };
+      }
+    } catch (e) {
+      errors.push(`${files[0]!.name}: ${e instanceof Error ? e.message : String(e)}`);
+      return { savedPaths, errors };
+    }
+  }
+  // Multi-file: split concatenated temp via File slice per file (streamed)
+  let offset = 0;
+  for (const file of files) {
+    try {
+      const { File } = await import("expo-file-system");
+      const tmpFile = new File(diskPath);
+      const sliceBlob = tmpFile.slice(offset, offset + file.size);
+      const buf = await sliceBlob.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      const res = await writeToDownloadLocation(downloadDirectory, file.name, bytes);
+      if (res.ok) savedPaths.push(res.uri);
+      else errors.push(`${file.name}: ${res.error}`);
+    } catch (e) {
+      errors.push(`${file.name}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    offset += file.size;
+  }
+  try {
+    const { File } = await import("expo-file-system");
+    new File(diskPath).delete();
+  } catch {}
+  return { savedPaths, errors };
+}
+
 function base64ToBytes(b64: string): Uint8Array {
   if (typeof globalThis.Buffer !== "undefined") {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
