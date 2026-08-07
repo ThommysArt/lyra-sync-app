@@ -220,8 +220,9 @@ export async function ensureSession(input: {
     const probe = await probePeer(
       { host: endpoint.host, port: endpoint.port, protocol: "http" },
       {
-        timeoutMs: 1200,
+        timeoutMs: 2500,
         preferTailscale: isLikelyTailscaleHost(endpoint.host),
+        lane: 1,
       },
     );
     if (probe.ok) {
@@ -235,9 +236,9 @@ export async function ensureSession(input: {
     }
   }
 
-  const tryList = reachable.length > 0 ? reachable : candidates.slice(0, 4);
-  let lastError = reachable.length === 0 ? "Peer unreachable (probe failed)" : "Auth failed";
-  for (const endpoint of tryList) {
+  let lastError = reachable.length === 0 ? "Peer unreachable (probe failed) — will try auth anyway" : "Auth failed";
+  const orderedTry = reachable.length > 0 ? [...reachable, ...candidates.filter((c) => !reachable.some((r) => r.host === c.host && r.port === c.port))] : candidates;
+  for (const endpoint of orderedTry.slice(0, 8)) {
     const session = await getOrCreatePeerSession({
       endpoint,
       identity: input.identity,
@@ -249,6 +250,8 @@ export async function ensureSession(input: {
       return { ok: true, sessionToken: session.sessionToken, endpoint };
     }
     lastError = session.error;
+    // If auth failed due to timeout, try next candidate quickly
+    if (/timed out|Timeout|Aborted/i.test(session.error)) continue;
   }
   return { ok: false, error: lastError };
 }
@@ -356,45 +359,70 @@ export async function wireSendFiles(input: {
           return new Uint8Array(buf);
         }
         if (f.uri) {
+          // Verify file still exists and size (catches cache eviction)
           try {
-            // Try modern File API first (efficient slice, works for file:// cache URIs)
+            const loadLegacyInfo = new Function('return import("expo-file-system/legacy")') as () => Promise<unknown>;
+            const FSInfo = (await loadLegacyInfo()) as unknown as { getInfoAsync: (uri: string) => Promise<{ exists: boolean; size?: number }> };
             try {
-              const loadFS = new Function('return import("expo-file-system")') as () => Promise<unknown>;
-              const mod = (await loadFS()) as unknown as { File?: new (uri: string) => { slice?: (s: number, e: number) => { arrayBuffer?: () => Promise<ArrayBuffer> } } };
-              const FileCls = mod.File;
-              if (FileCls) {
-                const fileObj = new FileCls(f.uri!);
-                const sliced = (fileObj as unknown as { slice?: (s: number, e: number) => unknown }).slice?.(offset, offset + len) as { arrayBuffer?: () => Promise<ArrayBuffer> } | undefined;
-                if (sliced?.arrayBuffer) {
-                  const ab = await sliced.arrayBuffer();
-                  if (ab.byteLength > 0) return new Uint8Array(ab);
+              const info = await FSInfo.getInfoAsync(f.uri!);
+              if (!info.exists) throw new Error(`File not found at ${f.uri?.slice(0, 60)} (evicted from cache). Re-pick file.`);
+              if (typeof info.size === "number" && offset >= info.size) return new Uint8Array(0);
+            } catch {}
+          } catch {}
+          let lastErr: unknown = null;
+          for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+              // Try modern File API slice first
+              try {
+                const loadFS = new Function('return import("expo-file-system")') as () => Promise<unknown>;
+                const mod = (await loadFS()) as unknown as { File?: new (uri: string) => { slice?: (s: number, e: number) => { arrayBuffer?: () => Promise<ArrayBuffer> }; open?: (mode?: string) => { readBytes: (len: number) => Uint8Array; close: () => void; offset?: number | null } }; FileMode?: { ReadOnly: string } };
+                const FileCls = mod.File;
+                if (FileCls) {
+                  const fileObj = new FileCls(f.uri!);
+                  try {
+                    const sliced = (fileObj as unknown as { slice?: (s: number, e: number) => unknown }).slice?.(offset, offset + len) as { arrayBuffer?: () => Promise<ArrayBuffer> } | undefined;
+                    if (sliced?.arrayBuffer) {
+                      const ab = await sliced.arrayBuffer();
+                      if (ab.byteLength > 0) return new Uint8Array(ab);
+                    }
+                  } catch (e) { lastErr = e; }
+                  try {
+                    const handle = (fileObj as unknown as { open?: (mode?: unknown) => { readBytes: (len: number) => Uint8Array; close: () => void; offset?: number | null } }).open?.((mod as unknown as { FileMode?: { ReadOnly: string } }).FileMode?.ReadOnly ?? "r");
+                    if (handle) {
+                      try {
+                        if (typeof handle.offset === "number") handle.offset = offset;
+                        const bytes = handle.readBytes(len);
+                        if (bytes.byteLength > 0) return bytes;
+                      } finally {
+                        try { handle.close(); } catch {}
+                      }
+                    }
+                  } catch (e) { lastErr = e; }
                 }
+              } catch (e) { lastErr = e; }
+              // Fallback: legacy readAsStringAsync with position/length
+              try {
+                const loadLegacy = new Function('return import("expo-file-system/legacy")') as () => Promise<unknown>;
+                const FS = (await loadLegacy()) as unknown as { readAsStringAsync: (uri: string, opts: unknown) => Promise<string>; EncodingType: { Base64: string } };
+                const { readAsStringAsync, EncodingType } = FS;
+                const b64 = await (readAsStringAsync as unknown as (uri: string, opts: { encoding: string; position: number; length: number }) => Promise<string>)(f.uri!, { encoding: EncodingType.Base64, position: offset, length: len });
+                const approx = Math.ceil(b64.length * 0.75);
+                if (approx <= len + 16 && approx > 0) {
+                  const Buf = (globalThis as { Buffer?: { from: (s: string, e: string) => Uint8Array } }).Buffer;
+                  return Buf ? new Uint8Array(Buf.from(b64, "base64")) : Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+                }
+              } catch (e) { lastErr = e; }
+              if ((f.size ?? 0) < 10 * 1024 * 1024) {
+                const res = await fetch(f.uri!);
+                if (!res.ok) throw new Error(`fetch ${f.uri} failed ${res.status}`);
+                const ab = await res.arrayBuffer();
+                const full = new Uint8Array(ab);
+                return full.subarray(offset, offset + len);
               }
-            } catch {}
-            // Fallback: legacy readAsStringAsync with position/length (supports file:// and content://)
-            try {
-              const loadLegacy = new Function('return import("expo-file-system/legacy")') as () => Promise<unknown>;
-              const FS = (await loadLegacy()) as unknown as { readAsStringAsync: (uri: string, opts: unknown) => Promise<string>; EncodingType: { Base64: string } };
-              const { readAsStringAsync, EncodingType } = FS;
-              const b64 = await (readAsStringAsync as unknown as (uri: string, opts: { encoding: string; position: number; length: number }) => Promise<string>)(f.uri!, { encoding: EncodingType.Base64, position: offset, length: len });
-              const approx = Math.ceil(b64.length * 0.75);
-              if (approx <= len + 16 && approx > 0) {
-                const Buf = (globalThis as { Buffer?: { from: (s: string, e: string) => Uint8Array } }).Buffer;
-                return Buf ? new Uint8Array(Buf.from(b64, "base64")) : Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-              }
-            } catch {}
-            // Last resort: fetch whole file only for small files (<20MB) to avoid OOM
-            if ((f.size ?? 0) < 20 * 1024 * 1024) {
-              const res = await fetch(f.uri!);
-              if (!res.ok) throw new Error(`fetch ${f.uri} failed ${res.status}`);
-              const ab = await res.arrayBuffer();
-              const full = new Uint8Array(ab);
-              return full.subarray(offset, offset + len);
-            }
-            throw new Error(`Unable to read chunk at ${offset} len ${len} for ${f.name} (uri ${f.uri?.slice(0, 40)}). Ensure file is in cache (copyToCacheDirectory:true) and expo-file-system is linked.`);
-          } catch (e) {
-            throw e instanceof Error ? e : new Error(String(e));
+            } catch (e) { lastErr = e; }
+            if (attempt < 2) await new Promise((r) => setTimeout(r, 150 * (attempt + 1)));
           }
+          throw new Error(`Unable to read chunk at ${offset} len ${len} for ${f.name} (uri ${f.uri?.slice(0, 60)}) after 3 attempts: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}. Try re-picking file with copyToCacheDirectory:true.`);
         }
         throw new Error(`No bytes or uri for ${f.name}`);
       };

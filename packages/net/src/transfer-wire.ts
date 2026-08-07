@@ -13,6 +13,11 @@ export const MIN_CHUNK_SIZE = 256 * 1024;
 export const MAX_CHUNK_SIZE = 4 * 1024 * 1024;
 export const DEFAULT_WINDOW_SIZE = 8;
 
+function hasSubtleSync(): boolean {
+  try {
+    return typeof globalThis.crypto?.subtle?.importKey === "function";
+  } catch { return false; }
+}
 export function adaptiveChunkSize(opts: {
   totalBytes: number;
   availableRamHint?: number;
@@ -22,13 +27,15 @@ export function adaptiveChunkSize(opts: {
   if (opts.preferred && opts.preferred >= MIN_CHUNK_SIZE && opts.preferred <= MAX_CHUNK_SIZE) {
     return opts.preferred;
   }
-  if (opts.totalBytes >= 100 * 1024 * 1024) return 2 * 1024 * 1024;
-  if (opts.totalBytes >= 20 * 1024 * 1024) return 1024 * 1024;
-  if (opts.totalBytes >= 5 * 1024 * 1024) return 1024 * 1024;
+  // On mobile without SubtleCrypto (JS SHA) keep chunks smaller to avoid per-chunk CPU stutter
+  const slowCrypto = !hasSubtleSync();
+  if (opts.totalBytes >= 100 * 1024 * 1024) return slowCrypto ? 512 * 1024 : 1024 * 1024;
+  if (opts.totalBytes >= 20 * 1024 * 1024) return 512 * 1024;
+  if (opts.totalBytes >= 5 * 1024 * 1024) return slowCrypto ? 512 * 1024 : 1024 * 1024;
   if (opts.totalBytes >= 1024 * 1024) return 512 * 1024;
   if (opts.availableRamHint && opts.availableRamHint < 400 * 1024 * 1024) return 256 * 1024;
   if (opts.rttMsHint && opts.rttMsHint > 120) return 512 * 1024;
-  return DEFAULT_CHUNK_SIZE;
+  return slowCrypto ? 512 * 1024 : DEFAULT_CHUNK_SIZE;
 }
 
 function estimateAvailableRam(): number | undefined {
@@ -105,7 +112,8 @@ export async function sendFilesOverWire(
     rttMsHint: input.rttMsHint,
     preferred: input.chunkSize,
   });
-  const windowSize = Math.max(1, Math.min(16, input.windowSize ?? DEFAULT_WINDOW_SIZE));
+  const defaultWindow = hasSubtleSync() ? DEFAULT_WINDOW_SIZE : 4;
+  const windowSize = Math.max(1, Math.min(16, input.windowSize ?? defaultWindow));
 
   const offerFiles: TransferFile[] = input.files.map((f) => ({
     name: f.name,

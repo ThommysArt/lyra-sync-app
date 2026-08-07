@@ -83,6 +83,8 @@ async function sealJsonV2(sharedSecret: string, plaintext: Uint8Array): Promise<
     for (let j = 0; j < 32 && offset + j < plaintext.length; j++) {
       out[offset + j] = plaintext[offset + j]! ^ block[j]!;
     }
+    // Yield every 32KB to avoid blocking JS thread (stutter) on large chunks
+    if ((offset & 0x7fff) === 0) await new Promise<void>((r) => setTimeout(r, 0));
   }
   return `v2.${bytesToHex(iv)}.${bytesToHex(out)}`;
 }
@@ -98,6 +100,7 @@ async function openJsonV2(sharedSecret: string, ivHex: string, cipherHex: string
     for (let j = 0; j < 32 && offset + j < cipher.length; j++) {
       plain[offset + j] = cipher[offset + j]! ^ block[j]!;
     }
+    if ((offset & 0x7fff) === 0) await new Promise<void>((r) => setTimeout(r, 0));
   }
   return plain;
 }
