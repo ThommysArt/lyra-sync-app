@@ -154,6 +154,14 @@ export type LyraDesktopApi = {
     handler: (peers: { host: string; port?: number; name?: string; online?: boolean }[]) => void,
   ) => () => void;
   onTransferComplete?: (handler: (data: TransferCompleteEvent) => void) => () => void;
+  onTransferOffer?: (handler: (data: { transferId: string; files: { name: string; size: number }[]; totalBytes: number; fromDeviceId: string; fromDeviceName?: string; receivedBytes: number }) => void) => () => void;
+  onTransferChunk?: (handler: (data: { transferId: string; receivedBytes: number; totalBytes: number }) => void) => () => void;
+  onTransferPaused?: (handler: (data: { transferId: string }) => void) => () => void;
+  onTransferResumed?: (handler: (data: { transferId: string; resumeOffset: number }) => void) => () => void;
+  onTransferCancelled?: (handler: (data: { transferId: string }) => void) => () => void;
+  pauseTransfer?: (transferId: string) => Promise<{ ok: boolean }>;
+  resumeTransfer?: (transferId: string, offset?: number) => Promise<{ ok: boolean }>;
+  cancelTransfer?: (transferId: string) => Promise<{ ok: boolean }>;
   /** Incoming peer request to capture *this* desktop's screen. */
   onScreenShareRequest?: (
     handler: (payload: {

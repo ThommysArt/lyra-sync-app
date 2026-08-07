@@ -332,6 +332,7 @@ export async function wireSendFiles(input: {
   files: { name: string; size: number; mimeType?: string; checksum?: string; bytes?: Uint8Array }[];
   resumeOffset?: number;
   onProgress?: (p: WireTransferProgress) => void;
+  signal?: AbortSignal;
 }): Promise<
   | { ok: true; checksums: string[]; endpoint: PeerUrl }
   | { ok: false; error: string; endpoint?: PeerUrl }
@@ -366,6 +367,7 @@ export async function wireSendFiles(input: {
     files: prepared,
     resumeOffset: input.resumeOffset,
     onProgress: input.onProgress,
+    signal: input.signal,
     sealSecret: input.device.authSecret,
   });
   if (!sent.ok) return { ok: false, error: sent.error, endpoint: session.endpoint };
@@ -774,6 +776,77 @@ export async function wireSendPairRequest(input: {
   });
   if (!res.ok) return { ok: false, error: res.error };
   return { ok: true, envelope: res.envelope };
+}
+
+export async function wirePauseTransfer(input: {
+  device: PairedDevice;
+  identity: DeviceIdentity;
+  privateKey: string;
+  transferId: string;
+}): Promise<{ ok: true } | { ok: false; error: string }> {
+  const session = await ensureSession(input);
+  if (!session.ok) return session;
+  const { createEnvelope, sendEnvelope } = await import("@lyra-sync-app/net");
+  const envelope = createEnvelope({
+    type: "transfer_pause",
+    fromDeviceId: input.identity.id,
+    toDeviceId: input.device.id,
+    payload: { transferId: input.transferId },
+  });
+  const res = await sendEnvelope(session.endpoint, envelope, {
+    sessionToken: session.sessionToken,
+    sealSecret: input.device.authSecret,
+  });
+  if (!res.ok) return { ok: false, error: res.error };
+  return { ok: true };
+}
+
+export async function wireResumeTransfer(input: {
+  device: PairedDevice;
+  identity: DeviceIdentity;
+  privateKey: string;
+  transferId: string;
+  offset?: number;
+}): Promise<{ ok: true; resumeOffset?: number } | { ok: false; error: string }> {
+  const session = await ensureSession(input);
+  if (!session.ok) return session;
+  const { createEnvelope, sendEnvelope } = await import("@lyra-sync-app/net");
+  const envelope = createEnvelope({
+    type: "transfer_resume",
+    fromDeviceId: input.identity.id,
+    toDeviceId: input.device.id,
+    payload: { transferId: input.transferId, offset: input.offset ?? 0 },
+  });
+  const res = await sendEnvelope(session.endpoint, envelope, {
+    sessionToken: session.sessionToken,
+    sealSecret: input.device.authSecret,
+  });
+  if (!res.ok) return { ok: false, error: res.error };
+  const off = (res.envelope?.payload as { resumeOffset?: number } | undefined)?.resumeOffset;
+  return { ok: true, resumeOffset: off };
+}
+
+export async function wireCancelTransfer(input: {
+  device: PairedDevice;
+  identity: DeviceIdentity;
+  privateKey: string;
+  transferId: string;
+}): Promise<{ ok: true } | { ok: false; error: string }> {
+  const session = await ensureSession(input);
+  if (!session.ok) return session;
+  const { createEnvelope, sendEnvelope } = await import("@lyra-sync-app/net");
+  const envelope = createEnvelope({
+    type: "transfer_cancel",
+    fromDeviceId: input.identity.id,
+    toDeviceId: input.device.id,
+    payload: { transferId: input.transferId },
+  });
+  const res = await sendEnvelope(session.endpoint, envelope, {
+    sessionToken: session.sessionToken,
+    sealSecret: input.device.authSecret,
+  });
+  if (!res.ok) return { ok: false, error: res.error };
+  return { ok: true };
 }
 
 export async function probeAuth(input: {

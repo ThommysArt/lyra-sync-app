@@ -126,6 +126,10 @@ export type PeerServer = {
   getIdentity: () => DeviceIdentity;
   /** Local non-loopback IPv4 when available */
   getLanHost: () => string | null;
+  getTransfers: () => Map<string, import("../message-handlers").TransferReceiveState>;
+  pauseTransfer: (transferId: string) => boolean;
+  resumeTransfer: (transferId: string, offset?: number) => boolean;
+  cancelTransfer: (transferId: string) => boolean;
 };
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -613,6 +617,29 @@ export async function startPeerServer(options: PeerServerOptions): Promise<PeerS
     },
     getIdentity: () => currentIdentity,
     getLanHost: () => getLocalIPv4(),
+    getTransfers: () => transfers,
+    pauseTransfer: (transferId: string) => {
+      const s = transfers.get(transferId);
+      if (!s) return false;
+      s.paused = true;
+      return true;
+    },
+    resumeTransfer: (transferId: string, offset?: number) => {
+      const s = transfers.get(transferId);
+      if (!s) return false;
+      s.paused = false;
+      if (typeof offset === "number") s.receivedBytes = offset;
+      return true;
+    },
+    cancelTransfer: (transferId: string) => {
+      const s = transfers.get(transferId);
+      if (s) {
+        void s.cleanupDisk?.();
+        transfers.delete(transferId);
+        return true;
+      }
+      return false;
+    },
     close: () =>
       new Promise((resolve, reject) => {
         for (const pending of pendingPairs.values()) {

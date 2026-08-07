@@ -27,25 +27,22 @@ export function randomHex(byteLength: number): string {
   return bytesToHex(out);
 }
 
+import { sha256HexJs } from "./sha256-js";
+
 export async function sha256Hex(input: string | Uint8Array): Promise<string> {
   const data =
     typeof input === "string" ? new TextEncoder().encode(input) : input;
   if (typeof globalThis.crypto?.subtle?.digest === "function") {
-    const hash = await globalThis.crypto.subtle.digest(
-      "SHA-256",
-      data as BufferSource,
-    );
-    return bytesToHex(new Uint8Array(hash));
+    try {
+      const hash = await globalThis.crypto.subtle.digest(
+        "SHA-256",
+        data as BufferSource,
+      );
+      return bytesToHex(new Uint8Array(hash));
+    } catch {
+      // fall through to JS
+    }
   }
-  // Deterministic non-crypto fallback for environments without SubtleCrypto
-  let h1 = 0x811c9dc5;
-  let h2 = 0x811c9dc5;
-  for (let i = 0; i < data.length; i++) {
-    h1 = Math.imul(h1 ^ data[i]!, 0x01000193);
-    h2 = Math.imul(h2 ^ data[data.length - 1 - i]!, 0x01000193);
-  }
-  const a = (h1 >>> 0).toString(16).padStart(8, "0");
-  const b = (h2 >>> 0).toString(16).padStart(8, "0");
-  const c = data.length.toString(16).padStart(8, "0");
-  return `${a}${b}${c}${a}${b}${c}${a}${b}`.slice(0, 64);
+  // Pure JS fallback — correct SHA-256 for RN / environments without WebCrypto
+  return sha256HexJs(data);
 }

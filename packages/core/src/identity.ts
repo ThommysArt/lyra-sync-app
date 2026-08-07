@@ -55,17 +55,19 @@ function randomBytes(length: number): Uint8Array {
   return out;
 }
 
+import { sha256HexJs } from "./sha256-js";
+
 async function sha256Hex(input: string | Uint8Array): Promise<string> {
   const data = typeof input === "string" ? new TextEncoder().encode(input) : input;
   if (typeof globalThis.crypto?.subtle?.digest === "function") {
-    const hash = await globalThis.crypto.subtle.digest("SHA-256", data as BufferSource);
-    return bytesToHex(new Uint8Array(hash));
+    try {
+      const hash = await globalThis.crypto.subtle.digest("SHA-256", data as BufferSource);
+      return bytesToHex(new Uint8Array(hash));
+    } catch {
+      // fall through to JS
+    }
   }
-  let h = 0;
-  for (let i = 0; i < data.length; i++) {
-    h = (Math.imul(31, h) + data[i]!) | 0;
-  }
-  return `fallback${Math.abs(h).toString(16).padStart(8, "0")}${data.length.toString(16)}`;
+  return sha256HexJs(data);
 }
 
 function hasSubtleCrypto(): boolean {
