@@ -2442,14 +2442,13 @@ export function createLyraStore(options?: {
           error: null,
         },
       }));
-      notify(
-        set,
+      console.info(
+        "[lyra discover] refresh done",
         scannedNew > 0
-          ? `Found ${scannedNew} nearby device(s) — Pair to trust`
+          ? `Found ${scannedNew} nearby device(s)`
           : online > 0
             ? `Discovery refreshed · ${online} online · ${nearby} nearby`
-            : `No peers found on LAN (seeds: ${[...seeds].slice(0, 3).join(", ") || "none"}). Check Wi‑Fi, peer port, or add by IP.`,
-        scannedNew > 0 ? "success" : online > 0 ? "info" : "info",
+            : `No peers found on LAN (seeds: ${[...seeds].slice(0, 3).join(", ") || "none"})`,
       );
     },
     probePeerAddress: async (input) => {
@@ -3058,6 +3057,10 @@ export function createLyraStore(options?: {
                 ),
               }));
               persist();
+              console.error(`[lyra transfer] failed ${transferId}: ${res.error}`, {
+                transferId,
+                error: res.error,
+              });
               notify(set, `Transfer failed: ${res.error}`, "error");
               return;
             }
@@ -3361,6 +3364,10 @@ export function createLyraStore(options?: {
                 ),
               }));
               persist();
+              console.error(`[lyra transfer] failed ${id}: ${res.error}`, {
+                transferId: id,
+                error: res.error,
+              });
               notify(set, `Transfer failed: ${res.error}`, "error");
               return;
             }
@@ -3867,6 +3874,10 @@ export function createLyraStore(options?: {
               ),
             }));
             persist();
+            console.error(`[lyra transfer] failed ${tx.id}: not paired`, {
+              transferId: tx.id,
+              deviceId: device.id,
+            });
             notify(set, "Pair the device before transferring files", "error");
             continue;
           }
@@ -3891,6 +3902,10 @@ export function createLyraStore(options?: {
               ),
             }));
             persist();
+            console.error(`[lyra transfer] failed ${tx.id}: could not read ${missing[0]!.name}`, {
+              transferId: tx.id,
+              file: missing[0]!.name,
+            });
             notify(set, "Transfer failed: file contents could not be read", "error");
             continue;
           }
@@ -3910,6 +3925,10 @@ export function createLyraStore(options?: {
               ),
             }));
             persist();
+            console.error(`[lyra transfer] failed ${tx.id}: empty file ${emptyBytes[0]!.name}`, {
+              transferId: tx.id,
+              file: emptyBytes[0]!.name,
+            });
             notify(set, "Transfer failed: empty file", "error");
             continue;
           }
@@ -3982,6 +4001,11 @@ export function createLyraStore(options?: {
                 ),
               }));
               persist();
+              console.error(`[lyra transfer] failed ${tx.id}: ${res.error}`, {
+                transferId: tx.id,
+                deviceId: device.id,
+                error: res.error,
+              });
               notify(set, `Transfer failed: ${res.error}`, "error");
               return;
             }
@@ -4035,15 +4059,24 @@ export function createLyraStore(options?: {
         notify(set, "No target devices for re-send", "error");
         return;
       }
-      store.startFileTransfer(
-        targets,
-        tx.files.map((f) => ({
-          name: f.name,
-          size: f.size,
-          mimeType: f.mimeType,
-          checksum: f.checksum,
-        })),
-      );
+      const stored = transferFileBytes.get(transferId);
+      const filesToSend = stored
+        ? stored.map((f) => ({
+            name: f.name,
+            size: f.size,
+            mimeType: f.mimeType,
+            checksum: f.checksum,
+            bytes: f.bytes,
+            uri: f.uri,
+            file: f.file,
+          }))
+        : tx.files.map((f) => ({
+            name: f.name,
+            size: f.size,
+            mimeType: f.mimeType,
+            checksum: f.checksum,
+          }));
+      store.startFileTransfer(targets, filesToSend);
     },
     setTransferStatus: (id, status) => {
       const prev = getState().transfers.find((t) => t.id === id);

@@ -273,6 +273,12 @@ function TransfersPage() {
                     </p>
                   )}
 
+                  {tx.status === "failed" && (
+                    <p className="text-xs text-destructive">
+                      Failed: {tx.error ?? "Transfer failed"}
+                    </p>
+                  )}
+
                   <div className="flex gap-1">
                     {tx.status === "transferring" && (
                       <Button
@@ -304,7 +310,9 @@ function TransfersPage() {
                         <X className="size-4" />
                       </Button>
                     )}
-                    {(tx.status === "completed" || tx.status === "cancelled") && (
+                    {(tx.status === "completed" ||
+                      tx.status === "cancelled" ||
+                      tx.status === "failed") && (
                       <Button
                         size="sm"
                         variant="outline"
