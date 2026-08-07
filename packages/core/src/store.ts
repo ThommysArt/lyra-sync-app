@@ -187,7 +187,8 @@ export type LyraStore = {
   getState: () => LyraState;
   subscribe: (listener: () => void) => () => void;
   hydrate: (storage?: StorageLike) => Promise<void>;
-  persist: () => void;
+  persist: () => void | Promise<void>;
+  flush: () => Promise<void>;
   setDeviceName: (name: string) => void;
   updateSettings: (patch: Partial<AppSettings>) => void;
   startPairingSession: () => ActivePairingSession;
@@ -426,9 +427,12 @@ export type LyraStore = {
 };
 
 export type StorageLike = {
-  getItem: (key: string) => string | null;
-  setItem: (key: string, value: string) => void;
-  removeItem?: (key: string) => void;
+  getItem: (key: string) => string | null | Promise<string | null>;
+  setItem: (key: string, value: string) => void | Promise<void>;
+  removeItem?: (key: string) => void | Promise<void>;
+  /** Optional flush to wait for pending async writes (native). */
+  flush?: () => Promise<void>;
+  hydrate?: () => Promise<void>;
 };
 
 const STORAGE_KEY = "lyra.v1.state";
@@ -576,7 +580,7 @@ function simulateTransferProgress(
 async function finalizePairDevice(
   set: (fn: (s: LyraState) => LyraState) => void,
   getState: () => LyraState,
-  persist: () => void,
+  persist: () => void | Promise<void>,
   input: {
     payload: PairingPayload;
     source: IncomingPairingRequest["source"];
@@ -653,7 +657,7 @@ async function finalizePairDevice(
       (r) => r.payload.deviceId !== device.id && r.payload.fingerprint !== device.fingerprint,
     ),
   }));
-  persist();
+  await persist();
 
   // Optional legacy notify (prefer long-poll pair_confirm on the host path)
   if (input.notifyRemote && device.host && s.identity) {
@@ -934,9 +938,12 @@ export function createLyraStore(options?: {
     if (!storage || !state.identity) return;
     // Prefer isolating private key under a separate storage key when possible
     // so bulk device/clipboard dumps are less sensitive (web localStorage).
+    let p1: unknown;
+    let p2: unknown;
+    let p3: unknown;
     try {
       if (state.privateKey && typeof storage.setItem === "function") {
-        storage.setItem(`${STORAGE_KEY}.key`, state.privateKey);
+        p1 = storage.setItem(`${STORAGE_KEY}.key`, state.privateKey);
       }
     } catch {
       // ignore
@@ -951,9 +958,20 @@ export function createLyraStore(options?: {
       settings: state.settings,
     };
     try {
-      storage.setItem(STORAGE_KEY, JSON.stringify(payload));
+      p2 = storage.setItem(STORAGE_KEY, JSON.stringify(payload));
     } catch {
       // ignore quota errors
+    }
+    try {
+      if (storage.flush) p3 = storage.flush();
+    } catch {
+      // ignore
+    }
+    const hasAsync = p1 instanceof Promise || p2 instanceof Promise || p3 instanceof Promise;
+    if (hasAsync) {
+      return Promise.all(
+        [p1, p2, p3].filter((p) => p instanceof Promise) as Promise<unknown>[],
+      ).then(() => undefined);
     }
   };
 
@@ -966,8 +984,14 @@ export function createLyraStore(options?: {
     let settings: AppSettings = defaultSettings;
 
     if (storage) {
+      // Ensure native bulk cache is hydrated before reading (fixes cold-start race)
+      if (storage.hydrate) {
+        try {
+          await storage.hydrate();
+        } catch {}
+      }
       try {
-        const raw = storage.getItem(STORAGE_KEY);
+        const raw = await Promise.resolve(storage.getItem(STORAGE_KEY));
         if (raw) {
           const parsed = JSON.parse(raw) as Partial<typeof state> & { privateKey?: string | null };
           if (parsed.identity) identity = parsed.identity;
@@ -978,7 +1002,7 @@ export function createLyraStore(options?: {
           if (parsed.settings) settings = AppSettingsSchema.parse(parsed.settings);
         }
         // Isolated key slot (preferred)
-        const isolated = storage.getItem(`${STORAGE_KEY}.key`);
+        const isolated = await Promise.resolve(storage.getItem(`${STORAGE_KEY}.key`));
         if (isolated) privateKey = isolated;
       } catch {
         // corrupt storage — re-seed
@@ -1038,7 +1062,7 @@ export function createLyraStore(options?: {
         error: null,
       },
     }));
-    persist();
+    await persist();
   };
 
   const store: LyraStore = {
@@ -1049,17 +1073,21 @@ export function createLyraStore(options?: {
     },
     hydrate,
     persist,
+    flush: async () => {
+      if (storage?.flush) await storage.flush();
+      else await (persist() as Promise<void>);
+    },
     setDeviceName: (name) => {
       set((s) =>
         s.identity
           ? { ...s, identity: { ...s.identity, name: name.trim() || s.identity.name } }
           : s,
       );
-      persist();
+      void persist();
     },
     updateSettings: (patch) => {
       set((s) => ({ ...s, settings: { ...s.settings, ...patch } }));
-      persist();
+      void persist();
     },
     startPairingSession: () => {
       const s = getState();

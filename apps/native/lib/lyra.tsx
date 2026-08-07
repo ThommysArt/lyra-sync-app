@@ -44,6 +44,8 @@ export function LyraProvider({ children }: { children: ReactNode }) {
       try {
         if (storage.hydrate) await storage.hydrate();
         await migratePrivateKeyToSecureStore(storage);
+        // Ensure any pending writes from migration are flushed (SQLite is sync)
+        if (storage.flush) await storage.flush();
       } catch (err) {
         console.warn("[lyra] storage hydrate failed", err);
       }
@@ -51,6 +53,20 @@ export function LyraProvider({ children }: { children: ReactNode }) {
     })();
     return () => {
       cancelled = true;
+    };
+  }, [storage]);
+
+  // Flush pending AsyncStorage writes when app goes to background (durability for reload)
+  useEffect(() => {
+    const sub = AppState.addEventListener("change", (next) => {
+      if (next === "background" || next === "inactive") {
+        void storage.flush?.().catch(() => {});
+      }
+    });
+    return () => {
+      try {
+        sub.remove();
+      } catch {}
     };
   }, [storage]);
 
