@@ -36,7 +36,7 @@
     "@lyra-sync-app/protocol": "workspace:*",
     "@react-native-async-storage/async-storage": "^3.1.1",
     "dotenv": "catalog:",
-    "expo-sqlite": "~16.0.8",
+    "expo-sqlite": "~57.0.1",
     "expo": "~57.0.1",
     "expo-blur": "~57.0.0",
     "expo-camera": "~57.0.1",
