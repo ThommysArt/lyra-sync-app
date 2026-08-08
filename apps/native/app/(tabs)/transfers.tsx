@@ -45,26 +45,17 @@ export default function TransfersScreen() {
         copyToCacheDirectory: true,
       });
       if (result.canceled || !result.assets?.length) return;
-      const prepared = await Promise.all(
-        result.assets.map(async (a) => {
-          let bytes: Uint8Array | undefined;
-          try {
-            if (a.uri) {
-              const res = await fetch(a.uri);
-              bytes = new Uint8Array(await res.arrayBuffer());
-            }
-          } catch (e) {
-            console.warn("[lyra] pick failed", a.name, e);
-            bytes = undefined;
-          }
-          return {
-            name: a.name,
-            size: bytes?.byteLength ?? a.size ?? 1024,
-            mimeType: a.mimeType ?? undefined,
-            bytes,
-          };
-        }),
-      );
+      const prepared = result.assets.map((a) => {
+        // For large files avoid fetch->arrayBuffer OOM: pass uri for streaming
+        // Small files (<10MB) we could still provide bytes for quick path, but uri streaming works for all
+        return {
+          name: a.name,
+          size: a.size ?? 1024,
+          mimeType: a.mimeType ?? undefined,
+          uri: a.uri,
+          // No bytes here — streaming via expo-file-system per chunk avoids 147MB DirectByteBuffer OOM
+        };
+      });
       store.startFileTransfer([target], prepared);
     } catch {
       // cancelled
@@ -195,6 +186,39 @@ export default function TransfersScreen() {
                     </Text>
                   </View>
                 )}
+                {tx.status === "completed" && (
+                  <Text
+                    style={{ color: muted, fontFamily: fonts.regular, fontSize: 11, marginTop: 10 }}
+                  >
+                    Done in {tx.durationMs ? `${Math.round(tx.durationMs / 1000)}s` : "—"} · avg{" "}
+                    {formatSpeed(tx.averageSpeedBps)}
+                    {tx.conflictResolved ? ` · ${tx.conflictResolved}` : ""}
+                    {tx.integrityOk === true
+                      ? " · verified"
+                      : tx.integrityOk === false
+                        ? " · integrity failed"
+                        : ""}
+                  </Text>
+                )}
+                {tx.status === "failed" && (
+                  <Text
+                    style={{
+                      color: isDark ? "#ff6b6b" : "#dc2626",
+                      fontFamily: fonts.medium,
+                      fontSize: 12,
+                      marginTop: 10,
+                    }}
+                  >
+                    Failed: {tx.error ?? "Transfer failed"}
+                  </Text>
+                )}
+                {tx.status === "cancelled" && tx.error && (
+                  <Text
+                    style={{ color: muted, fontFamily: fonts.regular, fontSize: 11, marginTop: 10 }}
+                  >
+                    Cancelled{tx.error ? `: ${tx.error}` : ""}
+                  </Text>
+                )}
                 <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
                   {tx.status === "transferring" && (
                     <Chip
@@ -213,7 +237,9 @@ export default function TransfersScreen() {
                       ink={ink}
                     />
                   )}
-                  {(tx.status === "completed" || tx.status === "cancelled") && (
+                  {(tx.status === "completed" ||
+                    tx.status === "cancelled" ||
+                    tx.status === "failed") && (
                     <Chip label="Re-send" onPress={() => store.resendTransfer(tx.id)} ink={ink} />
                   )}
                 </View>

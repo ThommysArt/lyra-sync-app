@@ -10,19 +10,9 @@
 export type HttpRequestInit = {
   method?: string;
   headers?: Record<string, string>;
-  body?: string;
+  body?: string | Uint8Array;
   signal?: AbortSignal;
-  /**
-   * Wall-clock budget for the request after the transport begins work.
-   * Native TCP transport starts this *after* a concurrency slot is acquired so
-   * LAN scan queue wait does not burn the timeout (critical for mobile discovery).
-   * For pair long-polls, pass waitMs + buffer (e.g. 125_000).
-   */
   timeoutMs?: number;
-  /**
-   * Priority lane for native TCP queue (0=pair, 1=interactive, 2=scan).
-   * Defaults to interactive (1). Scan uses 2 so user actions preempt discovery.
-   */
   lane?: number;
 };
 
@@ -30,6 +20,8 @@ export type HttpResponse = {
   ok: boolean;
   status: number;
   text: () => Promise<string>;
+  arrayBuffer?: () => Promise<ArrayBuffer>;
+  headers?: Record<string, string>;
 };
 
 export type HttpTransport = (
@@ -54,14 +46,11 @@ function readGlobal(): HttpTransport | null | undefined {
 function writeGlobal(transport: HttpTransport | null): void {
   try {
     (globalThis as GlobalBag)[GLOBAL_KEY] = transport;
-  } catch {
-    // ignore
-  }
+  } catch {}
 }
 
 let customTransport: HttpTransport | null = null;
 
-/** Install a platform transport (e.g. RN TCP). Pass null to restore fetch. */
 export function setHttpTransport(transport: HttpTransport | null): void {
   customTransport = transport;
   writeGlobal(transport);
@@ -74,9 +63,20 @@ export function getHttpTransport(): HttpTransport {
   return fetchAsTransport;
 }
 
-/** True when a custom (non-fetch) transport is installed. */
 export function hasCustomHttpTransport(): boolean {
   return Boolean(customTransport || readGlobal());
+}
+
+function forwardLog(level: string, ns: string, msg: string, data?: unknown) {
+  const line = `[${ns}] ${msg}` + (data ? ` ${typeof data === "string" ? data : JSON.stringify(data).slice(0,800)}` : "");
+  if (level === "error") console.error(line);
+  else if (level === "warn") console.warn(line);
+  else console.log(line);
+  try {
+    const g = globalThis as unknown as { window?: { lyraDesktop?: { log?: (l: string, n: string, m: string, d?: unknown) => Promise<unknown> } }; lyraDesktop?: { log?: (l: string, n: string, m: string, d?: unknown) => Promise<unknown> } };
+    const fn = g.window?.lyraDesktop?.log ?? g.lyraDesktop?.log;
+    if (fn) void fn(level, ns, msg, data);
+  } catch {}
 }
 
 export async function fetchAsTransport(
@@ -100,26 +100,77 @@ export async function fetchAsTransport(
   }
 
   try {
-    const res = await fetch(url, {
+    const headers = { ...(init?.headers ?? {}) } as Record<string, string>;
+    const lowerKeys = Object.keys(headers).map((k) => k.toLowerCase());
+    if (!lowerKeys.includes("connection")) headers["connection"] = "keep-alive";
+    // Handle binary body length
+    if (init?.body instanceof Uint8Array && !lowerKeys.includes("content-length")) {
+      headers["content-length"] = String(init.body.byteLength);
+      if (!lowerKeys.includes("content-type")) headers["content-type"] = "application/octet-stream";
+    }
+    const fetchOpts: RequestInit & { keepalive?: boolean; dispatcher?: unknown } = {
       method: init?.method ?? "GET",
-      headers: init?.headers,
-      body: init?.body,
+      headers,
+      body: init?.body as unknown as BodyInit,
       signal: controller?.signal ?? init?.signal,
       cache: "no-store" as RequestCache,
-    });
+      keepalive: true,
+    };
+    // undici is Node-only; avoid vite bundling it for web by using dynamic eval
+    try {
+      const dynRequire = Function('return typeof require !== "undefined" ? require : null')() as unknown as ((id: string) => unknown) | null;
+      const undici = dynRequire ? (dynRequire("undici") as { Agent?: new (o: unknown) => unknown }) : null;
+      if (undici?.Agent && typeof (fetchOpts as unknown as Record<string, unknown>).dispatcher === "undefined") {
+        const g = globalThis as unknown as { __lyraUndiciAgent?: unknown; __lyraUndiciAgentInsecure?: unknown };
+        const isHttps = url.startsWith("https://");
+        if (isHttps) {
+          if (!g.__lyraUndiciAgentInsecure) {
+            g.__lyraUndiciAgentInsecure = new undici.Agent({ keepAliveTimeout: 30_000, keepAliveMaxTimeout: 60_000, connections: 16, connect: { rejectUnauthorized: false } });
+          }
+          (fetchOpts as unknown as Record<string, unknown>).dispatcher = g.__lyraUndiciAgentInsecure;
+        } else {
+          if (!g.__lyraUndiciAgent) {
+            g.__lyraUndiciAgent = new undici.Agent({ keepAliveTimeout: 30_000, keepAliveMaxTimeout: 60_000, connections: 16 });
+          }
+          (fetchOpts as unknown as Record<string, unknown>).dispatcher = g.__lyraUndiciAgent;
+        }
+      }
+    } catch {}
+    let res: Response;
+    try {
+      res = await fetch(url, fetchOpts as RequestInit);
+    } catch (e) {
+      const isProbe = init?.lane === 2 || (url.includes("/lyra/info") && init?.method !== "POST");
+      // Discovery probes are expected to fail for most hosts in /24 — caller (scanLanForPeers) logs a single summary
+      if (isProbe) throw e;
+      const msg = e instanceof Error ? e.message : String(e);
+      forwardLog("error", "lyra http", `fetch failed ${init?.method ?? "GET"} ${url}: ${msg}`, { url, method: init?.method, error: msg, stack: e instanceof Error ? e.stack?.slice(0,500) : undefined });
+      throw e;
+    }
+    if (!res.ok) {
+      forwardLog("warn", "lyra http", `${init?.method ?? "GET"} ${url} -> HTTP ${res.status}`, { url, method: init?.method, status: res.status });
+    } else {
+      // Log successful POSTs for transfers at debug level (visible when LYRA_LOG=debug)
+      if (init?.method === "POST" && url.includes("/lyra/message")) {
+        forwardLog("log", "lyra http", `POST ${url} -> ${res.status}`, { url });
+      }
+    }
+    // Capture headers for binary transfers
+    const respHeaders: Record<string, string> = {};
+    res.headers.forEach((v, k) => respHeaders[k.toLowerCase()] = v);
     return {
       ok: res.ok,
       status: res.status,
       text: () => res.text(),
+      arrayBuffer: () => res.arrayBuffer(),
+      headers: respHeaders,
     };
   } finally {
     if (timer) clearTimeout(timer);
     if (init?.signal && controller) {
       try {
         init.signal.removeEventListener("abort", onExternalAbort);
-      } catch {
-        // ignore
-      }
+      } catch {}
     }
   }
 }

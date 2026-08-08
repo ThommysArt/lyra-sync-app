@@ -40,7 +40,7 @@ describe("HTTP peer server", () => {
       assert.equal(info.ok, true);
       if (info.ok) {
         assert.equal(info.identity.id, "server_dev");
-        assert.equal(info.protocolVersion, 2);
+        assert.equal(info.protocolVersion, 4);
       }
 
       const auth = await authenticateWithPeer({

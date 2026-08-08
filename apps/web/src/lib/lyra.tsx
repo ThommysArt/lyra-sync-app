@@ -5,6 +5,19 @@ import { useCallback } from "react";
 import { getDesktopApi } from "./desktop-bridge";
 import { installScreenSessionSync } from "./screen-session-sync";
 
+function fwdLog(level: string, ns: string, msg: string, data?: unknown) {
+  const line = `[${ns}] ${msg}` + (data ? ` ${typeof data === "string" ? data : JSON.stringify(data).slice(0,600)}` : "");
+  if (level === "error") console.error(line);
+  else if (level === "warn") console.warn(line);
+  else console.log(line);
+  try {
+    const g = globalThis as unknown as { window?: { lyraDesktop?: { log?: (l: string, n: string, m: string, d?: unknown) => Promise<unknown> } }; lyraDesktop?: { log?: (l: string, n: string, m: string, d?: unknown) => Promise<unknown> } };
+    const fn = g.window?.lyraDesktop?.log ?? g.lyraDesktop?.log;
+    if (fn) void fn(level, ns, msg, data);
+  } catch {}
+}
+import { createSqliteLyraStorage } from "./sqlite-storage";
+
 export { useLyraSelector, useLyraState, useLyraStore };
 
 function shouldSeedDemo(): boolean {
@@ -59,14 +72,21 @@ export function LyraProvider({ children }: { children: ReactNode }) {
     const pushIdentity = () => {
       if (!api.setIdentity) return;
       const s = store.getState();
-      if (!s.identity) return;
-      void api.setIdentity({ identity: s.identity, privateKey: s.privateKey });
+      if (!s.identity) {
+        fwdLog("warn", "lyra web", "pushIdentity: no identity");
+        return;
+      }
+      fwdLog("log", "lyra web", `pushIdentity: ${s.identity.id.slice(0,8)} ${s.identity.name}`);
+      void api.setIdentity({ identity: s.identity, privateKey: s.privateKey }).then((r) => fwdLog("log", "lyra web", `pushIdentity result`, r as unknown)).catch((e) => fwdLog("error", "lyra web", `pushIdentity failed`, { error: e instanceof Error ? e.message : String(e) }));
     };
     pushIdentity();
 
     // Sync trusted peers whenever devices change (pair / unpair)
     const syncTrust = () => {
-      if (!api.syncTrustedPeers) return Promise.resolve();
+      if (!api.syncTrustedPeers) {
+        fwdLog("warn", "lyra web", "syncTrust: no api.syncTrustedPeers");
+        return Promise.resolve();
+      }
       const peers = store
         .getState()
         .devices.filter((d) => d.authSecret)
@@ -76,7 +96,14 @@ export function LyraProvider({ children }: { children: ReactNode }) {
           publicKey: d.publicKey,
           authSecret: d.authSecret!,
         }));
-      return api.syncTrustedPeers(peers).catch(() => undefined) as Promise<unknown>;
+      fwdLog("log", "lyra web", `syncTrust: ${peers.length} peers`, { peers: peers.map((p) => `${p.deviceId.slice(0,8)}:${p.fingerprint.slice(0,8)}`) });
+      return api.syncTrustedPeers(peers).then((r) => {
+        fwdLog("log", "lyra web", `syncTrust ok`, r as unknown);
+        return r;
+      }).catch((e) => {
+        fwdLog("error", "lyra web", `syncTrust failed`, { error: e instanceof Error ? e.message : String(e) });
+        return undefined;
+      }) as Promise<unknown>;
     };
     void syncTrust();
 
@@ -325,9 +352,24 @@ export function LyraProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  // Electron: use SQLite via IPC (replaces localStorage). Browser fallback remains localStorage for PWA.
+  const storage = (() => {
+    const api = getDesktopApi();
+    // If desktop bridge with kv* exists, use SQLite
+    if (api && typeof (api as unknown as { kvGet?: unknown }).kvGet === "function") {
+      try {
+        return createSqliteLyraStorage();
+      } catch (e) {
+        console.error("[lyra] sqlite storage init failed, falling back to localStorage", e);
+      }
+    }
+    if (typeof localStorage !== "undefined") return localStorage;
+    return null;
+  })();
+
   return (
     <BaseLyraProvider
-      storage={typeof localStorage !== "undefined" ? localStorage : null}
+      storage={storage}
       seedDemo={shouldSeedDemo()}
       platformHint="web"
       onStoreReady={onStoreReady}

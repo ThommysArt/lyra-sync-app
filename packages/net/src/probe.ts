@@ -377,6 +377,16 @@ export async function scanLanForPeers(input: {
   await Promise.all(
     Array.from({ length: Math.min(concurrency, Math.max(1, candidates.length)) }, () => worker()),
   );
+  // Single summary log for mobile (and desktop) — replaces per-probe spam
+  {
+    const seenHosts = [...new Set(candidates.map((c) => c.host))];
+    const portsSummary = [...new Set(candidates.map((c) => c.port).filter((p): p is number => typeof p === "number"))].sort((a,b)=>a-b).join("/");
+    const scannedSubnets = [...new Set(seenHosts.map((h) => h.replace(/\.\d+$/, ".*")))].slice(0,3).join(", ");
+    console.info(`[lyra discover] scan found ${found.length} device(s) out of ${candidates.length} tested — attempted ${seenHosts.length} hosts (${scannedSubnets}) on ports ${portsSummary} — seeds: ${seeds.join(", ").slice(0,120)}`);
+    if (found.length > 0) {
+      console.info(`[lyra discover] found: ${found.map((f) => `${f.identity.name} ${f.host}:${f.port}`).join(", ")}`);
+    }
+  }
   return found;
 }
 

@@ -107,6 +107,14 @@ contextBridge.exposeInMainWorld("lyraDesktop", {
   pauseTransfer: (transferId) => ipcRenderer.invoke("lyra:pause-transfer", transferId),
   resumeTransfer: (transferId, offset) => ipcRenderer.invoke("lyra:resume-transfer", transferId, offset),
   cancelTransfer: (transferId) => ipcRenderer.invoke("lyra:cancel-transfer", transferId),
+  // SQLite KV (replaces localStorage)
+  kvGet: (key) => ipcRenderer.invoke("lyra:kv-get", key),
+  kvSet: (key, value) => ipcRenderer.invoke("lyra:kv-set", key, value),
+  kvRemove: (key) => ipcRenderer.invoke("lyra:kv-remove", key),
+  kvGetAll: () => ipcRenderer.invoke("lyra:kv-getAll"),
+  kvKeys: () => ipcRenderer.invoke("lyra:kv-keys"),
+  // Forward renderer logs to main terminal
+  log: (level, ns, msg, data) => ipcRenderer.invoke("lyra:log", { level, ns, msg, data }),
   onScreenShareRequest: (handler) => {
     const listener = (_event, payload) => handler(payload);
     ipcRenderer.on("lyra:screen-share-request", listener);

@@ -17,7 +17,6 @@ import {
   type NativeImage,
 } from "electron";
 import { copyFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -427,6 +426,7 @@ async function startNetworking() {
           resolvePeerAuth: ({ deviceId, fingerprint }) => {
             const byId = trustedPeers.get(deviceId);
             if (byId) {
+              console.log(`[lyra main] resolvePeerAuth hit byId ${deviceId.slice(0,8)} -> authSecret ${byId.authSecret.slice(0,8)}... trusted=${trustedPeers.size}`);
               return {
                 sharedSecret: byId.authSecret,
                 expectedFingerprint: byId.fingerprint,
@@ -435,6 +435,7 @@ async function startNetworking() {
             }
             for (const t of trustedPeers.values()) {
               if (t.fingerprint === fingerprint) {
+                console.log(`[lyra main] resolvePeerAuth hit byFp ${fingerprint.slice(0,8)} -> ${t.deviceId.slice(0,8)}`);
                 return {
                   sharedSecret: t.authSecret,
                   expectedFingerprint: t.fingerprint,
@@ -442,6 +443,7 @@ async function startNetworking() {
                 };
               }
             }
+            console.log(`[lyra main] resolvePeerAuth miss for ${deviceId.slice(0,8)}/${fingerprint.slice(0,8)} trusted=${trustedPeers.size} -> first-contact`);
             // First contact allowed for pairing handshake
             return {};
           },
@@ -563,20 +565,14 @@ async function startNetworking() {
               }
               const savedPaths: string[] = [];
               try {
-                // Prefer disk-backed path; fall back to in-memory chunks
-                let blob: Buffer | null = null;
+                // Prefer disk-backed path (streaming, unlimited)
                 if (state.diskPath && existsSync(state.diskPath)) {
-                  blob = await readFile(state.diskPath);
-                } else if (state.chunks?.length) {
-                  blob = Buffer.concat(state.chunks.map((c) => Buffer.from(c)));
-                }
-                if (blob && state.files.length > 0) {
+                  const { createWriteStream, openSync, closeSync, readSync } = await import("node:fs");
                   let offset = 0;
                   for (const file of state.files) {
-                    const size = Math.min(file.size, Math.max(0, blob.length - offset));
+                    const size = file.size;
                     const safeName = path.basename(file.name).replace(/[^\w.\- ()[\]]+/g, "_") || "file";
                     let dest = path.join(destDir, safeName);
-                    // Avoid overwrite: append counter
                     let n = 1;
                     while (existsSync(dest)) {
                       const ext = path.extname(safeName);
@@ -584,9 +580,77 @@ async function startNetworking() {
                       dest = path.join(destDir, `${base} (${n})${ext}`);
                       n++;
                     }
-                    writeFileSync(dest, blob.subarray(offset, offset + size));
+                    // Stream 4MiB chunks to avoid holding file in RAM
+                    await new Promise<void>((resolve, reject) => {
+                      const readFd = openSync(state.diskPath!, "r");
+                      const writeStream = createWriteStream(dest);
+                      let remaining = size;
+                      let readOffset = offset;
+                      const buf = Buffer.alloc(4 * 1024 * 1024);
+                      const pump = () => {
+                        if (remaining <= 0) {
+                          try { closeSync(readFd); } catch {}
+                          writeStream.end(() => resolve());
+                          return;
+                        }
+                        const toRead = Math.min(buf.length, remaining);
+                        let bytesRead = 0;
+                        try {
+                          bytesRead = readSync(readFd, buf, 0, toRead, readOffset);
+                        } catch (e) {
+                          try { closeSync(readFd); } catch {}
+                          writeStream.destroy();
+                          reject(e);
+                          return;
+                        }
+                        if (bytesRead <= 0) {
+                          try { closeSync(readFd); } catch {}
+                          writeStream.end(() => resolve());
+                          return;
+                        }
+                        remaining -= bytesRead;
+                        readOffset += bytesRead;
+                        const chunk = bytesRead === buf.length ? buf : buf.subarray(0, bytesRead);
+                        if (!writeStream.write(chunk)) {
+                          writeStream.once("drain", pump);
+                        } else {
+                          setImmediate(pump);
+                        }
+                      };
+                      writeStream.on("error", (e) => {
+                        try { closeSync(readFd); } catch {}
+                        reject(e);
+                      });
+                      pump();
+                    });
                     savedPaths.push(dest);
                     offset += size;
+                  }
+                  // Cleanup source temp file after successful copy
+                  try {
+                    const { unlinkSync } = await import("node:fs");
+                    unlinkSync(state.diskPath!);
+                  } catch {}
+                } else if (state.chunks?.length) {
+                  // Small in-memory transfers (<1MiB) — merge is okay
+                  const blob = Buffer.concat(state.chunks.map((c) => Buffer.from(c)));
+                  if (blob && state.files.length > 0) {
+                    let offset = 0;
+                    for (const file of state.files) {
+                      const size = Math.min(file.size, Math.max(0, blob.length - offset));
+                      const safeName = path.basename(file.name).replace(/[^\w.\- ()[\]]+/g, "_") || "file";
+                      let dest = path.join(destDir, safeName);
+                      let n = 1;
+                      while (existsSync(dest)) {
+                        const ext = path.extname(safeName);
+                        const base = path.basename(safeName, ext);
+                        dest = path.join(destDir, `${base} (${n})${ext}`);
+                        n++;
+                      }
+                      writeFileSync(dest, blob.subarray(offset, offset + size));
+                      savedPaths.push(dest);
+                      offset += size;
+                    }
                   }
                 }
               } catch (e) {
@@ -1268,6 +1332,7 @@ app.whenReady().then(async () => {
         authSecret: string;
       }>,
     ) => {
+      console.log(`[lyra main] syncTrustedPeers: ${peers.length} peers -> trusted=${peers.map(p=>p.deviceId.slice(0,8)).join(",")}`);
       trustedPeers.clear();
       for (const p of peers) {
         if (p.authSecret) {
@@ -1279,6 +1344,7 @@ app.whenReady().then(async () => {
           });
         }
       }
+      console.log(`[lyra main] syncTrustedPeers done: trusted=${trustedPeers.size} ids=${[...trustedPeers.keys()].map(k=>k.slice(0,8)).join(",")}`);
       return { count: trustedPeers.size };
     },
   );
@@ -1744,6 +1810,52 @@ app.whenReady().then(async () => {
       addresses: discovery.localAddresses(),
     };
   });
+
+  // SQLite KV store (replaces localStorage for Electron)
+  try {
+    const { kvGet, kvSet, kvRemove, kvGetAll, closeDb } = await import("./sqlite-store.js");
+    ipcMain.handle("lyra:kv-get", (_e, key: string) => {
+      if (!key) return null;
+      const v = kvGet(key);
+      return v;
+    });
+    ipcMain.handle("lyra:kv-set", (_e, key: string, value: string) => {
+      if (!key) return { ok: false, error: "key required" };
+      try {
+        kvSet(key, value);
+        return { ok: true };
+      } catch (e) {
+        console.error("[lyra sqlite] kv-set failed", e);
+        return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      }
+    });
+    ipcMain.handle("lyra:kv-remove", (_e, key: string) => {
+      kvRemove(key);
+      return { ok: true };
+    });
+    ipcMain.handle("lyra:kv-getAll", () => {
+      return kvGetAll();
+    });
+    ipcMain.handle("lyra:kv-keys", () => {
+      const all = kvGetAll();
+      return Object.keys(all);
+    });
+    // Forward renderer logs to main terminal
+    ipcMain.handle("lyra:log", (_e, payload: { level: string; ns: string; msg: string; data?: unknown }) => {
+      const { level, ns, msg, data } = payload;
+      const line = `[${ns}] ${msg}` + (data ? ` ${typeof data === "string" ? data : JSON.stringify(data).slice(0,500)}` : "");
+      if (level === "error") console.error(line);
+      else if (level === "warn") console.warn(line);
+      else console.log(line);
+      return { ok: true };
+    });
+    app.on("before-quit", () => {
+      try { closeDb(); } catch {}
+    });
+    console.log("[lyra sqlite] IPC handlers registered");
+  } catch (e) {
+    console.error("[lyra sqlite] failed to init", e instanceof Error ? e.message : String(e));
+  }
 
   // Show the window first so a peer-port conflict can't leave users with no UI.
   createWindow();

@@ -56,17 +56,18 @@ function TransfersPage() {
     if (onlineIds.length === 0) return;
     const files = await pickFiles({ multiple: true });
     if (files.length === 0) return;
-    // Materialize up to 256 MiB (streamed read); larger stays synthetic/demo
+    // Keep File handle for streaming unlimited; materialize only small files
     const prepared = await Promise.all(
       files.map(async (f) => {
         const bytes =
-          f.bytes ?? (f.file ? await materializeFileBytes(f.file) : undefined);
+          f.bytes ?? (f.file && f.size <= 64 * 1024 * 1024 ? await materializeFileBytes(f.file) : undefined);
         return {
           name: f.name,
           size: f.size,
           mimeType: f.mimeType,
           relativePath: f.relativePath,
           bytes,
+          file: f.file,
         };
       }),
     );
@@ -273,6 +274,12 @@ function TransfersPage() {
                     </p>
                   )}
 
+                  {tx.status === "failed" && (
+                    <p className="text-xs text-destructive">
+                      Failed: {tx.error ?? "Transfer failed"}
+                    </p>
+                  )}
+
                   <div className="flex gap-1">
                     {tx.status === "transferring" && (
                       <Button
@@ -304,7 +311,9 @@ function TransfersPage() {
                         <X className="size-4" />
                       </Button>
                     )}
-                    {(tx.status === "completed" || tx.status === "cancelled") && (
+                    {(tx.status === "completed" ||
+                      tx.status === "cancelled" ||
+                      tx.status === "failed") && (
                       <Button
                         size="sm"
                         variant="outline"

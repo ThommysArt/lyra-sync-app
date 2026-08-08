@@ -1,5 +1,13 @@
-// Must be first — enables gesture handler native module before any screens mount.
+// Must be first — enables gesture handler and crypto polyfill before any other code.
 import "react-native-gesture-handler";
+if (typeof globalThis.crypto === "undefined" || typeof globalThis.crypto.subtle === "undefined") {
+  try {
+    require("react-native-quick-crypto");
+  } catch {}
+}
+try {
+  require("react-native-get-random-values");
+} catch {}
 
 import {
   DMSans_400Regular,

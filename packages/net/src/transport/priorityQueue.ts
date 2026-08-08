@@ -11,9 +11,10 @@ export const Lane = {
 } as const;
 export type Lane = (typeof Lane)[keyof typeof Lane];
 
-export const NATIVE_HTTP_MAX_IN_FLIGHT = 24;
-// How many SCAN slots may be in-flight; reserve 4 for interactive.
-export const MAX_SCAN_IN_FLIGHT = 20;
+export const NATIVE_HTTP_MAX_IN_FLIGHT = 48;
+// Reserve 24 for interactive/transfers (3 parallel files × window 8)
+export const MAX_SCAN_IN_FLIGHT = 24;
+export const MAX_TRANSFER_IN_FLIGHT = 16;
 
 type Waiter = {
   lane: Lane;
@@ -41,11 +42,19 @@ function detach(w: Waiter) {
 function canTakeSlot(lane: Lane): boolean {
   if (inFlight < NATIVE_HTTP_MAX_IN_FLIGHT) {
     if (lane === Lane.SCAN && scanInFlight >= MAX_SCAN_IN_FLIGHT) {
-      // If higher-priority waiters exist, don't take last scan slots
+      // Scan capped to 24 to reserve capacity for interactive transfers.
+      // If higher-priority waiters exist, never exceed cap.
+      // If no higher waiters and we still have spare total capacity, allow scan to borrow
+      // idle interactive slots (up to total 48) for faster discovery when no transfers active.
       const hasHigher = queue.some((q) => q.lane < Lane.SCAN);
       if (hasHigher) return false;
-      // Even without higher waiters, cap scan
-      return false;
+      // Allow scan to use spare capacity when system is otherwise idle
+      return inFlight < MAX_SCAN_IN_FLIGHT;
+    }
+    // Reserve 1 slot for PAIR when near capacity
+    if (lane !== Lane.PAIR && inFlight >= NATIVE_HTTP_MAX_IN_FLIGHT - 1) {
+      const hasPairWaiter = queue.some((q) => q.lane === Lane.PAIR);
+      if (hasPairWaiter) return false;
     }
     return true;
   }

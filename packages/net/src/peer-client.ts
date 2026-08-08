@@ -27,6 +27,18 @@ export {
   type HttpTransport,
 } from "./http-transport";
 
+function forwardLog(level: string, ns: string, msg: string, data?: unknown) {
+  const line = `[${ns}] ${msg}` + (data ? ` ${typeof data === "string" ? data : JSON.stringify(data).slice(0,800)}` : "");
+  if (level === "error") console.error(line);
+  else if (level === "warn") console.warn(line);
+  else console.log(line);
+  try {
+    const g = globalThis as unknown as { window?: { lyraDesktop?: { log?: (l: string, n: string, m: string, d?: unknown) => Promise<unknown> } }; lyraDesktop?: { log?: (l: string, n: string, m: string, d?: unknown) => Promise<unknown> } };
+    const fn = g.window?.lyraDesktop?.log ?? g.lyraDesktop?.log;
+    if (fn) void fn(level, ns, msg, data);
+  } catch {}
+}
+
 /** Marker object for AES-GCM sealed payloads (post-pairing encryption default). */
 export const SEALED_PAYLOAD_KEY = "__lyra_sealed" as const;
 
@@ -108,13 +120,22 @@ async function postJson<T = unknown>(
         data && typeof data === "object" && data !== null && "error" in data
           ? String((data as { error: unknown }).error)
           : `HTTP ${res.status}`;
+      const isProbe = init?.lane === 2 || url.includes("/lyra/info");
+      if (!isProbe) {
+        forwardLog("error", "lyra net", `POST ${url} -> HTTP ${res.status}: ${err}`, { url, status: res.status, error: err });
+      }
       return { ok: false, error: err, status: res.status };
     }
     return { ok: true, data: data as T, status: res.status };
   } catch (e) {
+    const isProbe = init?.lane === 2 || url.includes("/lyra/info");
+    if (!isProbe) {
+      const msg = e instanceof Error ? e.message : String(e);
+      forwardLog("error", "lyra net", `POST ${url} failed: ${msg}`, { url, error: msg });
+    }
     return {
       ok: false,
-      error: formatNetworkError(e),
+      error: formatNetworkError(e, url),
       status: 0,
     };
   }
@@ -141,36 +162,50 @@ async function getJson<T = unknown>(
       data = { raw: text };
     }
     if (!res.ok) {
-      return { ok: false, error: `HTTP ${res.status}`, status: res.status };
+      const isProbe = init?.lane === 2 || url.includes("/lyra/info");
+      if (!isProbe) {
+        forwardLog("error", "lyra net", `GET ${url} -> HTTP ${res.status}`, { url, status: res.status });
+      }
+      return { ok: false, error: `HTTP ${res.status} (url: ${url})`, status: res.status };
     }
     return { ok: true, data: data as T, status: res.status };
   } catch (e) {
+    const isProbe = init?.lane === 2 || url.includes("/lyra/info");
+    if (!isProbe) {
+      const msg = e instanceof Error ? e.message : String(e);
+      forwardLog("error", "lyra net", `GET ${url} failed: ${msg}`, { url, error: msg });
+    }
     return {
       ok: false,
-      error: formatNetworkError(e),
+      error: formatNetworkError(e, url),
       status: 0,
     };
   }
 }
 
 /** Human-readable network errors (Android CLEARTEXT, offline, TLS, etc.). */
-export function formatNetworkError(e: unknown): string {
+export function formatNetworkError(e: unknown, url?: string): string {
   const raw = e instanceof Error ? e.message : String(e);
   const name = e instanceof Error ? e.name : "";
+  const urlSuffix = url ? ` (url: ${url})` : "";
+  const isProbe = url?.includes("/lyra/info");
+  if (!isProbe) {
+    forwardLog("error", "lyra net", `network error${urlSuffix}: ${raw}`, { url, error: raw, name, stack: e instanceof Error ? e.stack?.slice(0,500) : undefined });
+  }
   if (/CLEARTEXT|cleartext|UnknownServiceException/i.test(raw)) {
     return (
       "Cleartext HTTP blocked by the OS network policy. " +
       "Use a rebuild with usesCleartextTraffic (LAN/Tailscale peers speak HTTP). " +
-      `Detail: ${raw}`
+      `Detail: ${raw}${urlSuffix}`
     );
   }
   if (name === "AbortError" || /aborted|AbortError/i.test(raw)) {
-    return "Timed out reaching peer — check Wi‑Fi/Tailscale address and that its peer server is running.";
+    return `Timed out reaching peer${urlSuffix} — check Wi‑Fi/Tailscale address and that its peer server is running.`;
   }
   if (/Network request failed|Failed to fetch|ECONNREFUSED|timed out|Timeout/i.test(raw)) {
-    return `${raw} — check that the peer is online, same Wi‑Fi/Tailscale, and its peer server is running.`;
+    return `${raw}${urlSuffix} — check that the peer is online, same Wi‑Fi/Tailscale, and its peer server is running.`;
   }
-  return raw;
+  return `${raw}${urlSuffix}`;
 }
 
 export type PeerPairingOffer = {
@@ -195,26 +230,38 @@ export async function fetchPeerInfo(
     }
   | { ok: false; error: string }
 > {
-  const base = peerBaseUrl(endpoint);
-  const res = await getJson<{
-    identity?: DeviceIdentity;
-    status?: DeviceStatus;
-    host?: string;
-    port?: number;
-    protocolVersion?: number;
-    pairing?: PeerPairingOffer;
-  }>(`${base}/lyra/info`, opts);
-  if (!res.ok) return { ok: false, error: res.error };
-  if (!res.data?.identity) return { ok: false, error: "Missing identity" };
-  return {
-    ok: true,
-    identity: res.data.identity,
-    status: res.data.status,
-    host: res.data.host,
-    port: res.data.port,
-    protocolVersion: res.data.protocolVersion ?? LYRA_PROTOCOL_VERSION,
-    pairing: res.data.pairing,
+  const tryOnce = async (ep: PeerUrl) => {
+    const base = peerBaseUrl(ep);
+    const res = await getJson<{
+      identity?: DeviceIdentity;
+      status?: DeviceStatus;
+      host?: string;
+      port?: number;
+      protocolVersion?: number;
+      pairing?: PeerPairingOffer;
+    }>(`${base}/lyra/info`, opts);
+    if (!res.ok) return { ok: false as const, error: res.error };
+    if (!res.data?.identity) return { ok: false as const, error: "Missing identity" };
+    return {
+      ok: true as const,
+      identity: res.data.identity,
+      status: res.data.status,
+      host: res.data.host,
+      port: res.data.port,
+      protocolVersion: res.data.protocolVersion ?? LYRA_PROTOCOL_VERSION,
+      pairing: res.data.pairing,
+    };
   };
+  const first = await tryOnce(endpoint);
+  if (first.ok) return first;
+  // TLS fallback: if http failed with protocol or connection error, try opposite protocol
+  const shouldTryAlt = /wrong version|EPROTO|ECONNRESET|self signed|UNABLE_TO_VERIFY|certificate|SSL/i.test(first.error);
+  if (shouldTryAlt) {
+    const alt: PeerUrl = { ...endpoint, protocol: endpoint.protocol === "https" ? "http" : "https" };
+    const second = await tryOnce(alt);
+    if (second.ok) return second;
+  }
+  return first;
 }
 
 /** POST /lyra/message — send a protocol envelope. Seals payload when sealSecret is set. */

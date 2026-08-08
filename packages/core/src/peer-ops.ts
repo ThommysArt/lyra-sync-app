@@ -28,6 +28,72 @@ import type {
 } from "@lyra-sync-app/protocol";
 import { LYRA_DEFAULT_PORT } from "@lyra-sync-app/protocol";
 
+// Safe loader for expo-file-system: Hermes does not support `new Function('return import(...)')` (throws 1:21:Invalid expression)
+// Try require first (works on RN/Hermes), then dynamic import
+async function loadExpoFS(): Promise<any> {
+  try {
+    const gReq = (globalThis as unknown as { require?: (id: string) => unknown }).require;
+    if (typeof gReq === "function") {
+      try {
+        const mod = gReq("expo-file-system");
+        if (mod) return mod;
+      } catch {}
+    }
+  } catch {}
+  try {
+    // Use Function with require to avoid static bundling for web
+    const reqFn = new Function('return typeof require !== "undefined" ? require : null') as () => ((id: string) => unknown) | null;
+    const req2 = reqFn();
+    if (typeof req2 === "function") {
+      try {
+        const mod = req2("expo-file-system");
+        if (mod) return mod;
+      } catch {}
+    }
+  } catch {}
+  try {
+    const mod = await (new Function('return import("expo-file-system")') as () => Promise<any>)();
+    if (mod) return mod;
+  } catch {}
+  try {
+    // @ts-ignore direct import as fallback (may be bundled on web and fail at runtime, caught)
+    const mod = await import("expo-file-system");
+    return mod;
+  } catch {}
+  return null;
+}
+async function loadExpoFSLegacy(): Promise<any> {
+  try {
+    const gReq = (globalThis as unknown as { require?: (id: string) => unknown }).require;
+    if (typeof gReq === "function") {
+      try {
+        const mod = gReq("expo-file-system/legacy");
+        if (mod) return mod;
+      } catch {}
+    }
+  } catch {}
+  try {
+    const reqFn = new Function('return typeof require !== "undefined" ? require : null') as () => ((id: string) => unknown) | null;
+    const req2 = reqFn();
+    if (typeof req2 === "function") {
+      try {
+        const mod = req2("expo-file-system/legacy");
+        if (mod) return mod;
+      } catch {}
+    }
+  } catch {}
+  try {
+    const mod = await (new Function('return import("expo-file-system/legacy")') as () => Promise<any>)();
+    if (mod) return mod;
+  } catch {}
+  try {
+    // @ts-ignore
+    const mod = await import("expo-file-system/legacy");
+    return mod;
+  } catch {}
+  return null;
+}
+
 /** Pick LAN vs Tailscale host based on preferredAddress / availability. */
 export function resolveDeviceHost(
   device: Pick<PairedDevice, "host" | "tailscaleHost" | "preferredAddress">,
@@ -110,6 +176,10 @@ export function deviceEndpointCandidates(
     push(lanHost);
     push(hostField);
   }
+  // Always include loopback for same-host testing (2 Electron instances on one laptop)
+  // — ensures 127.0.0.1:53317/53319/53321 candidates are probed even when device.host is LAN.
+  push("127.0.0.1");
+  push("localhost");
 
   // Keep the matrix small but cover variants + multi-instance offsets
   // (desktop often binds 53319/53321 when 53317 is taken by LocalSend etc.)
@@ -125,11 +195,15 @@ export function deviceEndpointCandidates(
         LYRA_DEFAULT_PORT + 2,
         LYRA_DEFAULT_PORT + 4,
         53327,
+        53319,
+        53321,
+        53329,
         53337,
+        53339,
         ...(opts?.extraPorts ?? []),
       ].filter((p) => typeof p === "number" && p > 0 && p <= 65535),
     ),
-  ].slice(0, 6);
+  ].slice(0, 8);
   const out: PeerUrl[] = [];
   // Prefer sticky host:port combo first
   if (device.lastReachableHost && device.lastReachablePort) {
@@ -207,37 +281,104 @@ export async function ensureSession(input: {
   const candidates = deviceEndpointCandidates(input.device);
   if (candidates.length === 0) return { ok: false, error: "Peer has no host" };
 
-  // Probe-first: only run auth against endpoints that answer GET /lyra/info.
-  // Avoids burning timeouts on dead Tailscale/LAN addresses and surfaces
-  // real auth errors instead of "Failed to fetch".
   const { probePeer } = await import("@lyra-sync-app/net");
-  const reachable: PeerUrl[] = [];
   const seen = new Set<string>();
-  for (const endpoint of candidates) {
-    const key = `${endpoint.host}:${endpoint.port ?? LYRA_DEFAULT_PORT}`;
+  const deduped: PeerUrl[] = [];
+  for (const ep of candidates) {
+    const key = `${ep.host}:${ep.port ?? LYRA_DEFAULT_PORT}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    const probe = await probePeer(
-      { host: endpoint.host, port: endpoint.port, protocol: "http" },
-      {
-        timeoutMs: 1200,
-        preferTailscale: isLikelyTailscaleHost(endpoint.host),
-      },
-    );
-    if (probe.ok) {
-      reachable.push({
-        host: probe.host,
-        port: probe.port,
-        protocol: "http",
-      });
-      // Two live endpoints is enough — auth the best one first
-      if (reachable.length >= 2) break;
+    deduped.push(ep);
+  }
+
+  // Fast path: try lastReachableHost first with 400ms timeout — avoids 1.5s delay for repeated sends
+  if (input.device.lastReachableHost && input.device.lastReachablePort) {
+    for (const proto of ["http", "https"] as const) {
+      try {
+        const fast = await probePeer(
+          { host: input.device.lastReachableHost, port: input.device.lastReachablePort, protocol: proto },
+          { timeoutMs: 400, preferTailscale: isLikelyTailscaleHost(input.device.lastReachableHost), lane: 1 },
+        );
+        if (fast.ok) {
+          const fastEndpoint: PeerUrl = { host: fast.host, port: fast.port, protocol: proto };
+          const sess = await getOrCreatePeerSession({
+            endpoint: fastEndpoint,
+            identity: input.identity,
+            privateKey: input.privateKey,
+            sharedSecret: input.device.authSecret,
+            peerDeviceId: input.device.id,
+          });
+          if (sess.ok) {
+            console.info(`[lyra ensureSession] fast-path hit ${fast.host}:${fast.port} (${proto}) in <400ms for ${input.device.id.slice(0,8)}`);
+            return { ok: true, sessionToken: sess.sessionToken, endpoint: fastEndpoint };
+          }
+        }
+      } catch {}
     }
   }
 
-  const tryList = reachable.length > 0 ? reachable : candidates.slice(0, 4);
-  let lastError = reachable.length === 0 ? "Peer unreachable (probe failed)" : "Auth failed";
-  for (const endpoint of tryList) {
+  // Parallel probe — was sequential and took 2.5s × N (up to 20s). Now race 8 at a time.
+  const probeConcurrency = 8;
+  const reachable: PeerUrl[] = [];
+  let probeIdx = 0;
+  const probeErrors: string[] = [];
+  async function probeWorker() {
+    while (true) {
+      const i = probeIdx++;
+      if (i >= deduped.length) return;
+      if (reachable.length >= 2) return;
+      const endpoint = deduped[i]!;
+      // Try http first, then https fallback for TLS peers
+      const tryProbe = async (proto: "http" | "https") => {
+        try {
+          const probe = await probePeer(
+            { host: endpoint.host, port: endpoint.port, protocol: proto },
+            {
+              timeoutMs: 1500,
+              preferTailscale: isLikelyTailscaleHost(endpoint.host),
+              lane: 1,
+            },
+          );
+          if (probe.ok) {
+            reachable.push({
+              host: probe.host,
+              port: probe.port,
+              protocol: proto,
+            });
+            return true;
+          }
+          if (proto === "http" && /wrong version|EPROTO|certificate|self signed|SSL/i.test(probe.error)) {
+            return false;
+          }
+          probeErrors.push(`${endpoint.host}:${endpoint.port ?? LYRA_DEFAULT_PORT} → ${probe.error}`);
+          return true; // don't retry https if http error was not TLS-related
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          if (proto === "http" && /wrong version|EPROTO|certificate|self signed|SSL/i.test(msg)) return false;
+          probeErrors.push(`${endpoint.host}:${endpoint.port ?? LYRA_DEFAULT_PORT} → ${msg}`);
+          return true;
+        }
+      };
+      const httpDone = await tryProbe("http");
+      if (!httpDone) {
+        await tryProbe("https");
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(probeConcurrency, deduped.length) }, () => probeWorker()));
+
+  if (reachable.length > 0) {
+    console.info(`[lyra ensureSession] probe found ${reachable.length} reachable endpoint(s) out of ${deduped.length} candidates for ${input.device.id.slice(0, 8)}:`, reachable.map((r) => `${r.host}:${r.port}`).join(", "));
+  } else {
+    console.warn(`[lyra ensureSession] no reachable probe for ${input.device.id.slice(0, 8)} — tried ${deduped.length} candidates: ${probeErrors.slice(0, 3).join("; ")} — will try direct auth anyway`);
+  }
+
+  let lastError = reachable.length === 0 ? `Peer unreachable (tried ${deduped.length} endpoint(s): ${probeErrors.slice(0, 3).join("; ")})` : "Auth failed";
+  const orderedTry = reachable.length > 0 ? [...reachable, ...deduped.filter((c) => !reachable.some((r) => r.host === c.host && r.port === c.port))] : deduped;
+
+  // Try auth in order, but with shorter timeouts and clearer errors
+  for (const endpoint of orderedTry.slice(0, 8)) {
+    const started = Date.now();
     const session = await getOrCreatePeerSession({
       endpoint,
       identity: input.identity,
@@ -246,11 +387,16 @@ export async function ensureSession(input: {
       peerDeviceId: input.device.id,
     });
     if (session.ok) {
+      const ms = Date.now() - started;
+      console.info(`[lyra ensureSession] auth ok ${endpoint.host}:${endpoint.port} in ${ms}ms for ${input.device.id.slice(0, 8)}`);
       return { ok: true, sessionToken: session.sessionToken, endpoint };
     }
     lastError = session.error;
+    console.warn(`[lyra ensureSession] auth failed ${endpoint.host}:${endpoint.port} (${session.error}) for ${input.device.id.slice(0, 8)}`);
+    if (/timed out|Timeout|Aborted/i.test(session.error)) continue;
   }
-  return { ok: false, error: lastError };
+  const attempted = orderedTry.slice(0, 8).map((e) => `${e.host}:${e.port}`).join(", ");
+  return { ok: false, error: `${lastError} — tried endpoints: ${attempted}` };
 }
 
 export async function wirePushClipboard(input: {
@@ -329,10 +475,11 @@ export async function wireSendFiles(input: {
   identity: DeviceIdentity;
   privateKey: string;
   transferId: string;
-  files: { name: string; size: number; mimeType?: string; checksum?: string; bytes?: Uint8Array }[];
+  files: { name: string; size: number; mimeType?: string; checksum?: string; bytes?: Uint8Array; uri?: string; file?: unknown }[];
   resumeOffset?: number;
   onProgress?: (p: WireTransferProgress) => void;
   signal?: AbortSignal;
+  readFileSlice?: (fileIndex: number, offset: number, length: number) => Promise<Uint8Array>;
 }): Promise<
   | { ok: true; checksums: string[]; endpoint: PeerUrl }
   | { ok: false; error: string; endpoint?: PeerUrl }
@@ -340,38 +487,288 @@ export async function wireSendFiles(input: {
   const session = await ensureSession(input);
   if (!session.ok) return session;
 
-  // No synthetic fallback — caller must provide real bytes (streaming). This fixes silent truncation bug
-  // where >32MiB files were sent as 256KiB random bytes while reporting full size.
+  // Build streaming reader if not provided but file/uri present
+  let readSlice = input.readFileSlice;
+  if (!readSlice) {
+    const needsStreaming = input.files.some((f) => !f.bytes && (f.uri || f.file));
+    if (needsStreaming) {
+      readSlice = async (idx, offset, len) => {
+        const f = input.files[idx]!;
+        if (f.bytes) return f.bytes.subarray(offset, offset + len);
+        if (f.file) {
+          const fileObj = f.file as unknown as { slice: (s: number, e: number) => Blob & { arrayBuffer(): Promise<ArrayBuffer> } };
+          const slice = fileObj.slice(offset, offset + len);
+          const buf = await slice.arrayBuffer();
+          return new Uint8Array(buf);
+        }
+        if (f.uri) {
+          // Persistent cache for normalized URIs per file index (avoid copying 20MB file per chunk)
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const normCache = (readSlice as unknown as { _normCache?: Map<number, string> })._normCache ?? new Map<number, string>();
+          (readSlice as unknown as { _normCache?: Map<number, string> })._normCache = normCache;
+          // Verify file still exists (catches cache eviction) — fast path via modern File API
+          try {
+            const FSNext = await loadExpoFS() as unknown as { File?: new (uri: string) => { exists: boolean; info: () => { exists: boolean; size?: number } | null; size?: number } };
+            if (FSNext.File) {
+              try {
+                const probeU = normCache.get(idx) ?? f.uri!;
+                const probe = new FSNext.File(probeU);
+                // Prefer info() if available
+                const info = (probe as unknown as { info?: () => { exists: boolean; size?: number } }).info?.() ?? null;
+                if (info && !info.exists) throw new Error(`File not found at ${probeU.slice(0, 60)} (evicted from cache). Re-pick file.`);
+                // Also check size for EOF
+                const sz = (info?.size ?? (probe as unknown as { size?: number }).size) as number | undefined;
+                if (typeof sz === "number" && offset >= sz) return new Uint8Array(0);
+              } catch {}
+            }
+          } catch {}
+          let lastErr: unknown = null;
+          // For DocumentPicker files, ensure we have a stable copy in cache that File API can read reliably.
+          // Some Android content:// or file:// URIs from DocumentPicker are not directly accessible via File.slice on all OS versions.
+          // We try to normalize the uri by copying to a temp File if needed (once per file).
+          let normalizedUri = normCache.get(idx) ?? f.uri!;
+          let didNormalize = normCache.has(idx);
+          const tryNormalizeUri = async (): Promise<string> => {
+            if (didNormalize) return normalizedUri;
+            didNormalize = true;
+            try {
+              const modN = await loadExpoFS();
+              const FileClsN = modN.File;
+              const PathsN = modN.Paths;
+              if (FileClsN && PathsN?.cache) {
+                const src = new FileClsN(f.uri!);
+                if (!src.exists) {
+                  console.warn(`[lyra transfer] normalize: src not exists ${f.uri?.slice(0,60)}`);
+                  return normalizedUri;
+                }
+                // If file is already in cache and readable via File.info, keep original
+                try {
+                  const info = src.info();
+                  if (info.exists && info.size === f.size) return normalizedUri;
+                } catch {}
+                // Copy to a temp file with proper name in cache for reliable reading
+                try {
+                  const safeName = f.name.replace(/[^\w.\-]/g, "_") || `tmp_${Date.now()}`;
+                  const dest = new FileClsN(PathsN.cache, `lyra-send-${Date.now()}-${safeName}`);
+                  // Ensure parent exists
+                  try { dest.create({ overwrite: true }); } catch {}
+                  await src.copy(dest);
+                  if (dest.exists) {
+                    console.info(`[lyra transfer] normalized ${f.name} ${f.uri?.slice(0,50)} -> ${dest.uri.slice(0,50)}`);
+                    normalizedUri = dest.uri;
+                    normCache.set(idx, normalizedUri);
+                    // Update original file entry so future chunks use normalized path directly
+                    f.uri = normalizedUri;
+                    return normalizedUri;
+                  }
+                } catch (e) {
+                  console.warn(`[lyra transfer] normalize copy failed ${f.name}`, e instanceof Error ? e.message : String(e));
+                }
+              }
+            } catch {}
+            return normalizedUri;
+          };
+          for (let attempt = 0; attempt < 3; attempt++) {
+            const uriToUse = attempt === 0 ? normalizedUri : await tryNormalizeUri();
+            // 1) Modern File API — open/readBytes streaming (best for large files, no OOM)
+            try {
+              const mod = await loadExpoFS() as unknown as {
+                File?: new (uri: string) => {
+                  slice: (start: number, end: number) => { arrayBuffer: () => Promise<ArrayBuffer> };
+                  open?: (mode?: string) => { readBytes: (len: number) => Uint8Array; close: () => void; offset?: number | null };
+                  exists: boolean;
+                  info: () => { exists: boolean; size?: number };
+                  bytes: () => Promise<Uint8Array>;
+                };
+                FileMode?: { ReadOnly: string };
+              };
+              const FileCls = mod.File;
+              if (FileCls) {
+                const fileObj = new FileCls(uriToUse);
+                if (!fileObj.exists) {
+                  lastErr = new Error(`File not found at ${uriToUse.slice(0, 60)} (not in cache). Re-pick with copyToCacheDirectory:true.`);
+                  console.warn(`[lyra transfer] File not exists ${f.name} uri=${uriToUse.slice(0,80)} attempt ${attempt+1}`);
+                } else {
+                  // Try open/readBytes first (true streaming, works for 300MB without OOM)
+                  try {
+                    const handle = (fileObj as unknown as { open?: (mode?: unknown) => { readBytes: (len: number) => Uint8Array; close: () => void; offset?: number | null } }).open?.(mod.FileMode?.ReadOnly ?? "r");
+                    if (handle) {
+                      try {
+                        if (typeof handle.offset === "number") handle.offset = offset;
+                        const bytes = handle.readBytes(len);
+                        if (bytes.byteLength > 0) {
+                          if (uriToUse !== f.uri) {
+                            f.uri = uriToUse;
+                            normCache.set(idx, uriToUse);
+                          }
+                          return bytes;
+                        }
+                        if (bytes.byteLength === 0 && len > 0) lastErr = new Error("readBytes returned 0 bytes");
+                      } finally {
+                        try { handle.close(); } catch {}
+                      }
+                    }
+                  } catch (e) {
+                    lastErr = e;
+                    console.warn(`[lyra transfer] File.open/readBytes failed ${f.name} @${offset}:${len} attempt ${attempt + 1} uri=${uriToUse.slice(0,40)}`, e instanceof Error ? e.message : String(e), e instanceof Error ? e.stack?.slice(0,200) : "");
+                  }
+                  // Try slice (Blob) as second
+                  try {
+                    const sliced = fileObj.slice(offset, offset + len) as unknown as { arrayBuffer: () => Promise<ArrayBuffer> };
+                    if (sliced?.arrayBuffer) {
+                      const ab = await sliced.arrayBuffer();
+                      if (ab.byteLength > 0) {
+                        if (uriToUse !== f.uri) {
+                          f.uri = uriToUse;
+                          normCache.set(idx, uriToUse);
+                        }
+                        return new Uint8Array(ab);
+                      }
+                      if (ab.byteLength === 0 && len > 0) lastErr = new Error("slice returned 0 bytes");
+                    }
+                  } catch (e) {
+                    lastErr = e;
+                    console.warn(`[lyra transfer] File.slice failed ${f.name} @${offset}:${len} attempt ${attempt + 1} uri=${uriToUse.slice(0,40)}`, e instanceof Error ? e.message : String(e));
+                  }
+                  // Try bytes() ONLY for small files <5MB (otherwise OOM when loading whole 20MB+ file per chunk)
+                  if ((f.size ?? 0) < 5 * 1024 * 1024) {
+                    try {
+                      const all = await fileObj.bytes() as Uint8Array;
+                      if (all.byteLength > offset) {
+                        if (uriToUse !== f.uri) {
+                          f.uri = uriToUse;
+                          normCache.set(idx, uriToUse);
+                        }
+                        return all.subarray(offset, Math.min(all.byteLength, offset + len));
+                      }
+                    } catch (e) {
+                      lastErr = e;
+                      console.warn(`[lyra transfer] File.bytes fallback failed ${f.name} @${offset}:${len} attempt ${attempt+1}`, e instanceof Error ? e.message : String(e));
+                    }
+                  } else if (attempt === 0) {
+                    lastErr = new Error("File.bytes skipped for large file (>5MB) — will try normalize copy instead of loading whole file");
+                    console.warn(`[lyra transfer] skip File.bytes for large file ${f.name} size=${f.size} attempt ${attempt+1} — trying normalize`);
+                  }
+                }
+              }
+            } catch (e) {
+              lastErr = e;
+              console.warn(`[lyra transfer] File API overall failed ${f.name} attempt ${attempt+1}`, e instanceof Error ? e.message : String(e));
+            }
+            // 2) Fallback: fetch (works for file:// on Android via React Native fetch) — ONLY for small files <5MB to avoid OOM
+            if ((f.size ?? 0) < 5 * 1024 * 1024) {
+              try {
+                const res = await fetch(uriToUse);
+                if (res.ok) {
+                  const ab = await res.arrayBuffer();
+                  const full = new Uint8Array(ab);
+                  if (full.byteLength >= offset + len || full.byteLength > 0) {
+                    if (uriToUse !== f.uri) f.uri = uriToUse;
+                    console.info(`[lyra transfer] fetch fallback succeeded ${f.name} @${offset}:${len} attempt ${attempt+1} bytes=${full.byteLength}`);
+                    return full.subarray(offset, Math.min(full.byteLength, offset + len));
+                  }
+                } else {
+                  lastErr = new Error(`fetch ${uriToUse.slice(0,60)} failed ${res.status}`);
+                }
+              } catch (e) {
+                lastErr = e;
+                console.warn(`[lyra transfer] fetch fallback failed ${f.name} @${offset}:${len} attempt ${attempt+1} uri=${uriToUse.slice(0,40)}`, e instanceof Error ? e.message : String(e));
+              }
+            } else if (attempt === 0) {
+              console.warn(`[lyra transfer] skip fetch fallback for large file ${f.name} size=${f.size} — will try normalize`);
+            }
+            // 3) Last resort: legacy readAsStringAsync without position (read whole file as base64) — ONLY for <5MB
+            if ((f.size ?? 0) < 5 * 1024 * 1024) {
+              try {
+                const FS = await loadExpoFSLegacy() as { readAsStringAsync: (uri: string, opts: unknown) => Promise<string>; EncodingType: { Base64: string }; getInfoAsync: (uri: string) => Promise<{ exists: boolean; size?: number }> };
+                const info = await FS.getInfoAsync(uriToUse).catch(() => ({ exists: false }));
+                if (!info.exists) {
+                  lastErr = new Error(`legacy getInfo not exists ${uriToUse.slice(0,50)}`);
+                } else {
+                  const b64 = await FS.readAsStringAsync(uriToUse, { encoding: FS.EncodingType.Base64 });
+                  const bin = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+                  if (bin.byteLength > offset) {
+                    if (uriToUse !== f.uri) f.uri = uriToUse;
+                    console.info(`[lyra transfer] legacy whole-file fallback succeeded ${f.name} bytes=${bin.byteLength}`);
+                    return bin.subarray(offset, Math.min(bin.byteLength, offset + len));
+                  }
+                }
+              } catch (e) {
+                lastErr = e;
+                console.warn(`[lyra transfer] legacy fallback failed ${f.name} attempt ${attempt+1}`, e instanceof Error ? e.message : String(e));
+              }
+            } else if (attempt === 0) {
+              console.warn(`[lyra transfer] skip legacy fallback for large file ${f.name} — will try normalize copy`);
+            }
+            if (attempt < 2) await new Promise((r) => setTimeout(r, 250 * (attempt + 1)));
+          }
+          console.error(`[lyra transfer] Unable to read chunk at ${offset} len ${len} for ${f.name} (uri ${f.uri?.slice(0, 60)}) after 3 attempts: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`, {
+            transferId: input.transferId,
+            file: f.name,
+            uri: f.uri?.slice(0, 80),
+            size: f.size,
+            error: lastErr instanceof Error ? lastErr.message : String(lastErr),
+          });
+          throw new Error(`Unable to read chunk at ${offset} len ${len} for ${f.name} after 3 attempts: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}. Try re-picking file with copyToCacheDirectory:true and ensure file is not evicted.`);
+        }
+        throw new Error(`No bytes or uri for ${f.name}`);
+      };
+    }
+  }
+
   for (const f of input.files) {
-    if (!f.bytes) {
+    if (!f.bytes && !f.uri && !f.file && !readSlice) {
       return { ok: false, error: `Missing bytes for "${f.name}" — file picker failed to read. Please retry with system picker.` };
     }
-    if (f.bytes.byteLength === 0 && f.size > 0) {
+    if (f.bytes && f.bytes.byteLength === 0 && f.size > 0) {
       return { ok: false, error: `Empty bytes for "${f.name}"` };
     }
+    // Unlimited size via streaming — no 550MB cap. Only guard is available disk.
   }
   const prepared = input.files.map((f) => ({
     name: f.name,
-    size: f.bytes!.byteLength,
+    size: f.size || f.bytes?.byteLength || 0,
     mimeType: f.mimeType,
     checksum: f.checksum,
-    bytes: f.bytes!,
+    bytes: f.bytes, // may be undefined when streaming
   }));
 
-  const sent = await sendFilesOverWire({
-    endpoint: session.endpoint,
-    sessionToken: session.sessionToken,
-    fromDeviceId: input.identity.id,
-    toDeviceId: input.device.id,
-    transferId: input.transferId,
-    files: prepared,
-    resumeOffset: input.resumeOffset,
-    onProgress: input.onProgress,
-    signal: input.signal,
-    sealSecret: input.device.authSecret,
-  });
-  if (!sent.ok) return { ok: false, error: sent.error, endpoint: session.endpoint };
-  return { ok: true, checksums: sent.checksums, endpoint: session.endpoint };
+  // Try primary endpoint, then fallback to alternative candidates on network/404 errors
+  const trySend = async (ep: typeof session.endpoint, token: string) => {
+    return sendFilesOverWire({
+      endpoint: ep,
+      sessionToken: token,
+      fromDeviceId: input.identity.id,
+      toDeviceId: input.device.id,
+      transferId: input.transferId,
+      files: prepared as unknown as { name: string; size: number; mimeType?: string; bytes: Uint8Array; checksum?: string }[],
+      resumeOffset: input.resumeOffset,
+      onProgress: input.onProgress,
+      signal: input.signal,
+      sealSecret: input.device.authSecret,
+      readFileSlice: readSlice,
+    });
+  };
+
+  let sent = await trySend(session.endpoint, session.sessionToken);
+  if (!sent.ok && /not found|unknown transfer|failed to fetch|network request failed|timed out|timeout|econnrefused|fetch failed/i.test((sent as { error: string }).error)) {
+    // Retry with fresh ensureSession to get alternative host:port (e.g., Tailscale vs LAN)
+    console.warn(`[lyra transfer] primary endpoint ${session.endpoint.host}:${session.endpoint.port} failed (${(sent as { error: string }).error}) — trying alternative candidates`);
+    const altSession = await ensureSession(input);
+    if (altSession.ok && (altSession.endpoint.host !== session.endpoint.host || altSession.endpoint.port !== session.endpoint.port)) {
+      const retry = await trySend(altSession.endpoint, altSession.sessionToken);
+      if (retry.ok) {
+        console.info(`[lyra transfer] retry via ${altSession.endpoint.host}:${altSession.endpoint.port} succeeded`);
+        return { ok: true, checksums: retry.checksums, endpoint: altSession.endpoint };
+      }
+      console.warn(`[lyra transfer] retry also failed: ${(retry as { error: string }).error}`);
+      const origErr = (sent as { error: string }).error;
+      const retryErr = (retry as { error: string }).error;
+      return { ok: false, error: `${origErr} (retry via ${altSession.endpoint.host}:${altSession.endpoint.port} also failed: ${retryErr})`, endpoint: session.endpoint };
+    }
+  }
+  if (!sent.ok) return { ok: false, error: (sent as { error: string }).error, endpoint: session.endpoint };
+  return { ok: true, checksums: (sent as { ok: true; checksums: string[] }).checksums, endpoint: session.endpoint };
 }
 
 /** Notify a peer that we unpaired them (best-effort). */
@@ -477,7 +874,7 @@ export async function wireSendScreenFrame(input: {
   });
 }
 
-/** Download remote file in chunks (desktop peer with real FS). */
+/** Download remote file in chunks (desktop peer with real FS). Pipelined. */
 export async function wireReadRemoteFile(input: {
   device: PairedDevice;
   identity: DeviceIdentity;
@@ -488,55 +885,82 @@ export async function wireReadRemoteFile(input: {
   const session = await ensureSession(input);
   if (!session.ok) return session;
   const { createEnvelope, sendEnvelope, base64ToBytes } = await import("@lyra-sync-app/net");
-  const chunks: Uint8Array[] = [];
-  let offset = 0;
-  let size = 0;
+  const endpoint = session.endpoint as PeerUrl;
+  const sessionToken = session.sessionToken as string;
+  const PULL_CHUNK = 1024 * 1024;
+  const PULL_WINDOW = 8;
   const requestIdBase = `fsr_${Date.now()}`;
-  for (let i = 0; i < 10_000; i++) {
-    const envelope = createEnvelope({
-      type: "fs_read",
-      fromDeviceId: input.identity.id,
-      toDeviceId: input.device.id,
-      payload: {
-        path: input.path,
-        requestId: `${requestIdBase}_${i}`,
-        offset,
-        maxBytes: 256 * 1024,
-      },
-    });
-    const res = await sendEnvelope(session.endpoint, envelope, {
-      sessionToken: session.sessionToken,
-      sealSecret: input.device.authSecret,
-    });
-    if (!res.ok) return { ok: false, error: res.error };
-    if (res.envelope?.type !== "fs_read_response") {
-      return { ok: false, error: "Unexpected fs_read response" };
+  let size = 0;
+  const firstEnv = createEnvelope({
+    type: "fs_read",
+    fromDeviceId: input.identity.id,
+    toDeviceId: input.device.id,
+    payload: { path: input.path, requestId: `${requestIdBase}_0`, offset: 0, maxBytes: PULL_CHUNK },
+  });
+  const firstRes = await sendEnvelope(endpoint, firstEnv, { sessionToken, sealSecret: input.device.authSecret });
+  if (!firstRes.ok) return { ok: false, error: firstRes.error };
+  if (firstRes.envelope?.type !== "fs_read_response") return { ok: false, error: "Unexpected fs_read response" };
+  const fp = firstRes.envelope.payload as { dataBase64?: string; eof?: boolean; size?: number; error?: string };
+  if (fp.error) return { ok: false, error: fp.error };
+  if (typeof fp.size === "number") size = fp.size;
+  const firstBytes = fp.dataBase64 ? base64ToBytes(fp.dataBase64) : new Uint8Array(0);
+  input.onChunk?.(firstBytes, 0, Boolean(fp.eof));
+  if (fp.eof || firstBytes.byteLength === 0) return { ok: true, bytes: firstBytes, size: size || firstBytes.byteLength };
+  if (!size || size <= firstBytes.byteLength) {
+    const chunks: Uint8Array[] = [firstBytes];
+    let offset = firstBytes.byteLength;
+    for (let i = 1; i < 10_000; i++) {
+      const env = createEnvelope({ type: "fs_read", fromDeviceId: input.identity.id, toDeviceId: input.device.id, payload: { path: input.path, requestId: `${requestIdBase}_${i}`, offset, maxBytes: PULL_CHUNK } });
+      const res = await sendEnvelope(endpoint, env, { sessionToken, sealSecret: input.device.authSecret });
+      if (!res.ok) return { ok: false, error: res.error };
+      const p = res.envelope?.payload as { dataBase64?: string; eof?: boolean; size?: number; error?: string } | undefined;
+      if (!p || p.error) return { ok: false, error: p?.error ?? "Unexpected fs_read response" };
+      if (typeof p.size === "number") size = p.size;
+      const b = p.dataBase64 ? base64ToBytes(p.dataBase64) : new Uint8Array(0);
+      chunks.push(b);
+      input.onChunk?.(b, offset, Boolean(p.eof));
+      offset += b.byteLength;
+      if (p.eof || b.byteLength === 0) break;
     }
-    const p = res.envelope.payload as {
-      dataBase64?: string;
-      eof?: boolean;
-      size?: number;
-      error?: string;
-      offset?: number;
-    };
-    if (p.error) return { ok: false, error: p.error };
-    if (typeof p.size === "number") size = p.size;
-    if (p.dataBase64) {
-      const bytes = base64ToBytes(p.dataBase64);
-      chunks.push(bytes);
-      input.onChunk?.(bytes, offset, Boolean(p.eof));
-      offset += bytes.byteLength;
-    }
-    if (p.eof) break;
-    if (!p.dataBase64 || p.dataBase64.length === 0) break;
+    const total = chunks.reduce((a, c) => a + c.byteLength, 0);
+    const out = new Uint8Array(total);
+    let o = 0;
+    for (const c of chunks) out.set(c, o), (o += c.byteLength);
+    return { ok: true, bytes: out, size: size || total };
   }
-  const total = chunks.reduce((a, c) => a + c.byteLength, 0);
+  const totalChunks = Math.ceil(size / PULL_CHUNK);
+  const result: Uint8Array[] = new Array(totalChunks);
+  result[0] = firstBytes;
+  let failed: string | null = null;
+  const offsets: number[] = [];
+  for (let idx = 1; idx < totalChunks; idx++) offsets.push(idx * PULL_CHUNK);
+  let next = 0;
+  async function worker() {
+    while (true) {
+      const idx = next++;
+      if (idx >= offsets.length) return;
+      const offset = offsets[idx]!;
+      const chunkIdx = Math.floor(offset / PULL_CHUNK);
+      const env = createEnvelope({ type: "fs_read", fromDeviceId: input.identity.id, toDeviceId: input.device.id, payload: { path: input.path, requestId: `${requestIdBase}_${chunkIdx}`, offset, maxBytes: PULL_CHUNK } });
+      const res = await sendEnvelope(endpoint, env, { sessionToken, sealSecret: input.device.authSecret });
+      if (!res.ok) { failed = res.error; return; }
+      if (res.envelope?.type !== "fs_read_response") { failed = "Unexpected fs_read response"; return; }
+      const p = res.envelope.payload as { dataBase64?: string; eof?: boolean; size?: number; error?: string };
+      if (p.error) { failed = p.error; return; }
+      const b = p.dataBase64 ? base64ToBytes(p.dataBase64) : new Uint8Array(0);
+      result[chunkIdx] = b;
+      input.onChunk?.(b, offset, Boolean(p.eof));
+      if (failed) return;
+    }
+  }
+  const workers = Array.from({ length: Math.min(PULL_WINDOW, offsets.length) }, () => worker());
+  await Promise.all(workers);
+  if (failed) return { ok: false, error: failed };
+  for (let i = 0; i < result.length; i++) if (!result[i]) return { ok: false, error: "Missing chunk in pipelined pull" };
+  const total = result.reduce((a, c) => a + c.byteLength, 0);
   const out = new Uint8Array(total);
   let o = 0;
-  for (const c of chunks) {
-    out.set(c, o);
-    o += c.byteLength;
-  }
+  for (const c of result) out.set(c!, o), (o += c.byteLength);
   return { ok: true, bytes: out, size: size || total };
 }
 

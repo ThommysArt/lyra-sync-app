@@ -205,6 +205,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       "./plugins/with-lyra-network",
       "./plugins/with-lyra-foreground-service",
       "./plugins/with-lyra-discovery",
+      "./plugins/with-tcp-socket-crash-fix",
     ],
     experiments: {
       typedRoutes: true,

@@ -1,6 +1,6 @@
 {
   "name": "desktop",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "description": "Lyra desktop shell — local peer network for clipboard and files",
   "author": "Lyra",
@@ -44,11 +44,16 @@
       {
         "from": "../web/dist",
         "to": "web-dist",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "linux": {
-      "target": ["AppImage", "dir"],
+      "target": [
+        "AppImage",
+        "dir"
+      ],
       "category": "Network",
       "executableName": "lyra",
       "icon": "resources/icons",
@@ -59,22 +64,30 @@
       }
     },
     "mac": {
-      "target": ["dmg", "dir"],
+      "target": [
+        "dmg",
+        "dir"
+      ],
       "category": "public.app-category.utilities",
       "icon": "resources/icon.png"
     },
     "win": {
-      "target": ["nsis", "dir"],
+      "target": [
+        "nsis",
+        "dir"
+      ],
       "icon": "resources/icon.png"
     }
   },
   "dependencies": {
     "@lyra-sync-app/core": "workspace:*",
     "@lyra-sync-app/net": "workspace:*",
-    "@lyra-sync-app/protocol": "workspace:*"
+    "@lyra-sync-app/protocol": "workspace:*",
+    "better-sqlite3": "^13.0.3"
   },
   "devDependencies": {
     "@lyra-sync-app/config": "workspace:*",
+    "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^22.13.14",
     "electron": "^37.2.0",
     "electron-builder": "^25.1.8",
