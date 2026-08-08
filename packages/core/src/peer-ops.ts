@@ -647,21 +647,42 @@ export async function wireSendFiles(input: {
     bytes: f.bytes, // may be undefined when streaming
   }));
 
-  const sent = await sendFilesOverWire({
-    endpoint: session.endpoint,
-    sessionToken: session.sessionToken,
-    fromDeviceId: input.identity.id,
-    toDeviceId: input.device.id,
-    transferId: input.transferId,
-    files: prepared as unknown as { name: string; size: number; mimeType?: string; bytes: Uint8Array; checksum?: string }[],
-    resumeOffset: input.resumeOffset,
-    onProgress: input.onProgress,
-    signal: input.signal,
-    sealSecret: input.device.authSecret,
-    readFileSlice: readSlice,
-  });
-  if (!sent.ok) return { ok: false, error: sent.error, endpoint: session.endpoint };
-  return { ok: true, checksums: sent.checksums, endpoint: session.endpoint };
+  // Try primary endpoint, then fallback to alternative candidates on network/404 errors
+  const trySend = async (ep: typeof session.endpoint, token: string) => {
+    return sendFilesOverWire({
+      endpoint: ep,
+      sessionToken: token,
+      fromDeviceId: input.identity.id,
+      toDeviceId: input.device.id,
+      transferId: input.transferId,
+      files: prepared as unknown as { name: string; size: number; mimeType?: string; bytes: Uint8Array; checksum?: string }[],
+      resumeOffset: input.resumeOffset,
+      onProgress: input.onProgress,
+      signal: input.signal,
+      sealSecret: input.device.authSecret,
+      readFileSlice: readSlice,
+    });
+  };
+
+  let sent = await trySend(session.endpoint, session.sessionToken);
+  if (!sent.ok && /not found|unknown transfer|failed to fetch|network request failed|timed out|timeout|econnrefused|fetch failed/i.test((sent as { error: string }).error)) {
+    // Retry with fresh ensureSession to get alternative host:port (e.g., Tailscale vs LAN)
+    console.warn(`[lyra transfer] primary endpoint ${session.endpoint.host}:${session.endpoint.port} failed (${(sent as { error: string }).error}) — trying alternative candidates`);
+    const altSession = await ensureSession(input);
+    if (altSession.ok && (altSession.endpoint.host !== session.endpoint.host || altSession.endpoint.port !== session.endpoint.port)) {
+      const retry = await trySend(altSession.endpoint, altSession.sessionToken);
+      if (retry.ok) {
+        console.info(`[lyra transfer] retry via ${altSession.endpoint.host}:${altSession.endpoint.port} succeeded`);
+        return { ok: true, checksums: retry.checksums, endpoint: altSession.endpoint };
+      }
+      console.warn(`[lyra transfer] retry also failed: ${(retry as { error: string }).error}`);
+      const origErr = (sent as { error: string }).error;
+      const retryErr = (retry as { error: string }).error;
+      return { ok: false, error: `${origErr} (retry via ${altSession.endpoint.host}:${altSession.endpoint.port} also failed: ${retryErr})`, endpoint: session.endpoint };
+    }
+  }
+  if (!sent.ok) return { ok: false, error: (sent as { error: string }).error, endpoint: session.endpoint };
+  return { ok: true, checksums: (sent as { ok: true; checksums: string[] }).checksums, endpoint: session.endpoint };
 }
 
 /** Notify a peer that we unpaired them (best-effort). */

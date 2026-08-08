@@ -108,7 +108,7 @@ async function postBinaryChunk(input: {
   eof: boolean;
   signal?: AbortSignal;
   timeoutMs?: number;
-}): Promise<{ ok: true; receivedBytes: number } | { ok: false; error: string; paused?: boolean }> {
+}): Promise<{ ok: true; receivedBytes: number } | { ok: false; error: string; paused?: boolean; notFound?: boolean }> {
   const base = peerBaseUrl(input.endpoint);
   const path = `${binaryChunkPath(input.transferId)}?offset=${input.offset}&eof=${input.eof ? "1" : "0"}`;
   const url = `${base}${path}`;
@@ -133,12 +133,15 @@ async function postBinaryChunk(input: {
     const text = await res.text();
     if (!res.ok) {
       let err = `HTTP ${res.status}`;
+      let notFound = false;
       try {
         const j = JSON.parse(text);
         if (j.error) err = j.error;
         if (j.paused) return { ok: false, error: "Transfer paused by peer", paused: true };
+        if (/not found|unknown transfer/i.test(j.error ?? "")) notFound = true;
       } catch {}
-      return { ok: false, error: err };
+      if (res.status === 404) notFound = true;
+      return { ok: false, error: err, notFound };
     }
     let received = input.offset + input.data.byteLength;
     try {
@@ -150,8 +153,47 @@ async function postBinaryChunk(input: {
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     if (/paused/i.test(msg)) return { ok: false, error: msg, paused: true };
-    return { ok: false, error: msg };
+    // Network-level failure is not notFound, but we mark it for retry
+    const notFound = /not found|unknown transfer/i.test(msg);
+    return { ok: false, error: msg, notFound };
   }
+}
+
+async function postLegacyChunk(input: {
+  endpoint: PeerUrl;
+  sessionToken: string;
+  fromDeviceId: string;
+  toDeviceId: string;
+  transferId: string;
+  fileIndex: number;
+  offset: number;
+  data: Uint8Array;
+  eof: boolean;
+  checksum?: string;
+  sealSecret?: string;
+  signal?: AbortSignal;
+}): Promise<{ ok: true } | { ok: false; error: string; paused?: boolean }> {
+  const envelope = createEnvelope({
+    type: "transfer_chunk",
+    fromDeviceId: input.fromDeviceId,
+    toDeviceId: input.toDeviceId,
+    payload: {
+      transferId: input.transferId,
+      fileIndex: input.fileIndex,
+      offset: input.offset,
+      dataBase64: bytesToBase64(input.data),
+      eof: input.eof,
+      checksum: input.checksum,
+    },
+  });
+  const res = await sendEnvelope(input.endpoint, envelope, {
+    sessionToken: input.sessionToken,
+    signal: input.signal,
+    sealSecret: input.sealSecret,
+  });
+  if (!res.ok) return { ok: false, error: res.error };
+  if (res.envelope?.type === "transfer_pause") return { ok: false, error: "Transfer paused by peer", paused: true };
+  return { ok: true };
 }
 
 /**
@@ -245,6 +287,7 @@ export async function sendFilesOverWire(
     }
   };
 
+  let binaryFallback = false;
   if (windowSize <= 1) {
     let offset = effectiveResume;
     while (offset < totalBytes) {
@@ -268,12 +311,37 @@ export async function sendFilesOverWire(
       }
       const nextOffset = offset + slice.byteLength;
       const eof = nextOffset >= totalBytes;
-      // Retry up to 3 times with backoff and endpoint failover would be here
       let attempt = 0;
       let chunkOk = false;
       let lastErr = "";
       while (attempt < 3) {
         if (input.signal?.aborted) return { ok: false, error: "Aborted" };
+        if (binaryFallback) {
+          const legacyRes = await postLegacyChunk({
+            endpoint: input.endpoint,
+            sessionToken: input.sessionToken,
+            fromDeviceId: input.fromDeviceId,
+            toDeviceId: input.toDeviceId,
+            transferId: input.transferId,
+            fileIndex,
+            offset,
+            data: slice,
+            eof,
+            checksum: eof ? input.files[fileIndex]?.checksum : undefined,
+            sealSecret: input.sealSecret,
+            signal: input.signal,
+          });
+          if (legacyRes.ok) {
+            offset = nextOffset;
+            chunkOk = true;
+            break;
+          }
+          if (legacyRes.paused) return { ok: false, error: "Transfer paused by peer" };
+          lastErr = legacyRes.error;
+          attempt++;
+          if (attempt < 3) await new Promise((r) => setTimeout(r, 300 * attempt));
+          continue;
+        }
         const res = await postBinaryChunk({
           endpoint: input.endpoint,
           sessionToken: input.sessionToken,
@@ -284,14 +352,18 @@ export async function sendFilesOverWire(
           signal: input.signal,
         });
         if (res.ok) {
-          // Server returns contiguous receivedBytes
           offset = res.receivedBytes;
-          // If server didn't advance (pending), we retry same offset? But for sequential, we expect advance
           if (offset < nextOffset) offset = nextOffset;
           chunkOk = true;
           break;
         }
         if (res.paused) return { ok: false, error: "Transfer paused by peer" };
+        if (res.notFound) {
+          console.warn(`[lyra transfer] binary chunk not found for ${input.transferId.slice(0,8)} at offset ${offset} — falling back to legacy base64`);
+          binaryFallback = true;
+          // retry as legacy without consuming attempt
+          continue;
+        }
         lastErr = res.error;
         attempt++;
         if (attempt < 3) await new Promise((r) => setTimeout(r, 300 * attempt));
@@ -347,6 +419,39 @@ export async function sendFilesOverWire(
         while (attempt < 3) {
           if (failed || paused) return;
           if (input.signal?.aborted) { failed = "Aborted"; return; }
+          if (binaryFallback) {
+            const legacyRes = await postLegacyChunk({
+              endpoint: input.endpoint,
+              sessionToken: input.sessionToken,
+              fromDeviceId: input.fromDeviceId,
+              toDeviceId: input.toDeviceId,
+              transferId: input.transferId,
+              fileIndex: c.fileIndex,
+              offset: c.offset,
+              data: slice,
+              eof: c.eof,
+              checksum: c.eof ? input.files[c.fileIndex]?.checksum : undefined,
+              sealSecret: input.sealSecret,
+              signal: input.signal,
+            });
+            if (legacyRes.ok) {
+              pendingAcks.set(c.offset, c.offset + slice.byteLength);
+              ackedSet.add(c.offset);
+              while (ackedSet.has(ackedContiguous)) {
+                const end = pendingAcks.get(ackedContiguous);
+                if (end === undefined) break;
+                ackedContiguous = end;
+              }
+              report(ackedContiguous, c.eof);
+              success = true;
+              break;
+            }
+            if (legacyRes.paused) { paused = true; return; }
+            attempt++;
+            if (attempt < 3) await new Promise((r) => setTimeout(r, 250 * attempt));
+            else failed = legacyRes.error;
+            continue;
+          }
           const res = await postBinaryChunk({
             endpoint: input.endpoint,
             sessionToken: input.sessionToken,
@@ -359,7 +464,6 @@ export async function sendFilesOverWire(
           if (res.ok) {
             pendingAcks.set(c.offset, c.offset + slice.byteLength);
             ackedSet.add(c.offset);
-            // Advance contiguous ack pointer
             while (ackedSet.has(ackedContiguous)) {
               const end = pendingAcks.get(ackedContiguous);
               if (end === undefined) break;
@@ -370,6 +474,11 @@ export async function sendFilesOverWire(
             break;
           }
           if (res.paused) { paused = true; return; }
+          if (res.notFound) {
+            if (!binaryFallback) console.warn(`[lyra transfer] binary not supported for ${input.transferId.slice(0,8)} — falling back to legacy`);
+            binaryFallback = true;
+            continue;
+          }
           attempt++;
           if (attempt < 3) await new Promise((r) => setTimeout(r, 250 * attempt));
           else failed = res.error;
