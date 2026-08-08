@@ -20,3 +20,9 @@ export {
   type HttpRequestInit,
   type HttpResponse,
 } from "./http-transport";
+
+// TCP persistent transport (new)
+export * from "./tcp/frame";
+export * from "./tcp/core";
+export * from "./tcp/connection";
+export * from "./tcp/manager";

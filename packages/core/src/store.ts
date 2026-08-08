@@ -9,6 +9,8 @@ import {
   scanLanForPeers,
   type ProbeResult,
 } from "@lyra-sync-app/net";
+// TCP manager (new) — dynamic import to avoid cycle, but also direct import for type
+import type { ConnectionManager } from "@lyra-sync-app/net";
 import type {
   AppSettings,
   ClipboardItem,
@@ -2431,87 +2433,125 @@ export function createLyraStore(options?: {
       ].slice(0, 4);
 
       let scannedNew = 0;
+      let tcpUsed = false;
       try {
-        // Never HTTP-probe our own peer server — aborted self-scans race native
-        // TCP write/destroy and crash Android (No socket with id).
-        const skipEndpoints: Array<{ host: string; port?: number }> = [];
-        const ownHost = localLanHostFromState(getState()) ?? getState().localLanHint;
-        const ownPort = getState().peerServer.port ?? port;
-        if (ownHost) skipEndpoints.push({ host: ownHost, port: ownPort ?? port });
-        skipEndpoints.push({ host: "127.0.0.1", port: ownPort ?? port });
-        skipEndpoints.push({ host: "localhost", port: ownPort ?? port });
-
-        const found = await scanLanForPeers({
-          seedHosts: [...seeds],
-          ports: scanPorts,
-          expandPorts,
-          port,
-          // Transport starts timeout after socket slot — safe under native concurrency limit
-          timeoutMs: 600,
-          // Keep moderate: native TCP caps ~8 in-flight; higher is fine (queue is free)
-          concurrency: 24,
-          localDeviceId: s0.identity?.id,
-          skipEndpoints,
-        });
-        for (const peer of found) {
-          const before = getState().devices.length;
-          // ingestDiscoveredPeer is defined on the same store object (called at runtime)
-          // eslint-disable-next-line @typescript-eslint/no-use-before-define
-          (store as LyraStore).ingestDiscoveredPeer({
-            identity: {
-              id: peer.identity.id,
-              name: peer.identity.name,
-              type: peer.identity.type as PairedDevice["type"],
-              platform: peer.identity.platform as PairedDevice["platform"],
-              fingerprint: peer.identity.fingerprint,
-              publicKey: peer.identity.publicKey,
-            },
-            host: peer.host,
-            port: peer.port,
-          });
-          if (getState().devices.length > before) scannedNew++;
-          else {
-            // Refresh existing — preserve distinct LAN vs Tailscale addresses
-            set((st) => ({
-              ...st,
-              devices: st.devices.map((d) => {
-                const match =
-                  d.id === peer.identity.id ||
-                  d.fingerprint === peer.identity.fingerprint ||
-                  (d.host === peer.host && (d.port ?? port) === peer.port) ||
-                  d.tailscaleHost === peer.host;
-                if (!match) return d;
-                return applyProbeToDevice(
-                  {
-                    ...d,
-                    name: d.nickname ? d.name : peer.identity.name || d.name,
-                    fingerprint: peer.identity.fingerprint || d.fingerprint,
-                    publicKey: peer.identity.publicKey || d.publicKey,
-                    platform:
-                      (peer.identity.platform as PairedDevice["platform"]) || d.platform,
-                  },
-                  {
-                    ok: true,
-                    host: peer.host,
-                    port: peer.port,
-                    online: true,
-                    latencyMs: 0,
-                    deviceId: peer.identity.id,
-                    name: peer.identity.name,
-                    fingerprint: peer.identity.fingerprint,
-                    platform: peer.identity.platform,
-                    connectionHint: isLikelyTailscaleHost(peer.host)
-                      ? "tailscale"
-                      : "local",
-                  },
-                  Date.now(),
-                );
-              }),
-            }));
+        const mod = await import("@lyra-sync-app/net");
+        const getMgr = (mod as unknown as { getConnectionManager?: () => ConnectionManager | null }).getConnectionManager;
+        const mgr = getMgr?.() ?? null;
+        if (mgr) {
+          tcpUsed = true;
+          for (const d of getState().devices) {
+            if (d.id.startsWith("demo_")) continue;
+            if (!d.host && !d.tailscaleHost && !d.lastReachableHost) continue;
+            try {
+              (mgr as unknown as { upsertPeer: (p: unknown) => void }).upsertPeer({
+                id: d.id,
+                host: d.host ?? undefined,
+                port: d.port ?? undefined,
+                tailscaleHost: d.tailscaleHost ?? undefined,
+                preferredAddress: d.preferredAddress ?? undefined,
+                lastReachableHost: d.lastReachableHost ?? undefined,
+                lastReachablePort: d.lastReachablePort ?? undefined,
+                fingerprint: d.fingerprint,
+              });
+            } catch {}
           }
+          await new Promise((r) => setTimeout(r, 900));
+          set((st) => ({
+            ...st,
+            devices: st.devices.map((d) => {
+              const state = (mgr as unknown as { getPeerState?: (id: string) => { online: boolean; lastSeenAt: number } | null }).getPeerState?.(d.id) ?? null;
+              if (!state) return d;
+              if (d.id.startsWith("demo_")) return d;
+              return { ...d, online: state.online, lastSeenAt: state.lastSeenAt ?? d.lastSeenAt };
+            }),
+          }));
+          scannedNew = 0;
         }
-      } catch {
-        // scan best-effort
+      } catch {}
+      if (!tcpUsed) {
+        try {
+          // Never HTTP-probe our own peer server — aborted self-scans race native
+          // TCP write/destroy and crash Android (No socket with id).
+          const skipEndpoints: Array<{ host: string; port?: number }> = [];
+          const ownHost = localLanHostFromState(getState()) ?? getState().localLanHint;
+          const ownPort = getState().peerServer.port ?? port;
+          if (ownHost) skipEndpoints.push({ host: ownHost, port: ownPort ?? port });
+          skipEndpoints.push({ host: "127.0.0.1", port: ownPort ?? port });
+          skipEndpoints.push({ host: "localhost", port: ownPort ?? port });
+
+          const found = await scanLanForPeers({
+            seedHosts: [...seeds],
+            ports: scanPorts,
+            expandPorts,
+            port,
+            // Transport starts timeout after socket slot — safe under native concurrency limit
+            timeoutMs: 600,
+            // Keep moderate: native TCP caps ~8 in-flight; higher is fine (queue is free)
+            concurrency: 24,
+            localDeviceId: s0.identity?.id,
+            skipEndpoints,
+          });
+          for (const peer of found) {
+            const before = getState().devices.length;
+            // ingestDiscoveredPeer is defined on the same store object (called at runtime)
+            // eslint-disable-next-line @typescript-eslint/no-use-before-define
+            (store as LyraStore).ingestDiscoveredPeer({
+              identity: {
+                id: peer.identity.id,
+                name: peer.identity.name,
+                type: peer.identity.type as PairedDevice["type"],
+                platform: peer.identity.platform as PairedDevice["platform"],
+                fingerprint: peer.identity.fingerprint,
+                publicKey: peer.identity.publicKey,
+              },
+              host: peer.host,
+              port: peer.port,
+            });
+            if (getState().devices.length > before) scannedNew++;
+            else {
+              // Refresh existing — preserve distinct LAN vs Tailscale addresses
+              set((st) => ({
+                ...st,
+                devices: st.devices.map((d) => {
+                  const match =
+                    d.id === peer.identity.id ||
+                    d.fingerprint === peer.identity.fingerprint ||
+                    (d.host === peer.host && (d.port ?? port) === peer.port) ||
+                    d.tailscaleHost === peer.host;
+                  if (!match) return d;
+                  return applyProbeToDevice(
+                    {
+                      ...d,
+                      name: d.nickname ? d.name : peer.identity.name || d.name,
+                      fingerprint: peer.identity.fingerprint || d.fingerprint,
+                      publicKey: peer.identity.publicKey || d.publicKey,
+                      platform:
+                        (peer.identity.platform as PairedDevice["platform"]) || d.platform,
+                    },
+                    {
+                      ok: true,
+                      host: peer.host,
+                      port: peer.port,
+                      online: true,
+                      latencyMs: 0,
+                      deviceId: peer.identity.id,
+                      name: peer.identity.name,
+                      fingerprint: peer.identity.fingerprint,
+                      platform: peer.identity.platform,
+                      connectionHint: isLikelyTailscaleHost(peer.host)
+                        ? "tailscale"
+                        : "local",
+                    },
+                    Date.now(),
+                  );
+                }),
+              }));
+            }
+          }
+        } catch {
+          // scan best-effort
+        }
       }
 
       persist();

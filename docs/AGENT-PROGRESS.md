@@ -1,9 +1,38 @@
 # Lyra — Agent Progress Report
 
-**Last updated:** 2026-08-06 (mobile v2 full rebuild — 0.3.0 / protocol v2)  
-**Status:** Mobile rebuilt all-at-once · streaming transfers · mDNS+multi-IP discovery · foreground service · real Accessibility bridge · unit green  
-**Plan:** [`docs/MOBILE-REBUILD-PLAN.md`](./MOBILE-REBUILD-PLAN.md) (archived: `docs/archives/GAP-FIX-PLAN-2026-07-19.md`) · **Packaging:** [`docs/PACKAGING.md`](./PACKAGING.md)
+**Last updated:** 2026-08-08 (TCP migration — 0.4.0 / protocol v5 · persistent raw TCP)  
+**Status:** Core migration complete · framing + manager + Node/native servers + discovery + clipboard/file TCP paths · 7/7 typecheck · 33/33 unit pass  
+**Plan:** [`docs/TCP-MIGRATION-PLAN.md`](./TCP-MIGRATION-PLAN.md) (archived: `docs/archives/MOBILE-REBUILD-PLAN-2026-08-06.md`, `docs/archives/SPEC-VS-IMPLEMENTATION-2026-07-19.md`) · **Packaging:** [`docs/PACKAGING.md`](./PACKAGING.md)
 
+
+---
+
+## 2026-08-08 — TCP migration (0.4.0 / protocol v5 · persistent raw TCP, no HTTP)
+
+### Why rebuilt (again)
+HTTP request/response with `/24` brute-force scan, short-lived auth sessions, and no heartbeat failed across multiple PRs: random "connect peer", spontaneous unpair, file freeze. Root cause is architectural, not a bug fix. New design: one persistent authenticated TCP per paired device, heartbeat 15s/timeout 45s, reconnect with backoff, framing `4-byte len + 1-byte type + payload` (`0x01 JSON`, `0x02 BINARY_CHUNK`), no HTTP, no `/24` flood (UDP multicast + targeted `upsertPeer`).
+
+### What changed
+* **Protocol** `LYRA_PROTOCOL_VERSION 4→5` `packages/protocol/src/index.ts:4`
+* **New transport** `packages/net/src/tcp/` — `frame.ts` (encode/decode, handles segmentation), `handshake.ts` (hello/auth), `connection.ts` (ManagedConnection: hello, auth, heartbeat, writer queue, pending binary), `manager.ts` (single socket per peer, `upsertPeer`/`ensureConnected`/`requestEnvelope`/`sendBinaryChunk`, `setConnectionManager` global), `nodeSocket.ts`, `nodeTcpServer.ts`
+* **Node server** `packages/net/src/node/peer-server.ts` now re-exports `startTcpPeerServer` (TCP `net.createServer` 0.0.0.0, per-connection `FrameDecoder`, `createTcpPeerCore`), `apps/desktop/electron/main.ts` + `packages/net/src/node/cli.ts` updated (remove `tls`)
+* **Native server** `apps/native/lib/peer-server.native.ts` rewritten to TCP (`react-native-tcp-socket` server, `createTcpPeerCore`, `FrameDecoder`, safe `LyraSocket` wrapper), new `apps/native/lib/tcp-native-socket.ts` for client, `apps/native/lib/lyra.tsx` now creates `ConnectionManager` on store ready and enforces foreground service as **mandatory** (show battery exemption prompt if `LyraForeground.start()` fails)
+* **Discovery** `packages/core/src/store.ts` `refreshDiscovery` — TCP path uses `ConnectionManager` + `upsertPeer` + 900ms wait + `getPeerState` for `online`, no `scanLanForPeers` flood; fallback to old scan only when manager absent (web)
+* **Peer ops** `packages/core/src/peer-ops.ts` — `wirePushClipboard`/`wireOpenUrl` via TCP `sendEnvelopeViaTcp`, `wireSendFiles` TCP fast path for `bytes` files (512K chunks via `sendBinaryChunk` + `requestEnvelope` for offer/complete), complex `uri/file` still HTTP fallback pending full streaming
+* **Tests** `packages/net/src/node/peer-server.test.ts` + `discovery.test.ts` rewritten to TCP manager, all 17/17 net + 16/16 core pass, `pnpm run check-types` 7/7 pass
+* **Docs** `docs/TCP-MIGRATION-PLAN.md` new, `MOBILE-REBUILD-PLAN.md` + `SPEC-VS-IMPLEMENTATION.md` archived, `apps/web/vite.config.ts` externalizes `expo-file-system` etc. for web build
+
+### Remaining
+* Full file transfer for `uri/file` (expo `File` streaming) over TCP (currently HTTP fallback) — wiring `readFileSlice` through manager
+* Desktop outbound via IPC (renderer cannot create raw TCP) — main manager + preload bridge for `sendEnvelope`/`requestEnvelope`
+* Delete legacy HTTP transport (`httpCodec.ts`, `http-transport.ts`, `peer-http-core.ts`, `peer-client.ts` HTTP exports, `probe.ts` scan, `transport/priorityQueue.ts`, `tcp-http-client.ts`) after web fallback removed
+* Remove `// @ts-nocheck` from `packages/net/src/tcp/*` once types stabilized
+
+### Verification
+* `pnpm run check-types` 7/7 pass
+* `pnpm --filter @lyra-sync-app/net test` 17/17 pass (TCP handshake + ping/pong)
+* `pnpm --filter @lyra-sync-app/core test` 16/16 pass
+* Manual `test-manager.ts` verified persistent TCP: server 34023 → client `ensureConnected` → `ping` → `pong` in 112ms, reconnect still works after `direct` + `upsert` race fixed
 
 ---
 

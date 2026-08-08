@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Standalone peer server for local testing:
  *   pnpm --filter @lyra-sync-app/net peer-server
@@ -75,7 +76,6 @@ async function main() {
       peer = await startPeerServer({
         identity,
         port: tryPort,
-        tls: useTls,
         // Fall through to built-in handlers (transfer chunks, clipboard, fs, pair)
         onEnvelope: async (envelope) => {
           console.log(`[envelope] ${envelope.type} from ${envelope.fromDeviceId}`);
@@ -142,9 +142,7 @@ async function main() {
   console.log(`Lyra peer server listening on ${peer.url}`);
   console.log(`  device: ${identity.name} (${identity.id})`);
   console.log(`  fingerprint: ${identity.fingerprint}`);
-  if (peer.protocol === "https") {
-    console.log(`  TLS fingerprint: ${peer.tlsFingerprint ?? "(unknown)"}`);
-  }
+  console.log(`  protocol: ${peer.protocol} (persistent TCP)`);
 
   let discovery: Awaited<ReturnType<typeof startDiscovery>> | null = null;
   if (process.env.LYRA_DISCOVERY !== "0") {

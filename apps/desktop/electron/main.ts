@@ -134,7 +134,6 @@ const WEB_DEV_URL = process.env.LYRA_WEB_URL ?? "http://localhost:3001";
 const PEER_PORT = Number(
   process.env.LYRA_PORT ?? variantDefaultPort(VARIANT) ?? LYRA_DEFAULT_PORT,
 );
-const USE_TLS = process.env.LYRA_TLS === "1" || process.env.LYRA_TLS === "true";
 
 type TrustedPeer = {
   deviceId: string;
@@ -420,7 +419,6 @@ async function startNetworking() {
         peer = await startPeerServer({
           identity,
           port: tryPort,
-          tls: USE_TLS,
           // Prefer paired shared secrets; allow first-contact only when no trust map hit
           allowFirstContactAuth: true,
           resolvePeerAuth: ({ deviceId, fingerprint }) => {

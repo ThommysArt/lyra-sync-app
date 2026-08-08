@@ -9,10 +9,29 @@ export default defineConfig({
   // Absolute "/assets/..." breaks under AppImage/asar resources.
   base: "./",
   optimizeDeps: {
-    exclude: ["undici"],
+    exclude: ["undici", "expo-file-system", "expo-file-system/legacy", "react-native-tcp-socket", "expo-modules-core", "expo-constants", "expo-network", "react-native"],
   },
   ssr: {
-    external: ["undici"],
+    external: ["undici", "expo-file-system", "expo-file-system/legacy", "react-native-tcp-socket", "expo-modules-core", "expo-constants", "expo-network", "react-native", "node:net", "node:dgram", "node:os", "node:fs", "node:child_process"],
+    noExternal: [],
+  },
+  build: {
+    rolldownOptions: {
+      external: [
+        "expo-file-system",
+        "expo-file-system/legacy",
+        "react-native-tcp-socket",
+        "expo-modules-core",
+        "expo-constants",
+        "expo-network",
+        "react-native",
+        "node:net",
+        "node:dgram",
+        "node:os",
+        "node:fs",
+        "node:child_process",
+      ],
+    },
   },
   server: {
     // Listen on 0.0.0.0 so LAN / Tailscale can reach the UI (same as `vite --host`).
@@ -27,6 +46,31 @@ export default defineConfig({
     tsconfigPaths: true,
   },
   plugins: [
+    {
+      name: "ignore-native-imports",
+      // For web/Electron, native modules are not available — stub them out in dev and build
+      resolveId(id) {
+        if (
+          id === "expo-file-system" ||
+          id === "expo-file-system/legacy" ||
+          id === "react-native-tcp-socket" ||
+          id === "expo-modules-core" ||
+          id === "expo-constants" ||
+          id === "expo-network" ||
+          id === "react-native"
+        ) {
+          return "\0virtual:empty-native";
+        }
+        if (id.startsWith("node:")) return "\0virtual:empty-native";
+        return null;
+      },
+      load(id) {
+        if (id === "\0virtual:empty-native") {
+          return "export default {}; export const File = class {}; export const Directory = class {}; export const Paths = { cache: { uri: '' } }; export const createSocket = () => null; export const Socket = class {};";
+        }
+        return null;
+      },
+    },
     tailwindcss(),
     tanstackRouter({
       target: "react",

@@ -16,8 +16,38 @@ import {
   type PeerUrl,
   type WireTransferProgress,
 } from "@lyra-sync-app/net";
+import { createEnvelope } from "@lyra-sync-app/net";
 
 export { isLikelyTailscaleHost };
+
+// --- TCP persistent transport helpers (new) ---
+import type { Envelope } from "@lyra-sync-app/protocol";
+async function getTcpManager(): Promise<import("@lyra-sync-app/net").ConnectionManager | null> {
+  try {
+    const mod = await import("@lyra-sync-app/net");
+    const getter = (mod as unknown as { getConnectionManager?: () => unknown }).getConnectionManager;
+    if (typeof getter === "function") {
+      const mgr = getter() as import("@lyra-sync-app/net").ConnectionManager | null;
+      if (mgr) return mgr;
+    }
+    // also check global fallback
+    const g = (globalThis as unknown as Record<string, unknown>).__lyra_tcp_manager_v1__ as import("@lyra-sync-app/net").ConnectionManager | undefined;
+    if (g) return g;
+  } catch {}
+  return null;
+}
+async function sendEnvelopeViaTcp(deviceId: string, envelope: Envelope): Promise<{ ok: true } | { ok: false; error: string } | null> {
+  const mgr = await getTcpManager();
+  if (!mgr) return null;
+  try {
+    // @ts-ignore - manager has sendEnvelope
+    await mgr.sendEnvelope(deviceId, envelope);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 import type {
   ClipboardItem,
   DeviceIdentity,
@@ -55,11 +85,6 @@ async function loadExpoFS(): Promise<any> {
     const mod = await (new Function('return import("expo-file-system")') as () => Promise<any>)();
     if (mod) return mod;
   } catch {}
-  try {
-    // @ts-ignore direct import as fallback (may be bundled on web and fail at runtime, caught)
-    const mod = await import("expo-file-system");
-    return mod;
-  } catch {}
   return null;
 }
 async function loadExpoFSLegacy(): Promise<any> {
@@ -85,11 +110,6 @@ async function loadExpoFSLegacy(): Promise<any> {
   try {
     const mod = await (new Function('return import("expo-file-system/legacy")') as () => Promise<any>)();
     if (mod) return mod;
-  } catch {}
-  try {
-    // @ts-ignore
-    const mod = await import("expo-file-system/legacy");
-    return mod;
   } catch {}
   return null;
 }
@@ -407,6 +427,29 @@ export async function wirePushClipboard(input: {
 }): Promise<
   { ok: true; endpoint: PeerUrl } | { ok: false; error: string; endpoint?: PeerUrl }
 > {
+  // TCP fast path
+  const tcpEnvelope = createEnvelope({
+    type: "clipboard_push",
+    fromDeviceId: input.identity.id,
+    toDeviceId: input.device.id,
+    payload: {
+      id: input.item.id,
+      type: input.item.type,
+      text: input.item.text,
+      imageData: input.item.imageData,
+      sourceDeviceId: input.item.sourceDeviceId,
+      sourceDeviceName: input.item.sourceDeviceName,
+      createdAt: input.item.createdAt,
+    },
+  });
+  const tcpRes = await sendEnvelopeViaTcp(input.device.id, tcpEnvelope);
+  if (tcpRes) {
+    if (tcpRes.ok) {
+      const ep: PeerUrl = { host: input.device.lastReachableHost ?? input.device.host ?? "tcp", port: input.device.lastReachablePort ?? input.device.port ?? LYRA_DEFAULT_PORT, protocol: "http" };
+      return { ok: true, endpoint: ep };
+    }
+    return { ok: false, error: tcpRes.error };
+  }
   const session = await ensureSession(input);
   if (!session.ok) return session;
   const pushed = await pushClipboardToPeer({
@@ -435,6 +478,17 @@ export async function wireOpenUrl(input: {
   privateKey: string;
   url: string;
 }): Promise<{ ok: true; opened?: boolean } | { ok: false; error: string }> {
+  const tcpEnvelope = createEnvelope({
+    type: "open_url",
+    fromDeviceId: input.identity.id,
+    toDeviceId: input.device.id,
+    payload: { url: input.url },
+  });
+  const tcpRes = await sendEnvelopeViaTcp(input.device.id, tcpEnvelope);
+  if (tcpRes) {
+    if (tcpRes.ok) return { ok: true, opened: true };
+    return { ok: false, error: tcpRes.error };
+  }
   const session = await ensureSession(input);
   if (!session.ok) return session;
   return openUrlOnPeer({
@@ -484,6 +538,129 @@ export async function wireSendFiles(input: {
   | { ok: true; checksums: string[]; endpoint: PeerUrl }
   | { ok: false; error: string; endpoint?: PeerUrl }
 > {
+  // TCP fast path — persistent connection, no HTTP per-chunk
+  const _mgr = await getTcpManager();
+  if (_mgr) {
+    try {
+      const totalBytes = input.files.reduce((a, f) => a + (f.size || f.bytes?.byteLength || 0), 0);
+      const resumeOffset = Math.min(totalBytes, Math.max(0, input.resumeOffset ?? 0));
+      const offerFiles = input.files.map((f) => ({ name: f.name, size: f.size || f.bytes?.byteLength || 0, mimeType: f.mimeType, checksum: f.checksum }));
+      const offerEnvelope = createEnvelope({
+        type: "transfer_offer",
+        fromDeviceId: input.identity.id,
+        toDeviceId: input.device.id,
+        payload: { id: input.transferId, files: offerFiles, totalBytes, deviceId: input.identity.id, deviceName: input.identity.name, resumeOffset, checksums: input.files.map((f) => f.checksum).filter(Boolean) },
+      });
+      const mgrAny = _mgr as unknown as { requestEnvelope: (id: string, env: unknown, opts?: unknown) => Promise<Envelope>; sendBinaryChunk: (id: string, hdr: unknown, data: Uint8Array) => Promise<void>; sendEnvelope: (id: string, env: unknown) => Promise<void> };
+      let accept: Envelope | null = null;
+      try {
+        accept = await mgrAny.requestEnvelope(input.device.id, offerEnvelope as unknown as Envelope, { expectType: "transfer_accept", timeoutMs: 8000 });
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      }
+      const serverResume = (accept?.payload as { resumeOffset?: number } | undefined)?.resumeOffset;
+      let effectiveResume = typeof serverResume === "number" ? Math.min(totalBytes, Math.max(0, serverResume)) : resumeOffset;
+      // Build readSlice helper (reuse same logic as HTTP fallback — we will reuse the HTTP readSlice building below by not returning early)
+      // For TCP we need to stream chunks via sendBinaryChunk
+      // Prepare file slice reader
+      let readSlice = input.readFileSlice;
+      // If not provided, build minimal one from bytes/uri/file (reuse existing logic but simplified)
+      // We will fall through to the existing readSlice building if needed, but for TCP we need it now.
+      // So we duplicate the minimal logic: if no readSlice and needs streaming, we will use the HTTP fallback builder later.
+      // Instead, we directly handle bytes case for TCP and defer complex uri handling to HTTP fallback for now.
+      // To keep TCP path simple for now, we only handle bytes-available files via TCP; for uri/file we fallback to HTTP.
+      const needsComplexRead = input.files.some((f) => !f.bytes && (f.uri || f.file));
+      if (needsComplexRead && !readSlice) {
+        // Complex file reading via expo-file-system is still HTTP-fallback territory — use HTTP path for now
+        // Let HTTP fallback handle it (it has the full 300-line read logic)
+        throw new Error("Complex file uri - fallback to HTTP");
+      }
+      // Simple bytes path for TCP
+      const getSlice = async (fileIndex: number, localOffset: number, len: number): Promise<Uint8Array> => {
+        if (readSlice) return readSlice(fileIndex, localOffset, len);
+        const file = input.files[fileIndex]!;
+        if (!file.bytes) throw new Error(`Missing bytes for ${file.name}`);
+        return file.bytes.subarray(localOffset, Math.min(file.bytes.byteLength, localOffset + len));
+      };
+      const fileSizes = input.files.map((f) => f.size || f.bytes?.byteLength || 0);
+      const fileStarts: number[] = [];
+      let cursor = 0;
+      for (const s of fileSizes) { fileStarts.push(cursor); cursor += s; }
+      const chunkSize = 512 * 1024; // 512K for TCP (simpler than adaptive)
+      let offset = effectiveResume;
+      const startedAt = Date.now();
+      let lastReport = startedAt;
+      const report = (nowAcked: number, isEof: boolean) => {
+        const now = Date.now();
+        if (now - lastReport > 80 || isEof) {
+          const elapsed = Math.max(0.001, (now - startedAt) / 1000);
+          const progressed = Math.max(0, nowAcked - effectiveResume);
+          const currentSpeedBps = progressed / elapsed;
+          const remaining = totalBytes - nowAcked;
+          const etaSeconds = currentSpeedBps > 0 ? remaining / currentSpeedBps : 0;
+          input.onProgress?.({ transferredBytes: nowAcked, totalBytes, currentSpeedBps, etaSeconds });
+          lastReport = now;
+        }
+      };
+      while (offset < totalBytes) {
+        if (input.signal?.aborted) return { ok: false, error: "Aborted" };
+        let fileIndex = 0;
+        for (let i = 0; i < fileStarts.length; i++) {
+          const start = fileStarts[i]!;
+          const end = start + fileSizes[i]!;
+          if (offset < end) { fileIndex = i; break; }
+          fileIndex = i;
+        }
+        const fileStart = fileStarts[fileIndex]!;
+        const localOffset = offset - fileStart;
+        const remainingInFile = fileSizes[fileIndex]! - localOffset;
+        const want = Math.min(chunkSize, remainingInFile);
+        let slice: Uint8Array;
+        try { slice = await getSlice(fileIndex, localOffset, want); } catch (e) { return { ok: false, error: e instanceof Error ? e.message : String(e) }; }
+        const nextOffset = offset + slice.byteLength;
+        const eof = nextOffset >= totalBytes;
+        let attempt = 0;
+        let ok = false;
+        let lastErr = "";
+        while (attempt < 3) {
+          if (input.signal?.aborted) return { ok: false, error: "Aborted" };
+          try {
+            await mgrAny.sendBinaryChunk(input.device.id, { transferId: input.transferId, offset, eof }, slice);
+            ok = true;
+            break;
+          } catch (e) {
+            lastErr = e instanceof Error ? e.message : String(e);
+            attempt++;
+            if (attempt < 3) await new Promise((r) => setTimeout(r, 250 * attempt));
+          }
+        }
+        if (!ok) return { ok: false, error: lastErr || "Chunk failed" };
+        offset = nextOffset;
+        report(offset, eof);
+      }
+      const completeEnvelope = createEnvelope({
+        type: "transfer_complete",
+        fromDeviceId: input.identity.id,
+        toDeviceId: input.device.id,
+        payload: { transferId: input.transferId, totalBytes },
+      });
+      try {
+        await mgrAny.requestEnvelope(input.device.id, completeEnvelope as unknown as Envelope, { timeoutMs: 8000 });
+      } catch {
+        // Fire-and-forget fallback if no reply
+        try { await mgrAny.sendEnvelope(input.device.id, completeEnvelope as unknown as Envelope); } catch {}
+      }
+      const ep: PeerUrl = { host: input.device.lastReachableHost ?? input.device.host ?? "tcp", port: input.device.lastReachablePort ?? input.device.port ?? 53317, protocol: "http" };
+      return { ok: true, checksums: input.files.map((f) => f.checksum ?? ""), endpoint: ep };
+    } catch (e) {
+      // If TCP was attempted but failed for complex files, fallback to HTTP below
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!msg.includes("Complex file uri")) {
+        return { ok: false, error: msg };
+      }
+      // fall through to HTTP
+    }
+  }
   const session = await ensureSession(input);
   if (!session.ok) return session;
 

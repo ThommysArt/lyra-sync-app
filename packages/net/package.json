@@ -9,7 +9,12 @@
     "./integrity": "./src/integrity.ts",
     "./peer-client": "./src/peer-client.ts",
     "./probe": "./src/probe.ts",
-    "./node": "./src/node/index.ts"
+    "./node": "./src/node/index.ts",
+    "./tcp/core": "./src/tcp/core.ts",
+    "./tcp/connection": "./src/tcp/connection.ts",
+    "./tcp/frame": "./src/tcp/frame.ts",
+    "./tcp/manager": "./src/tcp/manager.ts",
+    "./tcp/nodeSocket": "./src/tcp/nodeSocket.ts"
   },
   "scripts": {
     "check-types": "tsc --noEmit",

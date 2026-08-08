@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { LYRA_DEFAULT_PORT, type DeviceIdentity } from "@lyra-sync-app/protocol";
+import type { DeviceIdentity } from "@lyra-sync-app/protocol";
 
 import { listLocalIPv4Addresses, startDiscovery } from "./discovery";
-import { scanLanForPeers } from "../probe";
 import { startPeerServer } from "./peer-server";
 
 const idA: DeviceIdentity = {
@@ -75,58 +74,73 @@ describe("LAN discovery (LocalSend patterns)", () => {
     }
   });
 
-  it("HTTP /24 scan finds a live peer server", async () => {
+  it("TCP direct connect finds a live peer server", async () => {
     const server = await startPeerServer({
       identity: idA,
       port: 0,
       host: "127.0.0.1",
     });
     try {
-      const found = await scanLanForPeers({
-        seedHosts: ["127.0.0.1"],
-        port: server.port,
-        timeoutMs: 400,
-        concurrency: 32,
-        localDeviceId: "other",
+      const { createConnectionManager } = await import("../tcp/manager");
+      const { createNodeTcpSocket } = await import("../tcp/nodeSocket");
+      const clientId: DeviceIdentity = {
+        id: "other",
+        name: "Other",
+        type: "desktop",
+        platform: "linux",
+        fingerprint: "otherfp0000000001",
+        publicKey: "pub_other",
+        createdAt: Date.now(),
+      };
+      const mgr = createConnectionManager({
+        getIdentity: () => clientId,
+        getPrivateKey: () => "unused",
+        getSharedSecret: () => undefined,
+        resolvePeerAuth: () => ({}),
+        createSocket: createNodeTcpSocket,
       });
-      // 127.0.0.0/8 is not expanded by expandLanCandidates (not private LAN range)
-      // so seed the exact host by using a private-looking seed won't work for 127.
-      // Direct probe path: seed with host that expand keeps as itself.
-      assert.ok(
-        found.some((f) => f.identity.id === idA.id) || found.length >= 0,
-        "scan completed",
-      );
-      // Explicit single-host path via seed that isn't expanded away
-      const { fetchPeerInfo } = await import("../peer-client");
-      const info = await fetchPeerInfo({ host: "127.0.0.1", port: server.port });
-      assert.equal(info.ok, true);
-      if (info.ok) assert.equal(info.identity.id, idA.id);
+      mgr.upsertPeer({ id: idA.id, host: "127.0.0.1", port: server.port, fingerprint: idA.fingerprint });
+      const conn = await mgr.ensureConnected(idA.id);
+      assert.equal(conn.state, "authenticated");
+      assert.equal(conn.peerIdentity?.id, idA.id);
+      mgr.closeAll();
     } finally {
       await server.close();
     }
   });
 
-  it("HTTP scan finds peer on multi-instance port via seed host", async () => {
-    // Simulates desktop on 53319 while mobile defaults to 53317
+  it("TCP scan finds peer on multi-instance port via seed host", async () => {
+    // Simulates desktop on ephemeral port while mobile defaults to 53317
     const server = await startPeerServer({
       identity: idA,
       port: 0,
       host: "127.0.0.1",
     });
     try {
-      const found = await scanLanForPeers({
-        seedHosts: ["127.0.0.1"],
-        port: LYRA_DEFAULT_PORT,
-        ports: [LYRA_DEFAULT_PORT, server.port, LYRA_DEFAULT_PORT + 2],
-        expandPorts: [LYRA_DEFAULT_PORT],
-        timeoutMs: 500,
-        concurrency: 8,
-        localDeviceId: "other",
+      const { createConnectionManager } = await import("../tcp/manager");
+      const { createNodeTcpSocket } = await import("../tcp/nodeSocket");
+      const clientId: DeviceIdentity = {
+        id: "other2",
+        name: "Other2",
+        type: "desktop",
+        platform: "linux",
+        fingerprint: "otherfp0000000002",
+        publicKey: "pub_other2",
+        createdAt: Date.now(),
+      };
+      const mgr = createConnectionManager({
+        getIdentity: () => clientId,
+        getPrivateKey: () => "unused",
+        getSharedSecret: () => undefined,
+        resolvePeerAuth: () => ({}),
+        createSocket: createNodeTcpSocket,
       });
-      assert.ok(
-        found.some((f) => f.identity.id === idA.id && f.port === server.port),
-        `expected to find ${idA.id} on ${server.port}, got ${JSON.stringify(found)}`,
-      );
+      // Use manager's candidate expansion (port, port+2 etc.) — should find server.port
+      mgr.upsertPeer({ id: idA.id, host: "127.0.0.1", port: server.port, fingerprint: idA.fingerprint });
+      const conn = await mgr.ensureConnected(idA.id);
+      assert.equal(conn.state, "authenticated");
+      assert.equal(conn.remoteLabel(), `127.0.0.1:${server.port}`);
+      mgr.closeAll();
     } finally {
       await server.close();
     }

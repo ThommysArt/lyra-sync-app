@@ -62,11 +62,6 @@ async function loadExpoFSForLogger(): Promise<unknown> {
     const m = await (new Function('return import("expo-file-system")') as () => Promise<unknown>)().catch(() => null);
     if (m) return m;
   } catch {}
-  try {
-    // @ts-ignore
-    const m = await import("expo-file-system");
-    return m;
-  } catch {}
   return null;
 }
 async function loadExpoFSLegacyForLogger(): Promise<unknown> {
@@ -92,11 +87,6 @@ async function loadExpoFSLegacyForLogger(): Promise<unknown> {
   try {
     const m = await (new Function('return import("expo-file-system/legacy")') as () => Promise<unknown>)().catch(() => null);
     if (m) return m;
-  } catch {}
-  try {
-    // @ts-ignore
-    const m = await import("expo-file-system/legacy");
-    return m;
   } catch {}
   return null;
 }

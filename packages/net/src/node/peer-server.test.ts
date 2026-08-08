@@ -3,9 +3,10 @@ import { describe, it } from "node:test";
 
 import type { DeviceIdentity } from "@lyra-sync-app/protocol";
 
-import { authenticateWithPeer, fetchPeerInfo, sendEnvelope } from "../peer-client";
 import { createEnvelope } from "../envelope";
 import { startPeerServer } from "./peer-server";
+import { createConnectionManager } from "../tcp/manager";
+import { createNodeTcpSocket } from "../tcp/nodeSocket";
 
 const identity: DeviceIdentity = {
   id: "server_dev",
@@ -27,8 +28,8 @@ const clientIdentity: DeviceIdentity = {
   createdAt: Date.now(),
 };
 
-describe("HTTP peer server", () => {
-  it("serves /lyra/info and auth + ping", async () => {
+describe("TCP peer server", () => {
+  it("performs TCP handshake and ping/pong", async () => {
     const peer = await startPeerServer({
       identity,
       port: 0, // ephemeral
@@ -36,35 +37,35 @@ describe("HTTP peer server", () => {
     });
 
     try {
-      const info = await fetchPeerInfo({ host: "127.0.0.1", port: peer.port });
-      assert.equal(info.ok, true);
-      if (info.ok) {
-        assert.equal(info.identity.id, "server_dev");
-        assert.equal(info.protocolVersion, 4);
-      }
-
-      const auth = await authenticateWithPeer({
-        endpoint: { host: "127.0.0.1", port: peer.port },
-        identity: clientIdentity,
-        privateKey: "unused_for_first_contact",
+      // Create a TCP client manager and connect via persistent TCP
+      const mgr = createConnectionManager({
+        getIdentity: () => clientIdentity,
+        getPrivateKey: () => "unused_for_first_contact",
+        getSharedSecret: () => undefined,
+        resolvePeerAuth: () => ({}), // allow first contact
+        createSocket: createNodeTcpSocket,
       });
-      assert.equal(auth.ok, true);
-      if (!auth.ok) return;
 
+      // Upsert server as a peer we want to connect to (use server's identity as deviceId)
+      // For test, we know server's deviceId is "server_dev"
+      mgr.upsertPeer({ id: identity.id, host: "127.0.0.1", port: peer.port, fingerprint: identity.fingerprint });
+
+      // Wait for connection to authenticate (heartbeat)
+      const conn = await mgr.ensureConnected(identity.id);
+      assert.equal(conn.state, "authenticated");
+
+      // Send ping envelope and expect pong via request-response
       const ping = createEnvelope({
         type: "ping",
         fromDeviceId: clientIdentity.id,
+        toDeviceId: identity.id,
         payload: {},
       });
-      const reply = await sendEnvelope(
-        { host: "127.0.0.1", port: peer.port },
-        ping,
-        { sessionToken: auth.sessionToken },
-      );
-      assert.equal(reply.ok, true);
-      if (reply.envelope) {
-        assert.equal(reply.envelope.type, "pong");
-      }
+      // Use requestEnvelope to get reply
+      const reply = await (mgr as unknown as { requestEnvelope: (id: string, env: unknown, opts?: unknown) => Promise<import("@lyra-sync-app/protocol").Envelope> }).requestEnvelope(identity.id, ping, { expectType: "pong", timeoutMs: 3000 });
+      assert.equal(reply.type, "pong");
+
+      mgr.closeAll();
     } finally {
       await peer.close();
     }
