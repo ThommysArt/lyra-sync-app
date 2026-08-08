@@ -15,6 +15,7 @@
 import type { HttpTransport } from "@lyra-sync-app/net";
 import {
 	buildHttpRequest,
+	buildHttpRequestBinary,
 	concatBytes,
 	fetchAsTransport,
 	indexOfHeaderEnd,
@@ -124,7 +125,8 @@ export function createTcpHttpTransport(): HttpTransport | null {
 		const methodUpper = (init?.method ?? "GET").toUpperCase();
 		// Use fetch for GET (discovery probes) — faster, no TCP queue, works for cleartext GET on Android
 		// POST (pair, clipboard, transfer) stays on TCP socket to avoid cleartext POST "Network request failed" on Android
-		if (methodUpper === "GET") {
+		// Binary bodies (Uint8Array) go via fetch where cleartext is now allowed; TCP binary write is complex
+		if (methodUpper === "GET" || init?.body instanceof Uint8Array) {
 			return fetchAsTransport(url, init);
 		}
 		const laneRaw =
@@ -135,18 +137,18 @@ export function createTcpHttpTransport(): HttpTransport | null {
 			() => {
 				const method = methodUpper;
 				const body = init?.body ?? "";
+				const isBinary = body instanceof Uint8Array;
+				const bodyBytes = isBinary ? (body as Uint8Array) : body ? new TextEncoder().encode(body as string) : null;
 				const headers: Record<string, string> = {
 					accept: "application/json",
 					connection: "keep-alive",
 					...(init?.headers ?? {}),
 				};
-				if (body && !headers["content-type"] && !headers["Content-Type"]) {
-					headers["content-type"] = "application/json";
+				if (bodyBytes && bodyBytes.byteLength > 0 && !headers["content-type"] && !headers["Content-Type"]) {
+					headers["content-type"] = isBinary ? "application/octet-stream" : "application/json";
 				}
-				if (body) {
-					headers["content-length"] = String(
-						new TextEncoder().encode(body).byteLength,
-					);
+				if (bodyBytes && bodyBytes.byteLength > 0) {
+					headers["content-length"] = String(bodyBytes.byteLength);
 				}
 
 				const { host, port, path } = parseUrl(url);
@@ -304,15 +306,27 @@ export function createTcpHttpTransport(): HttpTransport | null {
 							if (destroyed) return;
 							if (settled) return;
 							wrote = true;
-							const payload = buildHttpRequest({
-								method,
-								path,
-								host,
-								port,
-								headers,
-								body,
-								keepAlive: true,
-							});
+							// For binary, build binary request; otherwise JSON string
+							const isBinaryReq = bodyBytes instanceof Uint8Array;
+							const payload = isBinaryReq
+								? buildHttpRequestBinary({
+										method,
+										path,
+										host,
+										port,
+										headers,
+										body: bodyBytes as Uint8Array,
+										keepAlive: true,
+									})
+								: buildHttpRequest({
+										method,
+										path,
+										host,
+										port,
+										headers,
+										body: body as string,
+										keepAlive: true,
+									});
 							try {
 								let againDestroyed = false;
 								try {
@@ -324,7 +338,18 @@ export function createTcpHttpTransport(): HttpTransport | null {
 									finishErr(new Error("Socket closed before write"));
 									return;
 								}
-								socket.write(payload, "utf8");
+								if (payload instanceof Uint8Array) {
+									// react-native-tcp-socket expects string; fallback to fetch for binary already handled above
+									// But if we reach here, convert to latin1 string
+									let binary = "";
+									const chunk = 0x8000;
+									for (let i = 0; i < payload.byteLength; i += chunk) {
+										binary += String.fromCharCode(...payload.subarray(i, i + chunk));
+									}
+									socket.write(binary, "utf8");
+								} else {
+									socket.write(payload as string, "utf8");
+								}
 							} catch (e) {
 								finishErr(e);
 							}

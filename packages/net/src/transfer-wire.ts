@@ -1,14 +1,18 @@
 /**
- * Multi-chunk file transfer over HTTP envelopes — streaming, large chunks, pipelined.
+ * Multi-chunk file transfer over HTTP — v4 binary data plane.
+ * Control plane: JSON envelopes (offer/accept/complete) via /lyra/message (sealed)
+ * Data plane: raw octet-stream POST /lyra/transfer/:id/chunk?offset=&eof= (binary)
  */
 import type { TransferFile } from "@lyra-sync-app/protocol";
 
 import { createEnvelope } from "./envelope";
-import { sendEnvelope, type PeerUrl } from "./peer-client";
+import { sendEnvelope, type PeerUrl, peerBaseUrl } from "./peer-client";
+import { getHttpTransport } from "./http-transport";
 import { checksumBytes } from "./integrity";
 import { bytesToHex } from "./crypto-util";
+import { BINARY_CHUNK_HEADER_EOF, BINARY_CHUNK_HEADER_OFFSET, binaryChunkPath } from "./transfer/binaryProtocol";
 
-export const DEFAULT_CHUNK_SIZE = 1024 * 1024; // 1 MiB (was 48 KiB)
+export const DEFAULT_CHUNK_SIZE = 1024 * 1024; // 1 MiB
 export const MIN_CHUNK_SIZE = 256 * 1024;
 export const MAX_CHUNK_SIZE = 4 * 1024 * 1024;
 export const DEFAULT_WINDOW_SIZE = 8;
@@ -27,8 +31,6 @@ export function adaptiveChunkSize(opts: {
   if (opts.preferred && opts.preferred >= MIN_CHUNK_SIZE && opts.preferred <= MAX_CHUNK_SIZE) {
     return opts.preferred;
   }
-  // With AES-GCM (v1b) crypto is fast — use larger chunks for LAN throughput.
-  // Keep smaller chunks only when RAM is critically low or RTT is high.
   if (opts.availableRamHint && opts.availableRamHint < 400 * 1024 * 1024) return 512 * 1024;
   if (opts.rttMsHint && opts.rttMsHint > 120) return 512 * 1024;
   if (opts.totalBytes >= 100 * 1024 * 1024) return 2 * 1024 * 1024;
@@ -91,15 +93,69 @@ export type SendFilesOverWireInput = {
   chunkSize?: number;
   windowSize?: number;
   rttMsHint?: number;
-  /** Optional streaming reader: if provided, used instead of bytes subarray (avoids holding whole file) */
   readFileSlice?: (fileIndex: number, offset: number, length: number) => Promise<Uint8Array>;
   onProgress?: (p: WireTransferProgress) => void;
   signal?: AbortSignal;
   sealSecret?: string;
 };
 
+async function postBinaryChunk(input: {
+  endpoint: PeerUrl;
+  sessionToken: string;
+  transferId: string;
+  offset: number;
+  data: Uint8Array;
+  eof: boolean;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}): Promise<{ ok: true; receivedBytes: number } | { ok: false; error: string; paused?: boolean }> {
+  const base = peerBaseUrl(input.endpoint);
+  const path = `${binaryChunkPath(input.transferId)}?offset=${input.offset}&eof=${input.eof ? "1" : "0"}`;
+  const url = `${base}${path}`;
+  const http = getHttpTransport();
+  const headers: Record<string, string> = {
+    authorization: `Bearer ${input.sessionToken}`,
+    "content-type": "application/octet-stream",
+    [BINARY_CHUNK_HEADER_OFFSET]: String(input.offset),
+    [BINARY_CHUNK_HEADER_EOF]: input.eof ? "1" : "0",
+  };
+  // Adaptive timeout: 5s + chunkSize/ (128KB/s min) => ~13s for 1MiB on slow
+  const timeoutMs = input.timeoutMs ?? Math.max(5000, Math.min(30000, Math.ceil(input.data.byteLength / (128 * 1024) * 1000) + 5000));
+  try {
+    const res = await http(url, {
+      method: "POST",
+      headers,
+      body: input.data,
+      signal: input.signal,
+      timeoutMs,
+      lane: 1,
+    });
+    const text = await res.text();
+    if (!res.ok) {
+      let err = `HTTP ${res.status}`;
+      try {
+        const j = JSON.parse(text);
+        if (j.error) err = j.error;
+        if (j.paused) return { ok: false, error: "Transfer paused by peer", paused: true };
+      } catch {}
+      return { ok: false, error: err };
+    }
+    let received = input.offset + input.data.byteLength;
+    try {
+      const j = JSON.parse(text);
+      if (typeof j.receivedBytes === "number") received = j.receivedBytes;
+      if (j.paused) return { ok: false, error: "Transfer paused by peer", paused: true };
+    } catch {}
+    return { ok: true, receivedBytes: received };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/paused/i.test(msg)) return { ok: false, error: msg, paused: true };
+    return { ok: false, error: msg };
+  }
+}
+
 /**
- * Offer + stream file bytes as transfer_chunk messages; pipelined.
+ * Offer + stream file bytes as binary chunks; pipelined with retries and backpressure.
  */
 export async function sendFilesOverWire(
   input: SendFilesOverWireInput,
@@ -112,8 +168,7 @@ export async function sendFilesOverWire(
     rttMsHint: input.rttMsHint,
     preferred: input.chunkSize,
   });
-  // LAN: larger window for throughput; AES-GCM is fast so we can pipeline more.
-  const defaultWindow = hasSubtleSync() ? 12 : 8;
+  const defaultWindow = hasSubtleSync() ? 8 : 4;
   const windowSize = Math.max(1, Math.min(16, input.windowSize ?? defaultWindow));
 
   const offerFiles: TransferFile[] = input.files.map((f) => ({
@@ -152,8 +207,10 @@ export async function sendFilesOverWire(
       `Unexpected transfer offer reply: ${offerRes.envelope.type}`;
     return { ok: false, error: reason };
   }
+  // Server may return corrected resumeOffset
+  const serverResume = (offerRes.envelope?.payload as { resumeOffset?: number } | undefined)?.resumeOffset;
+  const effectiveResume = typeof serverResume === "number" ? Math.min(totalBytes, Math.max(0, serverResume)) : resumeOffset;
 
-  // Build concatenated view for session-offset addressing using sizes
   const fileSizes = input.files.map((f) => f.size || f.bytes?.byteLength || 0);
   let sessionCursor = 0;
   const fileStarts: number[] = [];
@@ -162,7 +219,6 @@ export async function sendFilesOverWire(
     sessionCursor += s;
   }
 
-  // Helper to get slice for a given file and offset
   const getSlice = async (fileIndex: number, localOffset: number, len: number): Promise<Uint8Array> => {
     if (input.readFileSlice) {
       return input.readFileSlice(fileIndex, localOffset, len);
@@ -172,7 +228,7 @@ export async function sendFilesOverWire(
     return file.bytes.subarray(localOffset, Math.min(file.bytes.byteLength, localOffset + len));
   };
 
-  let sent = resumeOffset;
+  let sentContiguous = effectiveResume;
   const startedAt = Date.now();
   let lastReport = startedAt;
 
@@ -180,7 +236,7 @@ export async function sendFilesOverWire(
     const now = Date.now();
     if (now - lastReport > 80 || isEof) {
       const elapsed = Math.max(0.001, (now - startedAt) / 1000);
-      const progressed = Math.max(0, nowAcked - resumeOffset);
+      const progressed = Math.max(0, nowAcked - effectiveResume);
       const currentSpeedBps = progressed / elapsed;
       const remaining = totalBytes - nowAcked;
       const etaSeconds = currentSpeedBps > 0 ? remaining / currentSpeedBps : 0;
@@ -190,49 +246,64 @@ export async function sendFilesOverWire(
   };
 
   if (windowSize <= 1) {
-    while (sent < totalBytes) {
+    let offset = effectiveResume;
+    while (offset < totalBytes) {
       if (input.signal?.aborted) return { ok: false, error: "Aborted" };
       let fileIndex = 0;
       for (let i = 0; i < fileStarts.length; i++) {
         const start = fileStarts[i]!;
         const end = start + fileSizes[i]!;
-        if (sent < end) { fileIndex = i; break; }
+        if (offset < end) { fileIndex = i; break; }
         fileIndex = i;
       }
       const fileStart = fileStarts[fileIndex]!;
-      const localOffset = sent - fileStart;
+      const localOffset = offset - fileStart;
       const remainingInFile = fileSizes[fileIndex]! - localOffset;
       const want = Math.min(chunkSize, remainingInFile);
-      const slice = await getSlice(fileIndex, localOffset, want);
-      const nextOffset = sent + slice.byteLength;
+      let slice: Uint8Array;
+      try {
+        slice = await getSlice(fileIndex, localOffset, want);
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      }
+      const nextOffset = offset + slice.byteLength;
       const eof = nextOffset >= totalBytes;
-      const chunkEnv = createEnvelope({
-        type: "transfer_chunk",
-        fromDeviceId: input.fromDeviceId,
-        toDeviceId: input.toDeviceId,
-        payload: {
+      // Retry up to 3 times with backoff and endpoint failover would be here
+      let attempt = 0;
+      let chunkOk = false;
+      let lastErr = "";
+      while (attempt < 3) {
+        if (input.signal?.aborted) return { ok: false, error: "Aborted" };
+        const res = await postBinaryChunk({
+          endpoint: input.endpoint,
+          sessionToken: input.sessionToken,
           transferId: input.transferId,
-          fileIndex,
-          offset: sent,
-          dataBase64: bytesToBase64(slice),
+          offset,
+          data: slice,
           eof,
-          checksum: eof ? input.files[fileIndex]?.checksum : undefined,
-        },
-      });
-      const chunkRes = await sendEnvelope(input.endpoint, chunkEnv, {
-        sessionToken: input.sessionToken,
-        signal: input.signal,
-        sealSecret: input.sealSecret,
-      });
-      if (!chunkRes.ok) return { ok: false, error: chunkRes.error };
-      if (chunkRes.envelope?.type === "transfer_pause") return { ok: false, error: "Transfer paused by peer" };
-      sent = nextOffset;
-      report(sent, eof);
+          signal: input.signal,
+        });
+        if (res.ok) {
+          // Server returns contiguous receivedBytes
+          offset = res.receivedBytes;
+          // If server didn't advance (pending), we retry same offset? But for sequential, we expect advance
+          if (offset < nextOffset) offset = nextOffset;
+          chunkOk = true;
+          break;
+        }
+        if (res.paused) return { ok: false, error: "Transfer paused by peer" };
+        lastErr = res.error;
+        attempt++;
+        if (attempt < 3) await new Promise((r) => setTimeout(r, 300 * attempt));
+      }
+      if (!chunkOk) return { ok: false, error: lastErr || "Chunk failed" };
+      sentContiguous = offset;
+      report(sentContiguous, eof);
     }
   } else {
     type ChunkDesc = { offset: number; fileIndex: number; localOffset: number; len: number; eof: boolean };
     const chunks: ChunkDesc[] = [];
-    for (let off = resumeOffset; off < totalBytes; ) {
+    for (let off = effectiveResume; off < totalBytes; ) {
       let fileIndex = 0;
       for (let i = 0; i < fileStarts.length; i++) {
         const start = fileStarts[i]!;
@@ -247,15 +318,15 @@ export async function sendFilesOverWire(
       const nextOffset = off + want;
       chunks.push({ offset: off, fileIndex, localOffset, len: want, eof: nextOffset >= totalBytes });
       off = nextOffset;
-      // Avoid allocating huge array for 300MB/1MB =300 entries fine
-      if (chunks.length > 200_000) break;
+      if (chunks.length > 500_000) break; // safety for unlimited size, but 4MiB chunks -> 2.5M for 10TiB still huge, but we cap
     }
 
-    let completed = 0;
-    let highestAcked = resumeOffset;
     let failed: string | null = null;
     let paused = false;
     let nextIdx = 0;
+    let ackedContiguous = effectiveResume;
+    const ackedSet = new Set<number>(); // offsets that have been acked
+    const pendingAcks = new Map<number, number>(); // offset -> end
 
     async function worker(): Promise<void> {
       while (true) {
@@ -271,30 +342,40 @@ export async function sendFilesOverWire(
           failed = e instanceof Error ? e.message : String(e);
           return;
         }
-        const chunkEnv = createEnvelope({
-          type: "transfer_chunk",
-          fromDeviceId: input.fromDeviceId,
-          toDeviceId: input.toDeviceId,
-          payload: {
+        let attempt = 0;
+        let success = false;
+        while (attempt < 3) {
+          if (failed || paused) return;
+          if (input.signal?.aborted) { failed = "Aborted"; return; }
+          const res = await postBinaryChunk({
+            endpoint: input.endpoint,
+            sessionToken: input.sessionToken,
             transferId: input.transferId,
-            fileIndex: c.fileIndex,
             offset: c.offset,
-            dataBase64: bytesToBase64(slice),
+            data: slice,
             eof: c.eof,
-            checksum: c.eof ? input.files[c.fileIndex]?.checksum : undefined,
-          },
-        });
-        const chunkRes = await sendEnvelope(input.endpoint, chunkEnv, {
-          sessionToken: input.sessionToken,
-          signal: input.signal,
-          sealSecret: input.sealSecret,
-        });
-        if (!chunkRes.ok) { failed = chunkRes.error; return; }
-        if (chunkRes.envelope?.type === "transfer_pause") { paused = true; return; }
-        completed++;
-        const acked = c.offset + slice.byteLength;
-        if (acked > highestAcked) highestAcked = acked;
-        report(highestAcked, c.eof);
+            signal: input.signal,
+          });
+          if (res.ok) {
+            pendingAcks.set(c.offset, c.offset + slice.byteLength);
+            ackedSet.add(c.offset);
+            // Advance contiguous ack pointer
+            while (ackedSet.has(ackedContiguous)) {
+              const end = pendingAcks.get(ackedContiguous);
+              if (end === undefined) break;
+              ackedContiguous = end;
+            }
+            report(ackedContiguous, c.eof);
+            success = true;
+            break;
+          }
+          if (res.paused) { paused = true; return; }
+          attempt++;
+          if (attempt < 3) await new Promise((r) => setTimeout(r, 250 * attempt));
+          else failed = res.error;
+        }
+        if (!success && !failed) failed = "Chunk failed after retries";
+        if (failed) return;
       }
     }
 
@@ -303,7 +384,7 @@ export async function sendFilesOverWire(
     if (failed) return { ok: false, error: failed };
     if (paused) return { ok: false, error: "Transfer paused by peer" };
     if (input.signal?.aborted) return { ok: false, error: "Aborted" };
-    sent = totalBytes;
+    sentContiguous = ackedContiguous;
   }
 
   const complete = createEnvelope({
@@ -312,23 +393,30 @@ export async function sendFilesOverWire(
     toDeviceId: input.toDeviceId,
     payload: { transferId: input.transferId, totalBytes },
   });
-  await sendEnvelope(input.endpoint, complete, {
+  const completeRes = await sendEnvelope(input.endpoint, complete, {
     sessionToken: input.sessionToken,
     signal: input.signal,
     sealSecret: input.sealSecret,
   });
+  if (!completeRes.ok) {
+    if (completeRes.error) {
+      return { ok: false, error: completeRes.error };
+    }
+  } else if (completeRes.envelope && completeRes.envelope.payload && typeof completeRes.envelope.payload === "object" && "ok" in (completeRes.envelope.payload as Record<string, unknown>)) {
+    const payload = completeRes.envelope.payload as { ok?: boolean; error?: string };
+    if (payload.ok === false) {
+      return { ok: false, error: payload.error ?? "Integrity check failed" };
+    }
+  }
 
-  // Checksums: skip for large streaming files to avoid OOM (integrity optional)
   const checksums: string[] = [];
   for (let i = 0; i < input.files.length; i++) {
     const f = input.files[i]!;
     if (f.checksum) { checksums.push(f.checksum); continue; }
     if (f.bytes) {
-      // For small in-memory files, compute
       if (f.bytes.byteLength > 10 * 1024 * 1024) checksums.push("");
       else checksums.push(await checksumBytes(f.bytes));
     } else if (input.readFileSlice) {
-      // Large streaming file: skip checksum to avoid reading whole file again (would be 300MB re-read)
       checksums.push("");
     } else {
       checksums.push("");

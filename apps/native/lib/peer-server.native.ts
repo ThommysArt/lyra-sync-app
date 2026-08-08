@@ -20,6 +20,7 @@ import {
 	type PeerHttpCoreOptions,
 	type PeerPairDecision,
 	parseHttpRequestBytes,
+	parseHttpRequestRaw,
 	statusLine,
 	toUint8Array,
 } from "@lyra-sync-app/net";
@@ -359,8 +360,9 @@ export async function startNativePeerServer(
 				const tryHandle = () => {
 					if (handling || done) return;
 					const buf = concatBytes(chunks);
-					const parsed = parseHttpRequestBytes(buf, MAX_REQUEST_BYTES);
-					if (!parsed) {
+					// Use raw parsing to preserve binary bodies for /lyra/transfer/*/chunk
+					const rawParsed = parseHttpRequestRaw(buf, MAX_REQUEST_BYTES);
+					if (!rawParsed) {
 						if (totalBytes > MAX_REQUEST_BYTES) {
 							respond(
 								buildHttpResponse(
@@ -372,7 +374,7 @@ export async function startNativePeerServer(
 						}
 						return;
 					}
-					if (parsed.consumed < 0) {
+					if (rawParsed.consumed < 0) {
 						respond(
 							buildHttpResponse(
 								400,
@@ -382,6 +384,16 @@ export async function startNativePeerServer(
 						);
 						return;
 					}
+					const isBinaryChunk = rawParsed.path.startsWith("/lyra/transfer/") && rawParsed.path.includes("/chunk");
+					const parsed = isBinaryChunk
+						? { method: rawParsed.method, path: rawParsed.path, headers: rawParsed.headers, body: "", consumed: rawParsed.consumed }
+						: (() => {
+								try {
+									return { method: rawParsed.method, path: rawParsed.path, headers: rawParsed.headers, body: new TextDecoder().decode(rawParsed.bodyBytes), consumed: rawParsed.consumed };
+								} catch {
+									return { method: rawParsed.method, path: rawParsed.path, headers: rawParsed.headers, body: "", consumed: rawParsed.consumed };
+								}
+							})();
 
 					handling = true;
 					chunks.length = 0;
@@ -405,6 +417,7 @@ export async function startNativePeerServer(
 							path: parsed.path,
 							headers: parsed.headers,
 							body: parsed.body,
+							rawBody: isBinaryChunk ? rawParsed.bodyBytes : undefined,
 							remoteAddress: remote,
 						})
 						.then((res) => {

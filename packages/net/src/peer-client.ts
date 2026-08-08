@@ -245,26 +245,38 @@ export async function fetchPeerInfo(
     }
   | { ok: false; error: string }
 > {
-  const base = peerBaseUrl(endpoint);
-  const res = await getJson<{
-    identity?: DeviceIdentity;
-    status?: DeviceStatus;
-    host?: string;
-    port?: number;
-    protocolVersion?: number;
-    pairing?: PeerPairingOffer;
-  }>(`${base}/lyra/info`, opts);
-  if (!res.ok) return { ok: false, error: res.error };
-  if (!res.data?.identity) return { ok: false, error: "Missing identity" };
-  return {
-    ok: true,
-    identity: res.data.identity,
-    status: res.data.status,
-    host: res.data.host,
-    port: res.data.port,
-    protocolVersion: res.data.protocolVersion ?? LYRA_PROTOCOL_VERSION,
-    pairing: res.data.pairing,
+  const tryOnce = async (ep: PeerUrl) => {
+    const base = peerBaseUrl(ep);
+    const res = await getJson<{
+      identity?: DeviceIdentity;
+      status?: DeviceStatus;
+      host?: string;
+      port?: number;
+      protocolVersion?: number;
+      pairing?: PeerPairingOffer;
+    }>(`${base}/lyra/info`, opts);
+    if (!res.ok) return { ok: false as const, error: res.error };
+    if (!res.data?.identity) return { ok: false as const, error: "Missing identity" };
+    return {
+      ok: true as const,
+      identity: res.data.identity,
+      status: res.data.status,
+      host: res.data.host,
+      port: res.data.port,
+      protocolVersion: res.data.protocolVersion ?? LYRA_PROTOCOL_VERSION,
+      pairing: res.data.pairing,
+    };
   };
+  const first = await tryOnce(endpoint);
+  if (first.ok) return first;
+  // TLS fallback: if http failed with protocol or connection error, try opposite protocol
+  const shouldTryAlt = /wrong version|EPROTO|ECONNRESET|self signed|UNABLE_TO_VERIFY|certificate|SSL/i.test(first.error);
+  if (shouldTryAlt) {
+    const alt: PeerUrl = { ...endpoint, protocol: endpoint.protocol === "https" ? "http" : "https" };
+    const second = await tryOnce(alt);
+    if (second.ok) return second;
+  }
+  return first;
 }
 
 /** POST /lyra/message — send a protocol envelope. Seals payload when sealSecret is set. */

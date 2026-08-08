@@ -54,10 +54,18 @@ export type ParsedResponse = {
   consumed: number;
 };
 
-export function parseHttpRequestBytes(
+export type ParsedRequestRaw = {
+  method: string;
+  path: string;
+  headers: Record<string, string>;
+  bodyBytes: Uint8Array;
+  consumed: number;
+};
+
+export function parseHttpRequestRaw(
   raw: Uint8Array,
   maxBodyBytes: number = Number.POSITIVE_INFINITY,
-): ParsedRequest | null {
+): ParsedRequestRaw | null {
   const headerEnd = indexOfHeaderEnd(raw);
   if (headerEnd < 0) {
     if (raw.byteLength > 64 * 1024) return null;
@@ -87,21 +95,37 @@ export function parseHttpRequestBytes(
 
   if (Number.isFinite(contentLength) && contentLength >= 0) {
     if (contentLength > maxBodyBytes) {
-      return { method, path, headers, body: "", consumed: -1 };
+      return { method, path, headers, bodyBytes: new Uint8Array(0), consumed: -1 };
     }
     if (raw.byteLength < bodyStart + contentLength) return null;
     const bodyBytes = raw.subarray(bodyStart, bodyStart + contentLength);
-    return { method, path, headers, body: new TextDecoder().decode(bodyBytes), consumed: bodyStart + contentLength };
+    return { method, path, headers, bodyBytes, consumed: bodyStart + contentLength };
   }
   if (!expectsBody) {
-    return { method, path, headers, body: "", consumed: bodyStart };
+    return { method, path, headers, bodyBytes: new Uint8Array(0), consumed: bodyStart };
   }
   if (raw.byteLength === bodyStart) return null;
   const bodyBytes = raw.subarray(bodyStart);
   if (bodyBytes.byteLength > maxBodyBytes) {
-    return { method, path, headers, body: "", consumed: -1 };
+    return { method, path, headers, bodyBytes: new Uint8Array(0), consumed: -1 };
   }
-  return { method, path, headers, body: new TextDecoder().decode(bodyBytes), consumed: raw.byteLength };
+  return { method, path, headers, bodyBytes, consumed: raw.byteLength };
+}
+
+export function parseHttpRequestBytes(
+  raw: Uint8Array,
+  maxBodyBytes: number = Number.POSITIVE_INFINITY,
+): ParsedRequest | null {
+  const rawParsed = parseHttpRequestRaw(raw, maxBodyBytes);
+  if (!rawParsed) return null;
+  if (rawParsed.consumed < 0) return { method: rawParsed.method, path: rawParsed.path, headers: rawParsed.headers, body: "", consumed: -1 };
+  return {
+    method: rawParsed.method,
+    path: rawParsed.path,
+    headers: rawParsed.headers,
+    body: new TextDecoder().decode(rawParsed.bodyBytes),
+    consumed: rawParsed.consumed,
+  };
 }
 
 export function parseHttpResponseBytes(raw: Uint8Array): ParsedResponse | null {
@@ -159,6 +183,63 @@ export function buildHttpRequest(opts: {
   for (const [k, v] of Object.entries(headers)) lines.push(`${k}: ${v}`);
   lines.push("", opts.body ?? "");
   return lines.join("\r\n");
+}
+
+export function buildHttpRequestBinary(opts: {
+  method: string;
+  path: string;
+  host: string;
+  port: number;
+  headers?: Record<string, string>;
+  body?: Uint8Array;
+  keepAlive?: boolean;
+}): Uint8Array {
+  const headers: Record<string, string> = {
+    connection: opts.keepAlive === false ? "close" : "keep-alive",
+    ...opts.headers,
+  };
+  if (opts.body && !headers["content-type"] && !headers["Content-Type"]) {
+    headers["content-type"] = "application/octet-stream";
+  }
+  if (opts.body) {
+    headers["content-length"] = String(opts.body.byteLength);
+  }
+  const lines = [`${opts.method.toUpperCase()} ${opts.path} HTTP/1.1`, `Host: ${opts.host}:${opts.port}`];
+  for (const [k, v] of Object.entries(headers)) lines.push(`${k}: ${v}`);
+  lines.push("", "");
+  const headerBytes = new TextEncoder().encode(lines.join("\r\n"));
+  if (!opts.body || opts.body.byteLength === 0) return headerBytes;
+  const out = new Uint8Array(headerBytes.byteLength + opts.body.byteLength);
+  out.set(headerBytes, 0);
+  out.set(opts.body, headerBytes.byteLength);
+  return out;
+}
+
+export function parseHttpResponseBytesBinary(raw: Uint8Array): { status: number; headers: Record<string, string>; body: Uint8Array; consumed: number } | null {
+  const headerEnd = indexOfHeaderEnd(raw);
+  if (headerEnd < 0) {
+    if (raw.byteLength > 256 * 1024) return null;
+    return null;
+  }
+  const head = new TextDecoder().decode(raw.subarray(0, headerEnd));
+  const lines = head.split("\r\n");
+  const statusMatch = /^HTTP\/\d\.\d\s+(\d+)/.exec(lines[0] ?? "");
+  const status = statusMatch ? Number(statusMatch[1]) : 0;
+  const headers: Record<string, string> = {};
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i]!;
+    const colon = line.indexOf(":");
+    if (colon > 0) {
+      headers[line.slice(0, colon).trim().toLowerCase()] = line.slice(colon + 1).trim();
+    }
+  }
+  const cl = Number.parseInt(headers["content-length"] ?? "", 10);
+  const bodyStart = headerEnd + 4;
+  if (Number.isFinite(cl) && cl >= 0) {
+    if (raw.byteLength < bodyStart + cl) return null;
+    return { status, headers, body: raw.subarray(bodyStart, bodyStart + cl), consumed: bodyStart + cl };
+  }
+  return null;
 }
 
 export function statusLine(status: number): string {

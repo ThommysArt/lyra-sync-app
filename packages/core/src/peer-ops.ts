@@ -225,6 +225,32 @@ export async function ensureSession(input: {
     deduped.push(ep);
   }
 
+  // Fast path: try lastReachableHost first with 400ms timeout — avoids 1.5s delay for repeated sends
+  if (input.device.lastReachableHost && input.device.lastReachablePort) {
+    for (const proto of ["http", "https"] as const) {
+      try {
+        const fast = await probePeer(
+          { host: input.device.lastReachableHost, port: input.device.lastReachablePort, protocol: proto },
+          { timeoutMs: 400, preferTailscale: isLikelyTailscaleHost(input.device.lastReachableHost), lane: 1 },
+        );
+        if (fast.ok) {
+          const fastEndpoint: PeerUrl = { host: fast.host, port: fast.port, protocol: proto };
+          const sess = await getOrCreatePeerSession({
+            endpoint: fastEndpoint,
+            identity: input.identity,
+            privateKey: input.privateKey,
+            sharedSecret: input.device.authSecret,
+            peerDeviceId: input.device.id,
+          });
+          if (sess.ok) {
+            console.info(`[lyra ensureSession] fast-path hit ${fast.host}:${fast.port} (${proto}) in <400ms for ${input.device.id.slice(0,8)}`);
+            return { ok: true, sessionToken: sess.sessionToken, endpoint: fastEndpoint };
+          }
+        }
+      } catch {}
+    }
+  }
+
   // Parallel probe — was sequential and took 2.5s × N (up to 20s). Now race 8 at a time.
   const probeConcurrency = 8;
   const reachable: PeerUrl[] = [];
@@ -236,26 +262,40 @@ export async function ensureSession(input: {
       if (i >= deduped.length) return;
       if (reachable.length >= 2) return;
       const endpoint = deduped[i]!;
-      try {
-        const probe = await probePeer(
-          { host: endpoint.host, port: endpoint.port, protocol: "http" },
-          {
-            timeoutMs: 1500,
-            preferTailscale: isLikelyTailscaleHost(endpoint.host),
-            lane: 1,
-          },
-        );
-        if (probe.ok) {
-          reachable.push({
-            host: probe.host,
-            port: probe.port,
-            protocol: "http",
-          });
-        } else {
+      // Try http first, then https fallback for TLS peers
+      const tryProbe = async (proto: "http" | "https") => {
+        try {
+          const probe = await probePeer(
+            { host: endpoint.host, port: endpoint.port, protocol: proto },
+            {
+              timeoutMs: 1500,
+              preferTailscale: isLikelyTailscaleHost(endpoint.host),
+              lane: 1,
+            },
+          );
+          if (probe.ok) {
+            reachable.push({
+              host: probe.host,
+              port: probe.port,
+              protocol: proto,
+            });
+            return true;
+          }
+          if (proto === "http" && /wrong version|EPROTO|certificate|self signed|SSL/i.test(probe.error)) {
+            return false;
+          }
           probeErrors.push(`${endpoint.host}:${endpoint.port ?? LYRA_DEFAULT_PORT} → ${probe.error}`);
+          return true; // don't retry https if http error was not TLS-related
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          if (proto === "http" && /wrong version|EPROTO|certificate|self signed|SSL/i.test(msg)) return false;
+          probeErrors.push(`${endpoint.host}:${endpoint.port ?? LYRA_DEFAULT_PORT} → ${msg}`);
+          return true;
         }
-      } catch (e) {
-        probeErrors.push(`${endpoint.host}:${endpoint.port ?? LYRA_DEFAULT_PORT} → ${e instanceof Error ? e.message : String(e)}`);
+      };
+      const httpDone = await tryProbe("http");
+      if (!httpDone) {
+        await tryProbe("https");
       }
     }
   }
@@ -597,9 +637,7 @@ export async function wireSendFiles(input: {
     if (f.bytes && f.bytes.byteLength === 0 && f.size > 0) {
       return { ok: false, error: `Empty bytes for "${f.name}"` };
     }
-    if (!f.bytes && f.size > 550 * 1024 * 1024) {
-      return { ok: false, error: `File too large (>550MB) for streaming` };
-    }
+    // Unlimited size via streaming — no 550MB cap. Only guard is available disk.
   }
   const prepared = input.files.map((f) => ({
     name: f.name,

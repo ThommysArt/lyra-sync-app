@@ -32,6 +32,7 @@ export type PeerHttpRequest = {
   path: string;
   headers: Record<string, string | string[] | undefined>;
   body?: string;
+  rawBody?: Uint8Array;
   /** Remote peer IPv4/IPv6 when known (for pair_request host fill-in) */
   remoteAddress?: string | null;
 };
@@ -246,13 +247,87 @@ export function createPeerHttpCore(options: PeerHttpCoreOptions): PeerHttpCore {
 
   const handle = async (req: PeerHttpRequest): Promise<PeerHttpResponse> => {
     const method = (req.method || "GET").toUpperCase();
-    const path = req.path.split("?")[0] || "/";
+    const fullPath = req.path;
+    const path = fullPath.split("?")[0] || "/";
 
     if (method === "OPTIONS") {
       return jsonResponse(204, {}, cors);
     }
 
     try {
+      // v4 binary chunk — raw bytes
+      const transferMatch = /^\/lyra\/transfer\/([^/]+)\/chunk$/.exec(path);
+      if (transferMatch) {
+        const transferId = decodeURIComponent(transferMatch[1]!);
+        const authHeader = headerValue(req.headers, "authorization");
+        let session: AuthSession | null = null;
+        if (authHeader?.startsWith("Bearer ")) {
+          const token = authHeader.slice(7);
+          const s = sessions.get(token);
+          if (s && s.expiresAt > Date.now()) session = s;
+        }
+        if (requireAuth && !session) {
+          return jsonResponse(401, { error: "Auth required" }, cors);
+        }
+        if (method === "POST") {
+          const url = new URL(fullPath, "http://localhost");
+          const offsetRaw = url.searchParams.get("offset") ?? headerValue(req.headers, "x-lyra-offset");
+          const eofRaw = url.searchParams.get("eof") ?? headerValue(req.headers, "x-lyra-eof");
+          const offset = offsetRaw ? Number.parseInt(String(offsetRaw), 10) : 0;
+          const eof = String(eofRaw).toLowerCase() === "1" || String(eofRaw).toLowerCase() === "true";
+          if (!Number.isFinite(offset) || offset < 0) return jsonResponse(400, { error: "Invalid offset" }, cors);
+          const bodyBytes = req.rawBody ?? (req.body ? new TextEncoder().encode(req.body) : new Uint8Array(0));
+          if (bodyBytes.byteLength > 4 * 1024 * 1024 + 1024) return jsonResponse(413, { error: "Chunk too large" }, cors);
+          let state = transfers.get(transferId);
+          if (!state) return jsonResponse(404, { error: "Unknown transfer" }, cors);
+          if (state.paused) return jsonResponse(200, { ok: true, paused: true, receivedBytes: state.receivedBytes }, cors);
+          if (!state.pendingChunks) state.pendingChunks = new Map();
+          if (state.appendChunk) {
+            if (offset === state.receivedBytes) {
+              try { await state.appendChunk(bodyBytes, offset); } catch (e) { return jsonResponse(500, { error: e instanceof Error ? e.message : "Disk write failed" }, cors); }
+              while (state.pendingChunks.has(state.receivedBytes)) {
+                const next = state.pendingChunks.get(state.receivedBytes)!;
+                state.pendingChunks.delete(state.receivedBytes);
+                try { await state.appendChunk(next, state.receivedBytes); } catch (e) { return jsonResponse(500, { error: e instanceof Error ? e.message : "Disk write failed" }, cors); }
+              }
+            } else if (offset > state.receivedBytes) {
+              if (!state.pendingChunks.has(offset)) {
+                state.pendingChunks.set(offset, bodyBytes);
+                if (state.pendingChunks.size > 256) return jsonResponse(429, { error: "Too many out-of-order" }, cors);
+              }
+              return jsonResponse(200, { ok: true, receivedBytes: state.receivedBytes, pending: true }, cors);
+            } else {
+              return jsonResponse(200, { ok: true, receivedBytes: state.receivedBytes, duplicate: true }, cors);
+            }
+          } else {
+            const chunkEnd = offset + bodyBytes.byteLength;
+            if (offset === state.receivedBytes) {
+              state.chunks.push(bodyBytes);
+              state.receivedBytes = chunkEnd;
+              while (state.pendingChunks.has(state.receivedBytes)) {
+                const next = state.pendingChunks.get(state.receivedBytes)!;
+                state.pendingChunks.delete(state.receivedBytes);
+                state.chunks.push(next);
+                state.receivedBytes += next.byteLength;
+              }
+            } else if (offset > state.receivedBytes) {
+              if (!state.pendingChunks.has(offset)) state.pendingChunks.set(offset, bodyBytes);
+              return jsonResponse(200, { ok: true, receivedBytes: state.receivedBytes, pending: true }, cors);
+            } else {
+              return jsonResponse(200, { ok: true, receivedBytes: state.receivedBytes, duplicate: true }, cors);
+            }
+          }
+          const now = Date.now();
+          const last = (state as unknown as { _lastChunkNotify?: number })._lastChunkNotify ?? 0;
+          if (eof || now - last > 80) {
+            (state as unknown as { _lastChunkNotify?: number })._lastChunkNotify = now;
+            try { await handlerCtx.onTransferChunk?.(state, session?.deviceId ?? "unknown"); } catch {}
+          }
+          return jsonResponse(200, { ok: true, receivedBytes: state.receivedBytes }, cors);
+        }
+        return jsonResponse(405, { error: "Method not allowed" }, cors);
+      }
+
       if (method === "GET" && path === "/lyra/info") {
         const lan = options.getLanHost?.() ?? null;
         const pairingOffer = options.getPairingOffer?.() ?? undefined;

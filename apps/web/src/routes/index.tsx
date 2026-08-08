@@ -29,13 +29,14 @@ export const Route = createFileRoute("/")({
 async function prepareFilesForWire(files: PickedFile[]) {
   return Promise.all(
     files.map(async (f) => {
-      const bytes = f.bytes ?? (f.file ? await materializeFileBytes(f.file) : undefined);
+      const bytes = f.bytes ?? (f.file && f.size <= 64 * 1024 * 1024 ? await materializeFileBytes(f.file) : undefined);
       return {
         name: f.name,
         size: f.size,
         mimeType: f.mimeType,
         relativePath: f.relativePath,
         bytes,
+        file: f.file,
       };
     }),
   );

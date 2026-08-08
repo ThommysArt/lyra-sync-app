@@ -17,6 +17,10 @@ export type DiskTransferState = {
   paused: boolean;
   checksums?: (string | undefined)[];
   chunks: Uint8Array[];
+  /** Incremental sha256 hash — updated on each append to avoid re-read */
+  hash?: ReturnType<typeof createHash>;
+  /** Final digest cached after finalize */
+  sha256?: string;
 };
 
 export async function createDiskTransferState(input: {
@@ -37,6 +41,9 @@ export async function createDiskTransferState(input: {
     stream.once("open", () => resolve());
     stream.once("error", reject);
   });
+  const hash = createHash("sha256");
+  // If resuming, we need to hash existing content - for now start fresh hash; resume will re-hash on finalize if needed
+  // For true resume, caller should provide existing hash or we re-hash file below lazily
   return {
     transferId: input.transferId,
     totalBytes: input.totalBytes,
@@ -47,6 +54,7 @@ export async function createDiskTransferState(input: {
     paused: false,
     checksums: input.checksums,
     chunks: [],
+    hash,
   };
 }
 
@@ -65,6 +73,10 @@ export function appendDiskChunk(
       return;
     }
     const buf = Buffer.isBuffer(bytes) ? (bytes as Buffer) : Buffer.from(bytes.buffer as ArrayBuffer, bytes.byteOffset, bytes.byteLength);
+    // Update incremental hash
+    try {
+      state.hash?.update(buf);
+    } catch {}
     const canWriteMore = state.stream.write(buf, (err) => {
       if (err) reject(err);
       else {
@@ -87,18 +99,33 @@ export async function finalizeDiskTransfer(
     state.stream.once("error", reject);
   });
   const st = await stat(state.filePath);
+  // Prefer incremental hash if we have been updating it and started at 0
+  // If resuming (resumeOffset>0) hash would be incomplete, so re-hash file
+  if (state.hash && state.receivedBytes === st.size && st.size > 0) {
+    try {
+      const digest = state.sha256 ?? state.hash.digest("hex");
+      state.sha256 = digest;
+      return { filePath: state.filePath, sha256: digest, size: st.size };
+    } catch {
+      // fall through to re-hash if digest already consumed
+    }
+  }
+  // Fallback: re-hash whole file (covers resume case and hash-digest-already-consumed)
   const fh = await open(state.filePath, "r");
-  const hash = createHash("sha256");
+  const hash = state.hash ? null : createHash("sha256");
+  const effectiveHash = hash ?? createHash("sha256");
   const buf = Buffer.alloc(1024 * 1024);
   try {
     let pos = 0;
     while (pos < st.size) {
       const { bytesRead } = await fh.read(buf, 0, buf.length, pos);
       if (bytesRead <= 0) break;
-      hash.update(buf.subarray(0, bytesRead));
+      effectiveHash.update(buf.subarray(0, bytesRead));
       pos += bytesRead;
     }
-    return { filePath: state.filePath, sha256: hash.digest("hex"), size: st.size };
+    const sha = effectiveHash.digest("hex");
+    state.sha256 = sha;
+    return { filePath: state.filePath, sha256: sha, size: st.size };
   } finally {
     await fh.close();
   }

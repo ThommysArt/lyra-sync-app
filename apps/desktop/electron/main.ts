@@ -17,7 +17,6 @@ import {
   type NativeImage,
 } from "electron";
 import { copyFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -566,20 +565,14 @@ async function startNetworking() {
               }
               const savedPaths: string[] = [];
               try {
-                // Prefer disk-backed path; fall back to in-memory chunks
-                let blob: Buffer | null = null;
+                // Prefer disk-backed path (streaming, unlimited)
                 if (state.diskPath && existsSync(state.diskPath)) {
-                  blob = await readFile(state.diskPath);
-                } else if (state.chunks?.length) {
-                  blob = Buffer.concat(state.chunks.map((c) => Buffer.from(c)));
-                }
-                if (blob && state.files.length > 0) {
+                  const { createWriteStream, openSync, closeSync, readSync } = await import("node:fs");
                   let offset = 0;
                   for (const file of state.files) {
-                    const size = Math.min(file.size, Math.max(0, blob.length - offset));
+                    const size = file.size;
                     const safeName = path.basename(file.name).replace(/[^\w.\- ()[\]]+/g, "_") || "file";
                     let dest = path.join(destDir, safeName);
-                    // Avoid overwrite: append counter
                     let n = 1;
                     while (existsSync(dest)) {
                       const ext = path.extname(safeName);
@@ -587,9 +580,77 @@ async function startNetworking() {
                       dest = path.join(destDir, `${base} (${n})${ext}`);
                       n++;
                     }
-                    writeFileSync(dest, blob.subarray(offset, offset + size));
+                    // Stream 4MiB chunks to avoid holding file in RAM
+                    await new Promise<void>((resolve, reject) => {
+                      const readFd = openSync(state.diskPath!, "r");
+                      const writeStream = createWriteStream(dest);
+                      let remaining = size;
+                      let readOffset = offset;
+                      const buf = Buffer.alloc(4 * 1024 * 1024);
+                      const pump = () => {
+                        if (remaining <= 0) {
+                          try { closeSync(readFd); } catch {}
+                          writeStream.end(() => resolve());
+                          return;
+                        }
+                        const toRead = Math.min(buf.length, remaining);
+                        let bytesRead = 0;
+                        try {
+                          bytesRead = readSync(readFd, buf, 0, toRead, readOffset);
+                        } catch (e) {
+                          try { closeSync(readFd); } catch {}
+                          writeStream.destroy();
+                          reject(e);
+                          return;
+                        }
+                        if (bytesRead <= 0) {
+                          try { closeSync(readFd); } catch {}
+                          writeStream.end(() => resolve());
+                          return;
+                        }
+                        remaining -= bytesRead;
+                        readOffset += bytesRead;
+                        const chunk = bytesRead === buf.length ? buf : buf.subarray(0, bytesRead);
+                        if (!writeStream.write(chunk)) {
+                          writeStream.once("drain", pump);
+                        } else {
+                          setImmediate(pump);
+                        }
+                      };
+                      writeStream.on("error", (e) => {
+                        try { closeSync(readFd); } catch {}
+                        reject(e);
+                      });
+                      pump();
+                    });
                     savedPaths.push(dest);
                     offset += size;
+                  }
+                  // Cleanup source temp file after successful copy
+                  try {
+                    const { unlinkSync } = await import("node:fs");
+                    unlinkSync(state.diskPath!);
+                  } catch {}
+                } else if (state.chunks?.length) {
+                  // Small in-memory transfers (<1MiB) — merge is okay
+                  const blob = Buffer.concat(state.chunks.map((c) => Buffer.from(c)));
+                  if (blob && state.files.length > 0) {
+                    let offset = 0;
+                    for (const file of state.files) {
+                      const size = Math.min(file.size, Math.max(0, blob.length - offset));
+                      const safeName = path.basename(file.name).replace(/[^\w.\- ()[\]]+/g, "_") || "file";
+                      let dest = path.join(destDir, safeName);
+                      let n = 1;
+                      while (existsSync(dest)) {
+                        const ext = path.extname(safeName);
+                        const base = path.basename(safeName, ext);
+                        dest = path.join(destDir, `${base} (${n})${ext}`);
+                        n++;
+                      }
+                      writeFileSync(dest, blob.subarray(offset, offset + size));
+                      savedPaths.push(dest);
+                      offset += size;
+                    }
                   }
                 }
               } catch (e) {

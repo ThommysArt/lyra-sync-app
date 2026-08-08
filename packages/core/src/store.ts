@@ -996,6 +996,7 @@ export function createLyraStore(options?: {
     let p1: unknown;
     let p2: unknown;
     let p3: unknown;
+    let p4: unknown;
     try {
       if (state.privateKey && typeof storage.setItem === "function") {
         p1 = storage.setItem(`${STORAGE_KEY}.key`, state.privateKey);
@@ -1017,15 +1018,60 @@ export function createLyraStore(options?: {
     } catch (e) {
       forwardLog("error", "lyra store", "persist setItem failed", { error: e instanceof Error ? e.message : String(e) });
     }
+    // Persist file handles for resumable transfers (uri only, not bytes for large files)
+    try {
+      if (transferFileBytes.size > 0) {
+        const serialized: Array<{ id: string; files: Array<{ name: string; size: number; mimeType?: string; checksum?: string; uri?: string }> }> = [];
+        for (const [id, files] of transferFileBytes.entries()) {
+          // Only persist incomplete transfers that are not completed
+          const transfer = state.transfers.find((t) => t.id === id);
+          if (!transfer || transfer.status === "completed" || transfer.status === "cancelled") continue;
+          // Only persist files with uri (streaming) — bytes for small files optionally base64
+          const persistedFiles = files.map((f) => {
+            let bytesB64: string | undefined;
+            if (f.bytes && f.bytes.byteLength < 1024 * 1024) {
+              try {
+                const Buf = (globalThis as unknown as { Buffer?: { from: (b: Uint8Array) => { toString: (e: string) => string } } }).Buffer;
+                if (Buf) bytesB64 = Buf.from(f.bytes).toString("base64");
+                else {
+                  let binary = "";
+                  const chunk = 0x8000;
+                  for (let i = 0; i < f.bytes.length; i += chunk) binary += String.fromCharCode(...f.bytes.subarray(i, i + chunk));
+                  if (typeof btoa === "function") bytesB64 = btoa(binary);
+                }
+              } catch {}
+            }
+            return {
+              name: f.name,
+              size: f.size,
+              mimeType: f.mimeType,
+              checksum: f.checksum,
+              uri: f.uri,
+              bytesB64,
+            };
+          });
+          serialized.push({ id, files: persistedFiles as unknown as Array<{ name: string; size: number; mimeType?: string; checksum?: string; uri?: string }> });
+        }
+        if (serialized.length > 0) {
+          p4 = storage.setItem(`${STORAGE_KEY}.transferFiles`, JSON.stringify(serialized));
+        } else {
+          try { storage.removeItem?.(`${STORAGE_KEY}.transferFiles`); } catch {}
+        }
+      } else {
+        try { storage.removeItem?.(`${STORAGE_KEY}.transferFiles`); } catch {}
+      }
+    } catch (e) {
+      forwardLog("warn", "lyra store", "persist transferFiles failed", { error: e instanceof Error ? e.message : String(e) });
+    }
     try {
       if (storage.flush) p3 = storage.flush();
     } catch (e) {
       forwardLog("error", "lyra store", "persist flush failed", { error: e instanceof Error ? e.message : String(e) });
     }
-    const hasAsync = p1 instanceof Promise || p2 instanceof Promise || p3 instanceof Promise;
+    const hasAsync = p1 instanceof Promise || p2 instanceof Promise || p3 instanceof Promise || p4 instanceof Promise;
     if (hasAsync) {
       return Promise.all(
-        [p1, p2, p3].filter((p) => p instanceof Promise) as Promise<unknown>[],
+        [p1, p2, p3, p4].filter((p) => p instanceof Promise) as Promise<unknown>[],
       ).then(() => undefined);
     }
   };
@@ -1066,6 +1112,35 @@ export function createLyraStore(options?: {
         const isolated = await Promise.resolve(storage.getItem(`${STORAGE_KEY}.key`));
         forwardLog("log", "lyra store", `hydrate isolated key -> ${isolated ? `${isolated.length} chars` : "null"}`);
         if (isolated) privateKey = isolated;
+        // Restore file handles for resumable transfers
+        try {
+          const tfRaw = await Promise.resolve(storage.getItem(`${STORAGE_KEY}.transferFiles`));
+          if (tfRaw) {
+            const parsed = JSON.parse(tfRaw) as Array<{ id: string; files: Array<{ name: string; size: number; mimeType?: string; checksum?: string; uri?: string; bytesB64?: string }> }>;
+            for (const entry of parsed) {
+              const files = entry.files.map((f) => {
+                let bytes: Uint8Array | undefined;
+                if (f.bytesB64) {
+                  try {
+                    const Buf = (globalThis as unknown as { Buffer?: { from: (s: string, e: string) => Uint8Array } }).Buffer;
+                    if (Buf) bytes = new Uint8Array(Buf.from(f.bytesB64, "base64"));
+                    else {
+                      const bin = typeof atob === "function" ? atob(f.bytesB64) : "";
+                      const out = new Uint8Array(bin.length);
+                      for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+                      bytes = out;
+                    }
+                  } catch {}
+                }
+                return { name: f.name, size: f.size, mimeType: f.mimeType, checksum: f.checksum, uri: f.uri, bytes };
+              });
+              transferFileBytes.set(entry.id, files);
+            }
+            forwardLog("log", "lyra store", `hydrate restored ${parsed.length} transfer file maps`);
+          }
+        } catch (e) {
+          forwardLog("warn", "lyra store", "hydrate transferFiles failed", { error: e instanceof Error ? e.message : String(e) });
+        }
       } catch (e) {
         forwardLog("error", "lyra store", "hydrate parse failed, will re-seed", { error: e instanceof Error ? e.message : String(e) });
       }

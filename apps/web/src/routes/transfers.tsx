@@ -56,17 +56,18 @@ function TransfersPage() {
     if (onlineIds.length === 0) return;
     const files = await pickFiles({ multiple: true });
     if (files.length === 0) return;
-    // Materialize up to 256 MiB (streamed read); larger stays synthetic/demo
+    // Keep File handle for streaming unlimited; materialize only small files
     const prepared = await Promise.all(
       files.map(async (f) => {
         const bytes =
-          f.bytes ?? (f.file ? await materializeFileBytes(f.file) : undefined);
+          f.bytes ?? (f.file && f.size <= 64 * 1024 * 1024 ? await materializeFileBytes(f.file) : undefined);
         return {
           name: f.name,
           size: f.size,
           mimeType: f.mimeType,
           relativePath: f.relativePath,
           bytes,
+          file: f.file,
         };
       }),
     );

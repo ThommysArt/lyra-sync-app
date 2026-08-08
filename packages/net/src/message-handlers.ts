@@ -566,7 +566,7 @@ export async function handlePeerEnvelope(
         } else if (chunkOffset > state.receivedBytes) {
           if (!state.pendingChunks.has(chunkOffset)) {
             state.pendingChunks.set(chunkOffset, bytes);
-            if (state.pendingChunks.size > 64) return { ok: false, error: "Too many out-of-order chunks" };
+            if (state.pendingChunks.size > 256) return { ok: false, error: "Too many out-of-order chunks" };
           }
         } else {
           // duplicate

@@ -10,7 +10,7 @@
 export type HttpRequestInit = {
   method?: string;
   headers?: Record<string, string>;
-  body?: string;
+  body?: string | Uint8Array;
   signal?: AbortSignal;
   timeoutMs?: number;
   lane?: number;
@@ -20,6 +20,8 @@ export type HttpResponse = {
   ok: boolean;
   status: number;
   text: () => Promise<string>;
+  arrayBuffer?: () => Promise<ArrayBuffer>;
+  headers?: Record<string, string>;
 };
 
 export type HttpTransport = (
@@ -101,10 +103,15 @@ export async function fetchAsTransport(
     const headers = { ...(init?.headers ?? {}) } as Record<string, string>;
     const lowerKeys = Object.keys(headers).map((k) => k.toLowerCase());
     if (!lowerKeys.includes("connection")) headers["connection"] = "keep-alive";
+    // Handle binary body length
+    if (init?.body instanceof Uint8Array && !lowerKeys.includes("content-length")) {
+      headers["content-length"] = String(init.body.byteLength);
+      if (!lowerKeys.includes("content-type")) headers["content-type"] = "application/octet-stream";
+    }
     const fetchOpts: RequestInit & { keepalive?: boolean; dispatcher?: unknown } = {
       method: init?.method ?? "GET",
       headers,
-      body: init?.body,
+      body: init?.body as unknown as BodyInit,
       signal: controller?.signal ?? init?.signal,
       cache: "no-store" as RequestCache,
       keepalive: true,
@@ -114,11 +121,19 @@ export async function fetchAsTransport(
       const dynRequire = Function('return typeof require !== "undefined" ? require : null')() as unknown as ((id: string) => unknown) | null;
       const undici = dynRequire ? (dynRequire("undici") as { Agent?: new (o: unknown) => unknown }) : null;
       if (undici?.Agent && typeof (fetchOpts as unknown as Record<string, unknown>).dispatcher === "undefined") {
-        const g = globalThis as unknown as { __lyraUndiciAgent?: unknown };
-        if (!g.__lyraUndiciAgent) {
-          g.__lyraUndiciAgent = new undici.Agent({ keepAliveTimeout: 30_000, keepAliveMaxTimeout: 60_000, connections: 16 });
+        const g = globalThis as unknown as { __lyraUndiciAgent?: unknown; __lyraUndiciAgentInsecure?: unknown };
+        const isHttps = url.startsWith("https://");
+        if (isHttps) {
+          if (!g.__lyraUndiciAgentInsecure) {
+            g.__lyraUndiciAgentInsecure = new undici.Agent({ keepAliveTimeout: 30_000, keepAliveMaxTimeout: 60_000, connections: 16, connect: { rejectUnauthorized: false } });
+          }
+          (fetchOpts as unknown as Record<string, unknown>).dispatcher = g.__lyraUndiciAgentInsecure;
+        } else {
+          if (!g.__lyraUndiciAgent) {
+            g.__lyraUndiciAgent = new undici.Agent({ keepAliveTimeout: 30_000, keepAliveMaxTimeout: 60_000, connections: 16 });
+          }
+          (fetchOpts as unknown as Record<string, unknown>).dispatcher = g.__lyraUndiciAgent;
         }
-        (fetchOpts as unknown as Record<string, unknown>).dispatcher = g.__lyraUndiciAgent;
       }
     } catch {}
     let res: Response;
@@ -150,10 +165,15 @@ export async function fetchAsTransport(
         forwardLog("log", "lyra http", `POST ${url} -> ${res.status}`, { url });
       }
     }
+    // Capture headers for binary transfers
+    const respHeaders: Record<string, string> = {};
+    res.headers.forEach((v, k) => respHeaders[k.toLowerCase()] = v);
     return {
       ok: res.ok,
       status: res.status,
       text: () => res.text(),
+      arrayBuffer: () => res.arrayBuffer(),
+      headers: respHeaders,
     };
   } finally {
     if (timer) clearTimeout(timer);

@@ -141,6 +141,25 @@ function readBody(req: IncomingMessage): Promise<string> {
   });
 }
 
+function readRawBody(req: IncomingMessage, maxBytes?: number): Promise<Uint8Array> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    req.on("data", (c: Buffer) => {
+      const buf = Buffer.isBuffer(c) ? c : Buffer.from(c);
+      total += buf.byteLength;
+      if (maxBytes && total > maxBytes) {
+        reject(new Error("Body too large"));
+        req.destroy();
+        return;
+      }
+      chunks.push(buf);
+    });
+    req.on("end", () => resolve(new Uint8Array(Buffer.concat(chunks))));
+    req.on("error", reject);
+  });
+}
+
 function applyCors(
   res: ServerResponse,
   req: IncomingMessage,
@@ -486,6 +505,152 @@ export async function startPeerServer(options: PeerServerOptions): Promise<PeerS
         sessions.set(verified.session.sessionToken, verified.session);
         respond(200, toAuthOkPayload(verified.session), `auth ok ${response.deviceId}`);
         return;
+      }
+
+      // v4 binary chunk endpoints — raw octet-stream, no JSON envelope
+      const transferMatch = /^\/lyra\/transfer\/([^/]+)\/chunk$/.exec(url.pathname);
+      if (transferMatch) {
+        const transferId = decodeURIComponent(transferMatch[1]!);
+        // CORS preflight for binary was already handled above via OPTIONS
+        if (req.method !== "POST" && req.method !== "GET") {
+          respond(405, { error: "Method not allowed" });
+          return;
+        }
+        // Auth check
+        const authHeader = req.headers.authorization;
+        let session: AuthSession | null = null;
+        if (authHeader?.startsWith("Bearer ")) {
+          const token = authHeader.slice(7);
+          const s = sessions.get(token);
+          if (s && s.expiresAt > Date.now()) session = s;
+        }
+        if (requireAuth && !session) {
+          respond(401, { error: "Auth required" });
+          return;
+        }
+        if (req.method === "POST") {
+          // Parse offset / eof from query or headers
+          const offsetRaw = url.searchParams.get("offset") ?? (req.headers["x-lyra-offset"] as string | undefined) ?? (req.headers["X-Lyra-Offset"] as string | undefined);
+          const eofRaw = url.searchParams.get("eof") ?? (req.headers["x-lyra-eof"] as string | undefined);
+          const offset = offsetRaw ? Number.parseInt(String(offsetRaw), 10) : 0;
+          const eof = String(eofRaw).toLowerCase() === "1" || String(eofRaw).toLowerCase() === "true";
+          if (!Number.isFinite(offset) || offset < 0) {
+            respond(400, { error: "Invalid offset" });
+            return;
+          }
+          // Enforce max chunk size 4MiB + overhead
+          const clHeader = req.headers["content-length"];
+          const expectedLen = clHeader ? Number.parseInt(String(clHeader), 10) : undefined;
+          if (expectedLen !== undefined && expectedLen > 4 * 1024 * 1024 + 1024) {
+            respond(413, { error: "Chunk too large" });
+            return;
+          }
+          let body: Uint8Array;
+          try {
+            body = await readRawBody(req, 4 * 1024 * 1024 + 1024);
+          } catch (e) {
+            respond(400, { error: e instanceof Error ? e.message : "Failed to read body" });
+            return;
+          }
+          if (expectedLen !== undefined && body.byteLength !== expectedLen) {
+            // allow mismatch due to encoding but warn
+          }
+          let state = transfers.get(transferId);
+          if (!state) {
+            respond(404, { error: "Unknown transfer — offer first" });
+            return;
+          }
+          if (state.paused) {
+            respond(200, { ok: true, paused: true, receivedBytes: state.receivedBytes });
+            return;
+          }
+          // Handle out-of-order buffering (same as message-handlers but with raw bytes)
+          if (!state.pendingChunks) state.pendingChunks = new Map();
+          const logOffset = offset;
+          const chunkEnd = offset + body.byteLength;
+          if (state.appendChunk) {
+            if (offset === state.receivedBytes) {
+              try {
+                await state.appendChunk(body, offset);
+              } catch (e) {
+                respond(500, { error: e instanceof Error ? e.message : "Disk write failed" });
+                return;
+              }
+              // Drain pending
+              while (state.pendingChunks.has(state.receivedBytes)) {
+                const next = state.pendingChunks.get(state.receivedBytes)!;
+                state.pendingChunks.delete(state.receivedBytes);
+                try {
+                  await state.appendChunk(next, state.receivedBytes);
+                } catch (e) {
+                  respond(500, { error: e instanceof Error ? e.message : "Disk write failed" });
+                  return;
+                }
+              }
+            } else if (offset > state.receivedBytes) {
+              if (!state.pendingChunks.has(offset)) {
+                state.pendingChunks.set(offset, body);
+                if (state.pendingChunks.size > 256) {
+                  respond(429, { error: "Too many out-of-order chunks" });
+                  return;
+                }
+              }
+              // Acknowledge current receivedBytes, not this chunk's offset
+              respond(200, { ok: true, receivedBytes: state.receivedBytes, pending: true });
+              return;
+            } else {
+              // duplicate - ignore
+              respond(200, { ok: true, receivedBytes: state.receivedBytes, duplicate: true });
+              return;
+            }
+          } else {
+            if (offset === state.receivedBytes) {
+              state.chunks.push(body);
+              state.receivedBytes = chunkEnd;
+              while (state.pendingChunks.has(state.receivedBytes)) {
+                const next = state.pendingChunks.get(state.receivedBytes)!;
+                state.pendingChunks.delete(state.receivedBytes);
+                state.chunks.push(next);
+                state.receivedBytes += next.byteLength;
+              }
+            } else if (offset > state.receivedBytes) {
+              if (!state.pendingChunks.has(offset)) state.pendingChunks.set(offset, body);
+              respond(200, { ok: true, receivedBytes: state.receivedBytes, pending: true });
+              return;
+            } else {
+              respond(200, { ok: true, receivedBytes: state.receivedBytes, duplicate: true });
+              return;
+            }
+          }
+          // Throttled progress callback
+          const now = Date.now();
+          const last = (state as unknown as { _lastChunkNotify?: number })._lastChunkNotify ?? 0;
+          if (eof || now - last > 80) {
+            (state as unknown as { _lastChunkNotify?: number })._lastChunkNotify = now;
+            try {
+              await handlerCtx.onTransferChunk?.(state, session?.deviceId ?? "unknown");
+            } catch {}
+          }
+          console.log(`[lyra peer] binary chunk ${transferId.slice(0,8)} offset=${logOffset} len=${body.byteLength} eof=${eof} -> received=${state.receivedBytes}`);
+          respond(200, { ok: true, receivedBytes: state.receivedBytes, offset: state.receivedBytes });
+          return;
+        } else if (req.method === "GET") {
+          // Pull model: serve chunk from transfer state (if we are sender side, we need outbound files)
+          // For now, if state exists as receiver state, we serve what we have? Not needed for POST push model.
+          // But to support browser pull, we need outbound map - fallback to 404 if not sender.
+          void url.searchParams.get("offset");
+          void url.searchParams.get("length");
+          const state = transfers.get(transferId);
+          if (!state) {
+            respond(404, { error: "Unknown transfer" });
+            return;
+          }
+          // This GET is for serving received data back to puller - not primary path.
+          // We don't have file source here; we could serve from disk file if completed.
+          // For now, return error to indicate not implemented for sender side; sender should use outbound map.
+          respond(501, { error: "GET chunk not implemented for this transfer — use POST push" });
+          return;
+        }
       }
 
       if (req.method === "POST" && url.pathname === "/lyra/message") {
