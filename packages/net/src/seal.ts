@@ -30,7 +30,12 @@ async function deriveAesKey(sharedSecret: string): Promise<CryptoKey> {
 }
 
 function hasSubtle(): boolean {
-  return typeof globalThis.crypto?.subtle?.importKey === "function";
+  // Force v2 (pure-JS) for cross-platform reliability (Node vs RN quick-crypto subtle interop issues cause "Failed to open sealed payload" for desktop→mobile).
+  // v2 is hex-encoded XOR stream, works everywhere, no WebCrypto needed. Slightly larger but negligible for control plane (<1KB offers).
+  // Keep importKey check for diagnostics but return false to force v2 until subtle interop is verified.
+  // TODO: re-enable v1b after verifying Node WebCrypto ↔ RN quick-crypto AES-GCM compatibility.
+  return false;
+  // return typeof globalThis.crypto?.subtle?.importKey === "function";
 }
 
 // --- Pure-JS stream cipher for cross-platform (no SubtleCrypto needed) ---
@@ -172,19 +177,23 @@ export async function openSealedJson(
   if (version !== "v1" && version !== "v1b") {
     throw new Error("Cannot open sealed payload in this environment");
   }
-  if (hasSubtle()) {
+  // Try WebCrypto if available (even when hasSubtle() is forced false for sealing, we still need to open old v1 payloads)
+  const subtle = (globalThis as unknown as { crypto?: { subtle?: SubtleCrypto } }).crypto?.subtle;
+  if (subtle && typeof subtle.importKey === "function" && typeof subtle.decrypt === "function") {
     try {
       const key = await deriveAesKey(sharedSecret);
       const isB = version === "v1b";
       const iv = isB ? b64ToBytes(a) : hexToBytes(a);
       const cipher = isB ? b64ToBytes(b) : hexToBytes(b);
-      const plain = await crypto.subtle.decrypt(
+      const plain = await subtle.decrypt(
         { name: "AES-GCM", iv: iv as BufferSource },
         key,
         cipher as BufferSource,
       );
       return JSON.parse(textDecoder.decode(new Uint8Array(plain)));
-    } catch {
+    } catch (e) {
+      // Log underlying decrypt error for diagnostics before falling back
+      console.warn("[lyra seal] v1 decrypt failed, trying fallback", e instanceof Error ? e.message : String(e));
       throw new Error("Failed to open sealed payload");
     }
   }

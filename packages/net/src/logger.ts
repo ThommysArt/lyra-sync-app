@@ -37,16 +37,74 @@ function fmt(level: LogLevel, ns: string, msg: string, fields?: Record<string, u
 
 let persistentLogQueue: string[] = [];
 let persistentLogFlushing = false;
+async function loadExpoFSForLogger(): Promise<unknown> {
+  try {
+    const gReq = (globalThis as unknown as { require?: (id: string) => unknown }).require;
+    if (typeof gReq === "function") {
+      try {
+        const m = gReq("expo-file-system");
+        if (m) return m;
+      } catch {}
+    }
+  } catch {}
+  try {
+    const reqFn = new Function('return typeof require !== "undefined" ? require : null') as () => ((id: string) => unknown) | null;
+    const req2 = reqFn();
+    if (typeof req2 === "function") {
+      try {
+        const m = req2("expo-file-system");
+        if (m) return m;
+      } catch {}
+    }
+  } catch {}
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-implied-eval
+    const m = await (new Function('return import("expo-file-system")') as () => Promise<unknown>)().catch(() => null);
+    if (m) return m;
+  } catch {}
+  try {
+    // @ts-ignore
+    const m = await import("expo-file-system");
+    return m;
+  } catch {}
+  return null;
+}
+async function loadExpoFSLegacyForLogger(): Promise<unknown> {
+  try {
+    const gReq = (globalThis as unknown as { require?: (id: string) => unknown }).require;
+    if (typeof gReq === "function") {
+      try {
+        const m = gReq("expo-file-system/legacy");
+        if (m) return m;
+      } catch {}
+    }
+  } catch {}
+  try {
+    const reqFn = new Function('return typeof require !== "undefined" ? require : null') as () => ((id: string) => unknown) | null;
+    const req2 = reqFn();
+    if (typeof req2 === "function") {
+      try {
+        const m = req2("expo-file-system/legacy");
+        if (m) return m;
+      } catch {}
+    }
+  } catch {}
+  try {
+    const m = await (new Function('return import("expo-file-system/legacy")') as () => Promise<unknown>)().catch(() => null);
+    if (m) return m;
+  } catch {}
+  try {
+    // @ts-ignore
+    const m = await import("expo-file-system/legacy");
+    return m;
+  } catch {}
+  return null;
+}
 async function flushPersistentLog() {
   if (persistentLogFlushing) return;
   persistentLogFlushing = true;
   try {
-    // Lazy import via dynamic Function to avoid TS module resolution for native-only dep (keep net leaf)
-    let mod: unknown = null;
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-implied-eval
-      mod = await (new Function('return import("expo-file-system")') as () => Promise<unknown>)().catch(() => null);
-    } catch { mod = null; }
+    let mod: unknown = await loadExpoFSForLogger();
     const FileCls = (mod as unknown as { File?: new (...a: unknown[]) => { write: (c: string, o?: unknown) => void; exists: boolean; create: (o?: unknown) => void; uri: string } } | null)?.File;
     const PathsMod = (mod as unknown as { Paths?: { cache?: { uri: string } } } | null)?.Paths;
     if (!FileCls || !PathsMod?.cache) {
@@ -71,12 +129,9 @@ async function flushPersistentLog() {
       try {
         (logFile as unknown as { write: (c: string, o?: unknown) => void }).write(lines, { append: true });
       } catch {
-        // Fallback: try legacy (also via Function)
+        // Fallback: try legacy
         try {
-          let legacy: unknown = null;
-          try {
-            legacy = await (new Function('return import("expo-file-system/legacy")') as () => Promise<unknown>)().catch(() => null);
-          } catch { legacy = null; }
+          const legacy: unknown = await loadExpoFSLegacyForLogger();
           const LS = legacy as unknown as { writeAsStringAsync?: (uri: string, s: string, o: unknown) => Promise<void>; EncodingType?: { UTF8: string }; getInfoAsync?: (uri: string) => Promise<{ exists: boolean }> } | null;
           if (LS?.writeAsStringAsync && (logFile as unknown as { uri?: string }).uri) {
             // We can't append via legacy easily; just ignore

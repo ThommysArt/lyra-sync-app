@@ -28,6 +28,72 @@ import type {
 } from "@lyra-sync-app/protocol";
 import { LYRA_DEFAULT_PORT } from "@lyra-sync-app/protocol";
 
+// Safe loader for expo-file-system: Hermes does not support `new Function('return import(...)')` (throws 1:21:Invalid expression)
+// Try require first (works on RN/Hermes), then dynamic import
+async function loadExpoFS(): Promise<any> {
+  try {
+    const gReq = (globalThis as unknown as { require?: (id: string) => unknown }).require;
+    if (typeof gReq === "function") {
+      try {
+        const mod = gReq("expo-file-system");
+        if (mod) return mod;
+      } catch {}
+    }
+  } catch {}
+  try {
+    // Use Function with require to avoid static bundling for web
+    const reqFn = new Function('return typeof require !== "undefined" ? require : null') as () => ((id: string) => unknown) | null;
+    const req2 = reqFn();
+    if (typeof req2 === "function") {
+      try {
+        const mod = req2("expo-file-system");
+        if (mod) return mod;
+      } catch {}
+    }
+  } catch {}
+  try {
+    const mod = await (new Function('return import("expo-file-system")') as () => Promise<any>)();
+    if (mod) return mod;
+  } catch {}
+  try {
+    // @ts-ignore direct import as fallback (may be bundled on web and fail at runtime, caught)
+    const mod = await import("expo-file-system");
+    return mod;
+  } catch {}
+  return null;
+}
+async function loadExpoFSLegacy(): Promise<any> {
+  try {
+    const gReq = (globalThis as unknown as { require?: (id: string) => unknown }).require;
+    if (typeof gReq === "function") {
+      try {
+        const mod = gReq("expo-file-system/legacy");
+        if (mod) return mod;
+      } catch {}
+    }
+  } catch {}
+  try {
+    const reqFn = new Function('return typeof require !== "undefined" ? require : null') as () => ((id: string) => unknown) | null;
+    const req2 = reqFn();
+    if (typeof req2 === "function") {
+      try {
+        const mod = req2("expo-file-system/legacy");
+        if (mod) return mod;
+      } catch {}
+    }
+  } catch {}
+  try {
+    const mod = await (new Function('return import("expo-file-system/legacy")') as () => Promise<any>)();
+    if (mod) return mod;
+  } catch {}
+  try {
+    // @ts-ignore
+    const mod = await import("expo-file-system/legacy");
+    return mod;
+  } catch {}
+  return null;
+}
+
 /** Pick LAN vs Tailscale host based on preferredAddress / availability. */
 export function resolveDeviceHost(
   device: Pick<PairedDevice, "host" | "tailscaleHost" | "preferredAddress">,
@@ -440,11 +506,9 @@ export async function wireSendFiles(input: {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const normCache = (readSlice as unknown as { _normCache?: Map<number, string> })._normCache ?? new Map<number, string>();
           (readSlice as unknown as { _normCache?: Map<number, string> })._normCache = normCache;
-          // Verify file still exists (catches cache eviction) — fast path via modern File API (dynamic import to avoid bundling in desktop)
+          // Verify file still exists (catches cache eviction) — fast path via modern File API
           try {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const loadFSProbe = new Function('return import("expo-file-system")') as () => Promise<any>;
-            const FSNext = await loadFSProbe() as unknown as { File?: new (uri: string) => { exists: boolean; info: () => { exists: boolean; size?: number } | null; size?: number } };
+            const FSNext = await loadExpoFS() as unknown as { File?: new (uri: string) => { exists: boolean; info: () => { exists: boolean; size?: number } | null; size?: number } };
             if (FSNext.File) {
               try {
                 const probeU = normCache.get(idx) ?? f.uri!;
@@ -468,7 +532,7 @@ export async function wireSendFiles(input: {
             if (didNormalize) return normalizedUri;
             didNormalize = true;
             try {
-              const modN = await (new Function('return import("expo-file-system")') as () => Promise<any>)();
+              const modN = await loadExpoFS();
               const FileClsN = modN.File;
               const PathsN = modN.Paths;
               if (FileClsN && PathsN?.cache) {
@@ -508,8 +572,7 @@ export async function wireSendFiles(input: {
             const uriToUse = attempt === 0 ? normalizedUri : await tryNormalizeUri();
             // 1) Modern File API — open/readBytes streaming (best for large files, no OOM)
             try {
-              const loadFS = new Function('return import("expo-file-system")') as () => Promise<any>;
-              const mod = await loadFS() as unknown as {
+              const mod = await loadExpoFS() as unknown as {
                 File?: new (uri: string) => {
                   slice: (start: number, end: number) => { arrayBuffer: () => Promise<ArrayBuffer> };
                   open?: (mode?: string) => { readBytes: (len: number) => Uint8Array; close: () => void; offset?: number | null };
@@ -617,8 +680,7 @@ export async function wireSendFiles(input: {
             // 3) Last resort: legacy readAsStringAsync without position (read whole file as base64) — ONLY for <5MB
             if ((f.size ?? 0) < 5 * 1024 * 1024) {
               try {
-                const loadLegacy = new Function('return import("expo-file-system/legacy")') as () => Promise<any>;
-                const FS = await loadLegacy() as { readAsStringAsync: (uri: string, opts: unknown) => Promise<string>; EncodingType: { Base64: string }; getInfoAsync: (uri: string) => Promise<{ exists: boolean; size?: number }> };
+                const FS = await loadExpoFSLegacy() as { readAsStringAsync: (uri: string, opts: unknown) => Promise<string>; EncodingType: { Base64: string }; getInfoAsync: (uri: string) => Promise<{ exists: boolean; size?: number }> };
                 const info = await FS.getInfoAsync(uriToUse).catch(() => ({ exists: false }));
                 if (!info.exists) {
                   lastErr = new Error(`legacy getInfo not exists ${uriToUse.slice(0,50)}`);
