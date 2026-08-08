@@ -180,9 +180,87 @@ export async function writeToDownloadLocation(
     return { ok: false, error: "No download directory available" };
   }
 
+  // Prefer modern File API for large files to avoid base64 OOM (20MB+)
+  // Try File API first (supports both file:// and content:// via handle)
+  if (bytes.byteLength > 256 * 1024) {
+    try {
+      const { File, Directory } = await import("expo-file-system");
+      if (base.startsWith("content://")) {
+        const mime = guessMime(safeName);
+        const fileUri = await StorageAccessFramework.createFileAsync(base, safeName, mime);
+        const file = new File(fileUri);
+        // Try streaming via FileHandle Append (no base64 copy)
+        try {
+          const h = (file as unknown as { open: (mode: string) => { writeBytes: (b: Uint8Array) => void; close: () => void } }).open("wa");
+          h.writeBytes(bytes);
+          h.close();
+          return { ok: true, uri: fileUri };
+        } catch (e) {
+          // Fallback to File.write if handle not supported for SAF
+          try {
+            (file as unknown as { write: (b: Uint8Array) => void }).write(bytes);
+            return { ok: true, uri: fileUri };
+          } catch {}
+          // Final fallback to base64 (still may OOM for >20MB, but try)
+          const b64 = uint8ToBase64(bytes);
+          await writeAsStringAsync(fileUri, b64, { encoding: EncodingType.Base64 });
+          return { ok: true, uri: fileUri };
+        }
+      } else {
+        const dir = base.replace(/\/?$/, "");
+        try {
+          const d = new Directory(dir);
+          if (!d.exists) d.create({ intermediates: true });
+        } catch {}
+        let dest = `${dir}/${safeName}`;
+        try {
+          let n = 1;
+          const { File: FileCls } = await import("expo-file-system");
+          while (true) {
+            try {
+              const test = new FileCls(dest);
+              if (!test.exists) break;
+              const dot = safeName.lastIndexOf(".");
+              const stem = dot > 0 ? safeName.slice(0, dot) : safeName;
+              const ext = dot > 0 ? safeName.slice(dot) : "";
+              dest = `${dir}/${stem} (${n})${ext}`;
+              n++;
+              if (n > 200) break;
+            } catch { break; }
+          }
+        } catch {}
+        const destFile = new (await import("expo-file-system")).File(dest);
+        try {
+          destFile.create({ overwrite: false } as unknown as never);
+        } catch {}
+        // Try FileHandle then File.write for efficiency
+        try {
+          const h = (destFile as unknown as { open: (mode: string) => { writeBytes: (b: Uint8Array) => void; close: () => void } }).open("w");
+          h.writeBytes(bytes);
+          h.close();
+          return { ok: true, uri: destFile.uri };
+        } catch {
+          try {
+            (destFile as unknown as { write: (b: Uint8Array) => void }).write(bytes);
+            return { ok: true, uri: destFile.uri };
+          } catch {}
+        }
+        // Fallback to legacy base64 if File API fails
+        await writeAsStringAsync(dest, uint8ToBase64(bytes), { encoding: EncodingType.Base64 });
+        return { ok: true, uri: dest };
+      }
+    } catch (e) {
+      console.warn(`[lyra download] File API write failed for ${safeName} size=${bytes.byteLength}, falling back to base64`, e instanceof Error ? e.message : String(e));
+      // Fall through to legacy below
+    }
+  }
   try {
+    if (bytes.byteLength > 5 * 1024 * 1024) {
+      // Large file: File API already attempted above and failed — don't try base64 (would OOM)
+      throw new Error(`File API write failed for large file ${safeName} size=${bytes.byteLength} — base64 fallback disabled to avoid OOM`);
+    }
     if (base.startsWith("content://")) {
-      // Android SAF tree
+      // Android SAF tree — small files fallback via base64
       const mime = guessMime(safeName);
       const fileUri = await StorageAccessFramework.createFileAsync(base, safeName, mime);
       const b64 = uint8ToBase64(bytes);
@@ -388,38 +466,74 @@ export async function saveReceivedTransferFromDisk(
       if (!base) throw new Error("No download dir");
       let destUri: string;
       if (base.startsWith("content://")) {
-        // SAF: copy via bytes streaming (need to read in chunks)
+        // SAF: copy via streaming FileHandles (avoids base64 OOM and overwrite bug)
         const CHUNK = 4 * 1024 * 1024;
         let offset = 0;
-        // Create SAF file first
         const { StorageAccessFramework } = await import("expo-file-system/legacy");
         const mime = guessMime(file.name);
         const destFileUri = await StorageAccessFramework.createFileAsync(base, file.name.replace(/[^\w.\- ()[\]]+/g, "_"), mime);
-        // Stream copy in chunks via File slice + writeAsStringAsync base64 append
-        const fh = (tmpFile as unknown as { open?: (mode: string) => { readBytes: (len: number) => Uint8Array; close: () => void } }).open
-          ? (tmpFile as unknown as { open: (mode: string) => { readBytes: (len: number) => Uint8Array; close: () => void } }).open("r")
-          : null;
-        if (fh) {
+        const destFile = new File(destFileUri);
+        // Try streaming via FileHandles (both source and dest)
+        let srcHandle: { readBytes: (len: number) => Uint8Array; close: () => void; offset?: number | null } | null = null;
+        let destHandle: { writeBytes: (b: Uint8Array) => void; close: () => void } | null = null;
+        try {
           try {
+            srcHandle = (tmpFile as unknown as { open: (m: string) => typeof srcHandle }).open("r");
+          } catch {}
+          try {
+            destHandle = (destFile as unknown as { open: (m: string) => typeof destHandle }).open("wa");
+          } catch {}
+          if (srcHandle && destHandle) {
             while (offset < file.size) {
               const len = Math.min(CHUNK, file.size - offset);
-              const chunk = fh.readBytes(len);
+              // Ensure src offset correct
+              try {
+                if (typeof (srcHandle as unknown as { offset: number }).offset === "number") (srcHandle as unknown as { offset: number }).offset = offset;
+              } catch {}
+              const chunk = srcHandle.readBytes(len);
               if (chunk.byteLength === 0) break;
-              const b64 = uint8ToBase64(chunk);
-              const { writeAsStringAsync, EncodingType } = await import("expo-file-system/legacy");
-              // SAF append not trivial; for now write whole via loops may be heavy — fallback to simple move
-              await writeAsStringAsync(destFileUri, b64, { encoding: EncodingType.Base64 });
-              offset += len;
+              destHandle.writeBytes(chunk);
+              offset += chunk.byteLength;
             }
-          } finally { try { fh.close(); } catch {} }
-        } else {
+          } else if (srcHandle) {
+            // Dest handle failed (SAF may not support wa) — fallback to File.write append per chunk
+            while (offset < file.size) {
+              const len = Math.min(CHUNK, file.size - offset);
+              try {
+                if (typeof (srcHandle as unknown as { offset: number }).offset === "number") (srcHandle as unknown as { offset: number }).offset = offset;
+              } catch {}
+              const chunk = srcHandle.readBytes(len);
+              if (chunk.byteLength === 0) break;
+              try {
+                (destFile as unknown as { write: (b: Uint8Array, o?: unknown) => void }).write(chunk, { append: true });
+              } catch {
+                const b64 = uint8ToBase64(chunk);
+                const { writeAsStringAsync, EncodingType } = await import("expo-file-system/legacy");
+                await writeAsStringAsync(destFileUri, b64, { encoding: EncodingType.Base64 });
+              }
+              offset += chunk.byteLength;
+            }
+          } else {
+            throw new Error("no src handle");
+          }
+        } catch (e) {
+          console.warn(`[lyra download] SAF streaming failed for ${file.name}, falling back to legacy`, e instanceof Error ? e.message : String(e));
           // Fallback: try File bytes then write (may OOM for 300MB but try)
-          const bytes = await tmpFile.bytes();
-          const res = await writeToDownloadLocation(base, file.name, bytes);
-          if (res.ok) savedPaths.push(res.uri);
-          else errors.push(`${file.name}: ${res.error}`);
+          try {
+            const bytes = await tmpFile.bytes();
+            const res = await writeToDownloadLocation(base, file.name, bytes);
+            if (res.ok) savedPaths.push(res.uri);
+            else errors.push(`${file.name}: ${res.error}`);
+          } catch (e2) {
+            errors.push(`${file.name}: ${e2 instanceof Error ? e2.message : String(e2)}`);
+          }
+          try { srcHandle?.close(); } catch {}
+          try { destHandle?.close(); } catch {}
           try { tmpFile.delete(); } catch {}
           return { savedPaths, errors };
+        } finally {
+          try { srcHandle?.close(); } catch {}
+          try { destHandle?.close(); } catch {}
         }
         savedPaths.push(destFileUri);
         try { tmpFile.delete(); } catch {}
@@ -452,11 +566,35 @@ export async function saveReceivedTransferFromDisk(
           tmpFile.move(destFile);
           savedPaths.push(destFile.uri);
         } catch {
-          // Fallback copy via stream
+          // Fallback streaming copy via handles (avoid loading whole 20MB+ into RAM)
           try {
-            const data = await tmpFile.bytes();
+            const CHUNK = 4 * 1024 * 1024;
             destFile.create({ overwrite: true });
-            destFile.write(data);
+            let srcH: { readBytes: (len: number) => Uint8Array; close: () => void; offset?: number | null } | null = null;
+            let destH: { writeBytes: (b: Uint8Array) => void; close: () => void } | null = null;
+            try {
+              srcH = (tmpFile as unknown as { open: (m: string) => typeof srcH }).open("r");
+            } catch {}
+            try {
+              destH = (destFile as unknown as { open: (m: string) => typeof destH }).open("w");
+            } catch {}
+            if (srcH && destH) {
+              let off = 0;
+              while (off < file.size) {
+                const len = Math.min(CHUNK, file.size - off);
+                try { if (typeof (srcH as unknown as { offset: number }).offset === "number") (srcH as unknown as { offset: number }).offset = off; } catch {}
+                const chunk = srcH.readBytes(len);
+                if (chunk.byteLength === 0) break;
+                destH.writeBytes(chunk);
+                off += chunk.byteLength;
+              }
+            } else {
+              // Last resort: try whole-file via bytes (may OOM for >50MB but try)
+              const data = await tmpFile.bytes();
+              destFile.write(data);
+            }
+            try { srcH?.close(); } catch {}
+            try { destH?.close(); } catch {}
             savedPaths.push(destFile.uri);
             try { tmpFile.delete(); } catch {}
           } catch (e) {
@@ -485,27 +623,57 @@ export async function saveReceivedTransferFromDisk(
         }
         if (!base) throw new Error("No download dir");
         if (base.startsWith("content://")) {
-          // SAF: fallback to slice for now (chunked SAF streaming complex) — use 64MiB chunks via slice
+          // SAF: streaming via FileHandles (fix overwrite bug where each writeAsStringAsync overwrote previous chunk)
           const CHUNK = 4 * 1024 * 1024;
           const { StorageAccessFramework } = await import("expo-file-system/legacy");
           const mime = guessMime(file.name);
           const destUri = await StorageAccessFramework.createFileAsync(base, file.name.replace(/[^\w.\- ()[\]]+/g, "_"), mime);
+          const destFile = new File(destUri);
           let written = 0;
           let fileOffset = offset;
-          while (written < file.size) {
-            const len = Math.min(CHUNK, file.size - written);
-            const sliceBlob = tmpFile.slice(fileOffset, fileOffset + len);
-            const buf = await sliceBlob.arrayBuffer();
-            const chunk = new Uint8Array(buf);
-            const b64 = uint8ToBase64(chunk);
-            const { writeAsStringAsync, EncodingType } = await import("expo-file-system/legacy");
-            // SAF append not supported atomically - we write chunk sequentially via FileSystem but need to append
-            // For now, write sequentially using StorageAccessFramework via workaround: read existing and append
-            // Simplified: just write whole via slice loops - may be heavy but handles unlimited via streaming
-            await writeAsStringAsync(destUri, b64, { encoding: EncodingType.Base64 });
-            written += len;
-            fileOffset += len;
-            if (fileOffset >= offset + file.size) break;
+          let srcH: { readBytes: (len: number) => Uint8Array; close: () => void; offset?: number | null } | null = null;
+          let destH: { writeBytes: (b: Uint8Array) => void; close: () => void } | null = null;
+          try {
+            try { srcH = (tmpFile as unknown as { open: (m: string) => typeof srcH }).open("r"); } catch {}
+            try { destH = (destFile as unknown as { open: (m: string) => typeof destH }).open("wa"); } catch {}
+            if (srcH && destH) {
+              while (written < file.size) {
+                const len = Math.min(CHUNK, file.size - written);
+                try { if (typeof (srcH as unknown as { offset: number }).offset === "number") (srcH as unknown as { offset: number }).offset = fileOffset; } catch {}
+                const chunk = srcH.readBytes(len);
+                if (chunk.byteLength === 0) break;
+                destH.writeBytes(chunk);
+                written += chunk.byteLength;
+                fileOffset += chunk.byteLength;
+              }
+            } else {
+              // Fallback per-chunk File.write append or slice+base64
+              while (written < file.size) {
+                const len = Math.min(CHUNK, file.size - written);
+                let chunk: Uint8Array;
+                if (srcH) {
+                  try { if (typeof (srcH as unknown as { offset: number }).offset === "number") (srcH as unknown as { offset: number }).offset = fileOffset; } catch {}
+                  chunk = srcH.readBytes(len);
+                } else {
+                  const sliceBlob = tmpFile.slice(fileOffset, fileOffset + len);
+                  const buf = await sliceBlob.arrayBuffer();
+                  chunk = new Uint8Array(buf);
+                }
+                if (chunk.byteLength === 0) break;
+                try {
+                  (destFile as unknown as { write: (b: Uint8Array, o?: unknown) => void }).write(chunk, { append: true });
+                } catch {
+                  const b64 = uint8ToBase64(chunk);
+                  const { writeAsStringAsync, EncodingType } = await import("expo-file-system/legacy");
+                  await writeAsStringAsync(destUri, b64, { encoding: EncodingType.Base64 });
+                }
+                written += chunk.byteLength;
+                fileOffset += chunk.byteLength;
+              }
+            }
+          } finally {
+            try { srcH?.close(); } catch {}
+            try { destH?.close(); } catch {}
           }
           savedPaths.push(destUri);
         } else {

@@ -121,9 +121,7 @@ async function postJson<T = unknown>(
           ? String((data as { error: unknown }).error)
           : `HTTP ${res.status}`;
       const isProbe = init?.lane === 2 || url.includes("/lyra/info");
-      if (isProbe) {
-        if (typeof console.debug === "function") console.debug(`[lyra net] POST ${url} -> HTTP ${res.status}: ${err}`);
-      } else {
+      if (!isProbe) {
         forwardLog("error", "lyra net", `POST ${url} -> HTTP ${res.status}: ${err}`, { url, status: res.status, error: err });
       }
       return { ok: false, error: err, status: res.status };
@@ -131,12 +129,8 @@ async function postJson<T = unknown>(
     return { ok: true, data: data as T, status: res.status };
   } catch (e) {
     const isProbe = init?.lane === 2 || url.includes("/lyra/info");
-    const msg = e instanceof Error ? e.message : String(e);
-    const isCanceled = /canceled|cancelled|abort/i.test(msg);
-    if (isProbe) {
-      // Discovery probes fail for most hosts — don't spam error logs
-      if (!isCanceled && typeof console.debug === "function") console.debug(`[lyra net] POST ${url} failed: ${msg}`);
-    } else {
+    if (!isProbe) {
+      const msg = e instanceof Error ? e.message : String(e);
       forwardLog("error", "lyra net", `POST ${url} failed: ${msg}`, { url, error: msg });
     }
     return {
@@ -169,9 +163,7 @@ async function getJson<T = unknown>(
     }
     if (!res.ok) {
       const isProbe = init?.lane === 2 || url.includes("/lyra/info");
-      if (isProbe) {
-        if (typeof console.debug === "function") console.debug(`[lyra net] GET ${url} -> HTTP ${res.status}`);
-      } else {
+      if (!isProbe) {
         forwardLog("error", "lyra net", `GET ${url} -> HTTP ${res.status}`, { url, status: res.status });
       }
       return { ok: false, error: `HTTP ${res.status} (url: ${url})`, status: res.status };
@@ -179,11 +171,8 @@ async function getJson<T = unknown>(
     return { ok: true, data: data as T, status: res.status };
   } catch (e) {
     const isProbe = init?.lane === 2 || url.includes("/lyra/info");
-    const msg = e instanceof Error ? e.message : String(e);
-    const isCanceled = /canceled|cancelled|abort/i.test(msg);
-    if (isProbe) {
-      if (!isCanceled && typeof console.debug === "function") console.debug(`[lyra net] GET ${url} failed: ${msg}`);
-    } else {
+    if (!isProbe) {
+      const msg = e instanceof Error ? e.message : String(e);
       forwardLog("error", "lyra net", `GET ${url} failed: ${msg}`, { url, error: msg });
     }
     return {
@@ -200,11 +189,7 @@ export function formatNetworkError(e: unknown, url?: string): string {
   const name = e instanceof Error ? e.name : "";
   const urlSuffix = url ? ` (url: ${url})` : "";
   const isProbe = url?.includes("/lyra/info");
-  const isCanceled = /canceled|cancelled|abort/i.test(raw);
-  // For discovery probes, don't spam error logs — caller handles summary
-  if (isProbe) {
-    if (!isCanceled && typeof console.debug === "function") console.debug(`[lyra net] network error${urlSuffix}: ${raw}`);
-  } else {
+  if (!isProbe) {
     forwardLog("error", "lyra net", `network error${urlSuffix}: ${raw}`, { url, error: raw, name, stack: e instanceof Error ? e.stack?.slice(0,500) : undefined });
   }
   if (/CLEARTEXT|cleartext|UnknownServiceException/i.test(raw)) {

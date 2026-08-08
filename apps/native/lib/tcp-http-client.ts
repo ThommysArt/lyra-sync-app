@@ -160,7 +160,20 @@ export function createTcpHttpTransport(): HttpTransport | null {
 				return new Promise((resolve, reject) => {
 					let settled = false;
 					let wrote = false;
-					const chunks: Uint8Array[] = [];
+					// Doubling buffer for response parsing (avoids O(n^2) concat per packet, critical for large responses)
+					let respBuf = new Uint8Array(32 * 1024);
+					let respLen = 0;
+					let respCap = respBuf.byteLength;
+					const ensureRespCap = (needed: number) => {
+						if (needed <= respCap) return;
+						let newCap = Math.max(respCap * 2, needed);
+						newCap = Math.min(newCap, 32 * 1024 * 1024 + 65536);
+						if (newCap < needed) newCap = needed;
+						const nb = new Uint8Array(newCap);
+						nb.set(respBuf.subarray(0, respLen), 0);
+						respBuf = nb;
+						respCap = newCap;
+					};
 					// eslint-disable-next-line @typescript-eslint/no-explicit-any
 					let socket: any = null;
 					let hardTimer: ReturnType<typeof setTimeout> | undefined;
@@ -214,10 +227,13 @@ export function createTcpHttpTransport(): HttpTransport | null {
 							}
 						}
 						safeDestroy();
-						const msg = err instanceof Error ? err.message : String(err);
-						console.warn(
-							`[lyra tcp] #${reqId} ${method} ${host}:${port}${path} FAIL ${Date.now() - started}ms · ${msg}`,
-						);
+						// SCAN probes are expected to fail for most hosts — summary is logged by scanLanForPeers, not per-host
+						if (lane !== Lane.SCAN) {
+							const msg = err instanceof Error ? err.message : String(err);
+							console.warn(
+								`[lyra tcp] #${reqId} ${method} ${host}:${port}${path} FAIL ${Date.now() - started}ms · ${msg}`,
+							);
+						}
 						reject(err instanceof Error ? err : new Error(String(err)));
 					};
 
@@ -253,15 +269,16 @@ export function createTcpHttpTransport(): HttpTransport | null {
 
 					const tryParse = () => {
 						if (settled) return;
-						const raw = concat(chunks);
-						const headerEnd = indexOfHeaderEnd(raw);
+						if (respLen === 0) return;
+						const view = respLen === respCap ? respBuf : respBuf.subarray(0, respLen);
+						const headerEnd = indexOfHeaderEnd(view);
 						if (headerEnd < 0) {
-							if (raw.byteLength > 256 * 1024) {
+							if (respLen > 256 * 1024) {
 								finishErr(new Error("HTTP headers too large"));
 							}
 							return;
 						}
-						const head = new TextDecoder().decode(raw.subarray(0, headerEnd));
+						const head = new TextDecoder().decode(view.subarray(0, headerEnd));
 						const headLines = head.split("\r\n");
 						const statusMatch = /^HTTP\/\d\.\d\s+(\d+)/.exec(
 							headLines[0] ?? "",
@@ -283,8 +300,8 @@ export function createTcpHttpTransport(): HttpTransport | null {
 						);
 						const bodyStart = headerEnd + 4;
 						if (Number.isFinite(contentLength) && contentLength >= 0) {
-							if (raw.byteLength < bodyStart + contentLength) return;
-							const bodyBytes = raw.subarray(
+							if (view.byteLength < bodyStart + contentLength) return;
+							const bodyBytes = view.subarray(
 								bodyStart,
 								bodyStart + contentLength,
 							);
@@ -448,7 +465,11 @@ export function createTcpHttpTransport(): HttpTransport | null {
 							socket.on("data", (data: unknown) => {
 								if (settled) return;
 								try {
-									chunks.push(toBytes(data));
+									const bytes = toBytes(data);
+									if (bytes.byteLength === 0) return;
+									ensureRespCap(respLen + bytes.byteLength);
+									respBuf.set(bytes, respLen);
+									respLen += bytes.byteLength;
 									tryParse();
 								} catch (e) {
 									finishErr(e);
@@ -470,8 +491,16 @@ export function createTcpHttpTransport(): HttpTransport | null {
 							socket.on("close", () => {
 								try {
 									if (settled) return;
-									const raw = concat(chunks);
-									const headerEnd = indexOfHeaderEnd(raw);
+									if (respLen === 0) {
+										finishErr(
+											new Error(
+												`Connection closed before HTTP response (${method} ${host}:${port}${path})`,
+											),
+										);
+										return;
+									}
+									const view = respLen === respCap ? respBuf : respBuf.subarray(0, respLen);
+									const headerEnd = indexOfHeaderEnd(view);
 									if (headerEnd < 0) {
 										finishErr(
 											new Error(
@@ -481,13 +510,13 @@ export function createTcpHttpTransport(): HttpTransport | null {
 										return;
 									}
 									const head = new TextDecoder().decode(
-										raw.subarray(0, headerEnd),
+										view.subarray(0, headerEnd),
 									);
 									const statusMatch = /^HTTP\/\d\.\d\s+(\d+)/.exec(
 										head.split("\r\n")[0] ?? "",
 									);
 									const status = statusMatch ? Number(statusMatch[1]) : 0;
-									const bodyBytes = raw.subarray(headerEnd + 4);
+									const bodyBytes = view.subarray(headerEnd + 4);
 									finishOk(status, new TextDecoder().decode(bodyBytes));
 								} catch (e) {
 									try {
@@ -515,12 +544,13 @@ export function createTcpHttpTransport(): HttpTransport | null {
 			lane,
 			init?.signal,
 		).catch(async (tcpErr: unknown) => {
-			const msg = tcpErr instanceof Error ? tcpErr.message : String(tcpErr);
-			// Fallback to fetch for POST — helps when TCP socket fails due to routing or native crash
-			// but cleartext fetch may still succeed (e.g., after with-cleartext-traffic prebuild)
-			console.warn(
-				`[lyra tcp] POST ${methodUpper} ${url} TCP failed (${msg}) — falling back to fetch`,
-			);
+			const isScan = init?.lane === 2;
+			if (!isScan) {
+				const msg = tcpErr instanceof Error ? tcpErr.message : String(tcpErr);
+				console.warn(
+					`[lyra tcp] POST ${methodUpper} ${url} TCP failed (${msg}) — falling back to fetch`,
+				);
+			}
 			return fetchAsTransport(url, init);
 		});
 	};

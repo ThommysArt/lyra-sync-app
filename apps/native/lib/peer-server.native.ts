@@ -106,7 +106,28 @@ function createNativeDiskTransfer() {
 		// If resuming, we need to truncate or keep; for now just start fresh if resume==0
 		if (received === 0) {
 			try { tmpFile.write(new Uint8Array(0)); } catch {}
+		} else {
+			// Verify existing size matches resume offset
+			try {
+				const existing = tmpFile.info().size ?? 0;
+				if (existing !== received) {
+					console.warn(`[lyra peer] resume size mismatch ${existing} vs expected ${received} — truncating`);
+					received = existing;
+				}
+			} catch {}
 		}
+		let handle: import("expo-file-system").FileHandle | null = null;
+		const ensureHandle = () => {
+			if (handle) return handle;
+			try {
+				// Append mode is efficient for sequential writes
+				const h = (tmpFile as unknown as { open: (mode: string) => import("expo-file-system").FileHandle }).open("wa");
+				handle = h as unknown as import("expo-file-system").FileHandle;
+			} catch {
+				handle = null;
+			}
+			return handle;
+		};
 		const state: import("@lyra-sync-app/net").TransferReceiveState = {
 			transferId: input.transferId,
 			totalBytes: input.totalBytes,
@@ -122,27 +143,51 @@ function createNativeDiskTransfer() {
 					if (offset < received) return;
 					throw new Error(`gap ${received} vs ${offset}`);
 				}
-				// Append via File.write with append:true (efficient, no base64) — fail fast if unavailable
-				try {
-					// New API: write with append (SDK 52+)
-					const writer = tmpFile as unknown as { write: (data: Uint8Array, opts?: unknown) => void };
-					if (typeof writer.write !== "function") throw new Error("File.write not available — need expo-file-system with File API");
-					writer.write(bytes, { append: true });
-					console.info(`[lyra peer] appendChunk ${input.transferId.slice(0,8)} offset=${offset} len=${bytes.byteLength} ok`);
-				} catch (e) {
-					// Do NOT fallback to read-whole-file O(n²) — that caused 150KB/s and OOM.
-					console.error(`[lyra peer] appendChunk failed ${input.transferId.slice(0,8)} @${offset} len=${bytes.byteLength}: ${e instanceof Error ? e.message : String(e)} — rebuild with expo-file-system File API`);
-					throw new Error(`Disk append failed: ${e instanceof Error ? e.message : String(e)} — update expo-file-system`);
+				const start = Date.now();
+				// Try FileHandle Append first (most efficient, no base64 copy)
+				const h = ensureHandle();
+				if (h) {
+					try {
+						(h as unknown as { writeBytes: (b: Uint8Array) => void }).writeBytes(bytes);
+						const ms = Date.now() - start;
+						if (ms > 200) console.warn(`[lyra peer] appendChunk slow ${input.transferId.slice(0,8)} len=${bytes.byteLength} ${ms}ms`);
+						else console.info(`[lyra peer] appendChunk ${input.transferId.slice(0,8)} offset=${offset} len=${bytes.byteLength} ok via handle`);
+					} catch (e) {
+						console.warn(`[lyra peer] FileHandle write failed ${input.transferId.slice(0,8)}: ${e instanceof Error ? e.message : String(e)} — fallback to File.write`);
+						try {
+							const writer = tmpFile as unknown as { write: (data: Uint8Array, opts?: unknown) => void };
+							if (typeof writer.write !== "function") throw new Error("File.write not available");
+							writer.write(bytes, { append: true });
+							console.info(`[lyra peer] appendChunk fallback ok ${input.transferId.slice(0,8)} len=${bytes.byteLength}`);
+						} catch (e2) {
+							console.error(`[lyra peer] appendChunk failed ${input.transferId.slice(0,8)} @${offset} len=${bytes.byteLength}: ${e2 instanceof Error ? e2.message : String(e2)}`);
+							throw new Error(`Disk append failed: ${e2 instanceof Error ? e2.message : String(e2)}`);
+						}
+					}
+				} else {
+					try {
+						const writer = tmpFile as unknown as { write: (data: Uint8Array, opts?: unknown) => void };
+						if (typeof writer.write !== "function") throw new Error("File.write not available — need expo-file-system with File API");
+						writer.write(bytes, { append: true });
+						console.info(`[lyra peer] appendChunk ${input.transferId.slice(0,8)} offset=${offset} len=${bytes.byteLength} ok`);
+					} catch (e) {
+						console.error(`[lyra peer] appendChunk failed ${input.transferId.slice(0,8)} @${offset} len=${bytes.byteLength}: ${e instanceof Error ? e.message : String(e)} — rebuild with expo-file-system File API`);
+						throw new Error(`Disk append failed: ${e instanceof Error ? e.message : String(e)} — update expo-file-system`);
+					}
 				}
 				received += bytes.byteLength;
 				(state as { receivedBytes: number }).receivedBytes = received;
 			},
 			finalizeDisk: async () => {
+				try { handle?.close(); } catch {}
+				handle = null;
 				let size = received;
 				try { size = tmpFile.info().size ?? received; } catch {}
 				return { filePath: tmpFile.uri, size, sha256: undefined };
 			},
 			cleanupDisk: async () => {
+				try { handle?.close(); } catch {}
+				handle = null;
 				try { tmpFile.delete(); } catch {}
 			},
 		};
@@ -230,9 +275,22 @@ export async function startNativePeerServer(
 		>((resolve) => {
 			let settled = false;
 			const srv = TcpSocket.createServer((socket: AnySocket) => {
-				const chunks: Uint8Array[] = [];
-				let totalBytes = 0;
+				// Use a doubling buffer to avoid O(n^2) concat per TCP packet (critical for 20MB+ transfers)
+				let buf = new Uint8Array(32 * 1024);
+				let len = 0;
+				let cap = buf.byteLength;
 				let handling = false;
+				const ensureCap = (needed: number) => {
+					if (needed <= cap) return;
+					let newCap = Math.max(cap * 2, needed);
+					// Cap growth to avoid runaway for malicious
+					newCap = Math.min(newCap, MAX_REQUEST_BYTES + 65536);
+					if (newCap < needed) newCap = needed;
+					const nb = new Uint8Array(newCap);
+					nb.set(buf.subarray(0, len), 0);
+					buf = nb;
+					cap = newCap;
+				};
 				// Once true, never touch the native socket again (write/destroy).
 				// react-native-tcp-socket crashes the app if write() hits a removed id:
 				// java.lang.IllegalArgumentException: No socket with id N
@@ -359,11 +417,12 @@ export async function startNativePeerServer(
 
 				const tryHandle = () => {
 					if (handling || done) return;
-					const buf = concatBytes(chunks);
+					if (len === 0) return;
+					const view = len === buf.byteLength ? buf : buf.subarray(0, len);
 					// Use raw parsing to preserve binary bodies for /lyra/transfer/*/chunk
-					const rawParsed = parseHttpRequestRaw(buf, MAX_REQUEST_BYTES);
+					const rawParsed = parseHttpRequestRaw(view, MAX_REQUEST_BYTES);
 					if (!rawParsed) {
-						if (totalBytes > MAX_REQUEST_BYTES) {
+						if (len > MAX_REQUEST_BYTES) {
 							respond(
 								buildHttpResponse(
 									400,
@@ -396,8 +455,24 @@ export async function startNativePeerServer(
 							})();
 
 					handling = true;
-					chunks.length = 0;
-					totalBytes = 0;
+					// Reset length for next pipelined request (if any) but keep capacity
+					// Socket is closed after one response (done flag), so this is mostly for cleanup
+					// Preserve any trailing bytes (pipelined) — though we close after response, keep logic
+					const remaining = len - rawParsed.consumed;
+					if (remaining > 0 && remaining < 64 * 1024) {
+						// Keep trailing bytes for potential next request (unlikely, but correct)
+						buf.copyWithin(0, rawParsed.consumed, len);
+						len = remaining;
+					} else if (remaining > 0) {
+						// Large remaining (should not happen for single-request sockets)
+						const nb = new Uint8Array(Math.max(remaining, 32 * 1024));
+						nb.set(view.subarray(rawParsed.consumed, len), 0);
+						buf = nb;
+						cap = buf.byteLength;
+						len = remaining;
+					} else {
+						len = 0;
+					}
 
 					// react-native-tcp-socket sets remoteAddress after connect
 					const remoteRaw =
@@ -474,10 +549,13 @@ export async function startNativePeerServer(
 						if (done || handling) return;
 						try {
 							const bytes = toUint8Array(data);
-							chunks.push(bytes);
-							totalBytes += bytes.byteLength;
+							if (bytes.byteLength === 0) return;
+							ensureCap(len + bytes.byteLength);
+							buf.set(bytes, len);
+							len += bytes.byteLength;
 							bumpIdle();
-							if (totalBytes > MAX_REQUEST_BYTES) {
+							if (len > MAX_REQUEST_BYTES) {
+								console.error(`[lyra peer] request too large ${len} bytes (max ${MAX_REQUEST_BYTES}) — rejecting`);
 								respond(
 									buildHttpResponse(
 										400,
@@ -486,6 +564,10 @@ export async function startNativePeerServer(
 									),
 								);
 								return;
+							}
+							// Lightweight progress log for large binary chunks
+							if (len > 1024 * 1024 && len % (4 * 1024 * 1024) < 16384) {
+								console.info(`[lyra peer] receiving ${len} bytes...`);
 							}
 							tryHandle();
 						} catch (e) {
@@ -521,7 +603,7 @@ export async function startNativePeerServer(
 				try {
 					socket.on("end", () => {
 						// Peer half-closed after sending body without Content-Length
-						if (!handling && !done && chunks.length > 0) {
+						if (!handling && !done && len > 0) {
 							tryHandle();
 						}
 						// If still nothing to handle, abandon

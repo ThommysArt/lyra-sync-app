@@ -436,6 +436,10 @@ export async function wireSendFiles(input: {
           return new Uint8Array(buf);
         }
         if (f.uri) {
+          // Persistent cache for normalized URIs per file index (avoid copying 20MB file per chunk)
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const normCache = (readSlice as unknown as { _normCache?: Map<number, string> })._normCache ?? new Map<number, string>();
+          (readSlice as unknown as { _normCache?: Map<number, string> })._normCache = normCache;
           // Verify file still exists (catches cache eviction) — fast path via modern File API (dynamic import to avoid bundling in desktop)
           try {
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -443,10 +447,11 @@ export async function wireSendFiles(input: {
             const FSNext = await loadFSProbe() as unknown as { File?: new (uri: string) => { exists: boolean; info: () => { exists: boolean; size?: number } | null; size?: number } };
             if (FSNext.File) {
               try {
-                const probe = new FSNext.File(f.uri!);
+                const probeU = normCache.get(idx) ?? f.uri!;
+                const probe = new FSNext.File(probeU);
                 // Prefer info() if available
                 const info = (probe as unknown as { info?: () => { exists: boolean; size?: number } }).info?.() ?? null;
-                if (info && !info.exists) throw new Error(`File not found at ${f.uri?.slice(0, 60)} (evicted from cache). Re-pick file.`);
+                if (info && !info.exists) throw new Error(`File not found at ${probeU.slice(0, 60)} (evicted from cache). Re-pick file.`);
                 // Also check size for EOF
                 const sz = (info?.size ?? (probe as unknown as { size?: number }).size) as number | undefined;
                 if (typeof sz === "number" && offset >= sz) return new Uint8Array(0);
@@ -457,8 +462,8 @@ export async function wireSendFiles(input: {
           // For DocumentPicker files, ensure we have a stable copy in cache that File API can read reliably.
           // Some Android content:// or file:// URIs from DocumentPicker are not directly accessible via File.slice on all OS versions.
           // We try to normalize the uri by copying to a temp File if needed (once per file).
-          let normalizedUri = f.uri!;
-          let didNormalize = false;
+          let normalizedUri = normCache.get(idx) ?? f.uri!;
+          let didNormalize = normCache.has(idx);
           const tryNormalizeUri = async (): Promise<string> => {
             if (didNormalize) return normalizedUri;
             didNormalize = true;
@@ -487,6 +492,9 @@ export async function wireSendFiles(input: {
                   if (dest.exists) {
                     console.info(`[lyra transfer] normalized ${f.name} ${f.uri?.slice(0,50)} -> ${dest.uri.slice(0,50)}`);
                     normalizedUri = dest.uri;
+                    normCache.set(idx, normalizedUri);
+                    // Update original file entry so future chunks use normalized path directly
+                    f.uri = normalizedUri;
                     return normalizedUri;
                   }
                 } catch (e) {
@@ -526,7 +534,10 @@ export async function wireSendFiles(input: {
                         if (typeof handle.offset === "number") handle.offset = offset;
                         const bytes = handle.readBytes(len);
                         if (bytes.byteLength > 0) {
-                          if (uriToUse !== f.uri) f.uri = uriToUse; // remember normalized for next chunks
+                          if (uriToUse !== f.uri) {
+                            f.uri = uriToUse;
+                            normCache.set(idx, uriToUse);
+                          }
                           return bytes;
                         }
                         if (bytes.byteLength === 0 && len > 0) lastErr = new Error("readBytes returned 0 bytes");
@@ -544,7 +555,10 @@ export async function wireSendFiles(input: {
                     if (sliced?.arrayBuffer) {
                       const ab = await sliced.arrayBuffer();
                       if (ab.byteLength > 0) {
-                        if (uriToUse !== f.uri) f.uri = uriToUse;
+                        if (uriToUse !== f.uri) {
+                          f.uri = uriToUse;
+                          normCache.set(idx, uriToUse);
+                        }
                         return new Uint8Array(ab);
                       }
                       if (ab.byteLength === 0 && len > 0) lastErr = new Error("slice returned 0 bytes");
@@ -553,18 +567,24 @@ export async function wireSendFiles(input: {
                     lastErr = e;
                     console.warn(`[lyra transfer] File.slice failed ${f.name} @${offset}:${len} attempt ${attempt + 1} uri=${uriToUse.slice(0,40)}`, e instanceof Error ? e.message : String(e));
                   }
-                  // Try bytes() for files <50MB (whole file then slice)
-                  if ((f.size ?? 0) < 50 * 1024 * 1024) {
+                  // Try bytes() ONLY for small files <5MB (otherwise OOM when loading whole 20MB+ file per chunk)
+                  if ((f.size ?? 0) < 5 * 1024 * 1024) {
                     try {
                       const all = await fileObj.bytes() as Uint8Array;
                       if (all.byteLength > offset) {
-                        if (uriToUse !== f.uri) f.uri = uriToUse;
+                        if (uriToUse !== f.uri) {
+                          f.uri = uriToUse;
+                          normCache.set(idx, uriToUse);
+                        }
                         return all.subarray(offset, Math.min(all.byteLength, offset + len));
                       }
                     } catch (e) {
                       lastErr = e;
                       console.warn(`[lyra transfer] File.bytes fallback failed ${f.name} @${offset}:${len} attempt ${attempt+1}`, e instanceof Error ? e.message : String(e));
                     }
+                  } else if (attempt === 0) {
+                    lastErr = new Error("File.bytes skipped for large file (>5MB) — will try normalize copy instead of loading whole file");
+                    console.warn(`[lyra transfer] skip File.bytes for large file ${f.name} size=${f.size} attempt ${attempt+1} — trying normalize`);
                   }
                 }
               }
@@ -572,8 +592,8 @@ export async function wireSendFiles(input: {
               lastErr = e;
               console.warn(`[lyra transfer] File API overall failed ${f.name} attempt ${attempt+1}`, e instanceof Error ? e.message : String(e));
             }
-            // 2) Fallback: fetch (works for file:// on Android via React Native fetch) for <100MB
-            if ((f.size ?? 0) < 100 * 1024 * 1024) {
+            // 2) Fallback: fetch (works for file:// on Android via React Native fetch) — ONLY for small files <5MB to avoid OOM
+            if ((f.size ?? 0) < 5 * 1024 * 1024) {
               try {
                 const res = await fetch(uriToUse);
                 if (res.ok) {
@@ -591,9 +611,11 @@ export async function wireSendFiles(input: {
                 lastErr = e;
                 console.warn(`[lyra transfer] fetch fallback failed ${f.name} @${offset}:${len} attempt ${attempt+1} uri=${uriToUse.slice(0,40)}`, e instanceof Error ? e.message : String(e));
               }
+            } else if (attempt === 0) {
+              console.warn(`[lyra transfer] skip fetch fallback for large file ${f.name} size=${f.size} — will try normalize`);
             }
-            // 3) Last resort: legacy readAsStringAsync without position (read whole file as base64) for <50MB
-            if ((f.size ?? 0) < 50 * 1024 * 1024) {
+            // 3) Last resort: legacy readAsStringAsync without position (read whole file as base64) — ONLY for <5MB
+            if ((f.size ?? 0) < 5 * 1024 * 1024) {
               try {
                 const loadLegacy = new Function('return import("expo-file-system/legacy")') as () => Promise<any>;
                 const FS = await loadLegacy() as { readAsStringAsync: (uri: string, opts: unknown) => Promise<string>; EncodingType: { Base64: string }; getInfoAsync: (uri: string) => Promise<{ exists: boolean; size?: number }> };
@@ -613,6 +635,8 @@ export async function wireSendFiles(input: {
                 lastErr = e;
                 console.warn(`[lyra transfer] legacy fallback failed ${f.name} attempt ${attempt+1}`, e instanceof Error ? e.message : String(e));
               }
+            } else if (attempt === 0) {
+              console.warn(`[lyra transfer] skip legacy fallback for large file ${f.name} — will try normalize copy`);
             }
             if (attempt < 2) await new Promise((r) => setTimeout(r, 250 * (attempt + 1)));
           }

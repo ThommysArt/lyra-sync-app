@@ -22,6 +22,31 @@ function hasSubtleSync(): boolean {
     return typeof globalThis.crypto?.subtle?.importKey === "function";
   } catch { return false; }
 }
+
+function isReactNative(): boolean {
+  try {
+    const g = globalThis as unknown as { navigator?: { product?: string; userAgent?: string }; Platform?: { OS?: string } };
+    if (g.navigator?.product === "ReactNative") return true;
+    if (typeof g.navigator?.userAgent === "string" && /Android|iPhone|iPad|ReactNative/i.test(g.navigator.userAgent)) return true;
+    // Expo / RN global
+    if ((globalThis as unknown as { expo?: unknown }).expo) return true;
+    if (typeof (globalThis as unknown as { Platform?: { OS?: string } }).Platform?.OS === "string") {
+      const os = (globalThis as unknown as { Platform: { OS: string } }).Platform.OS;
+      if (os === "android" || os === "ios") return true;
+    }
+  } catch {}
+  return false;
+}
+
+function isMobileLowRam(): boolean {
+  // React Native bridge is sensitive to large bridge payloads; patch later to use smaller chunks
+  if (isReactNative()) return true;
+  const ram = estimateAvailableRam();
+  if (ram !== undefined && ram < 1024 * 1024 * 1024) return true;
+  return false;
+}
+// Keep helper referenced to avoid unused error (used via adaptiveWindowSize branching)
+void isMobileLowRam;
 export function adaptiveChunkSize(opts: {
   totalBytes: number;
   availableRamHint?: number;
@@ -30,6 +55,13 @@ export function adaptiveChunkSize(opts: {
 }): number {
   if (opts.preferred && opts.preferred >= MIN_CHUNK_SIZE && opts.preferred <= MAX_CHUNK_SIZE) {
     return opts.preferred;
+  }
+  // Mobile / RN: keep bridge payloads small to avoid TransactionTooLarge and JS heap OOM
+  if (isReactNative()) {
+    if (opts.availableRamHint && opts.availableRamHint < 400 * 1024 * 1024) return 256 * 1024;
+    if (opts.rttMsHint && opts.rttMsHint > 120) return 256 * 1024;
+    if (opts.totalBytes >= 50 * 1024 * 1024) return 512 * 1024;
+    return 512 * 1024;
   }
   if (opts.availableRamHint && opts.availableRamHint < 400 * 1024 * 1024) return 512 * 1024;
   if (opts.rttMsHint && opts.rttMsHint > 120) return 512 * 1024;
@@ -46,6 +78,17 @@ function estimateAvailableRam(): number | undefined {
     if (nav?.deviceMemory) return nav.deviceMemory * 1024 * 1024 * 1024;
   } catch {}
   return undefined;
+}
+
+export function adaptiveWindowSize(opts: { totalBytes?: number; chunkSize?: number }): number {
+  if (isReactNative()) {
+    // Conservative concurrency on mobile: bridge + disk I/O bound, not CPU
+    const total = opts.totalBytes ?? 0;
+    if (total >= 100 * 1024 * 1024) return 3;
+    if (total >= 20 * 1024 * 1024) return 3;
+    return 3;
+  }
+  return hasSubtleSync() ? 8 : 4;
 }
 
 export function bytesToBase64(bytes: Uint8Array): string {
@@ -210,8 +253,9 @@ export async function sendFilesOverWire(
     rttMsHint: input.rttMsHint,
     preferred: input.chunkSize,
   });
-  const defaultWindow = hasSubtleSync() ? 8 : 4;
+  const defaultWindow = adaptiveWindowSize({ totalBytes, chunkSize });
   const windowSize = Math.max(1, Math.min(16, input.windowSize ?? defaultWindow));
+  console.info(`[lyra transfer] start ${input.transferId.slice(0,8)} total=${(totalBytes/1024/1024).toFixed(1)}MB chunk=${(chunkSize/1024).toFixed(0)}KB window=${windowSize} mobile=${isReactNative()} resume=${resumeOffset}`);
 
   const offerFiles: TransferFile[] = input.files.map((f) => ({
     name: f.name,

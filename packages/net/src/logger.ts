@@ -35,6 +35,72 @@ function fmt(level: LogLevel, ns: string, msg: string, fields?: Record<string, u
   return JSON.stringify(rec);
 }
 
+let persistentLogQueue: string[] = [];
+let persistentLogFlushing = false;
+async function flushPersistentLog() {
+  if (persistentLogFlushing) return;
+  persistentLogFlushing = true;
+  try {
+    // Lazy import via dynamic Function to avoid TS module resolution for native-only dep (keep net leaf)
+    let mod: unknown = null;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-implied-eval
+      mod = await (new Function('return import("expo-file-system")') as () => Promise<unknown>)().catch(() => null);
+    } catch { mod = null; }
+    const FileCls = (mod as unknown as { File?: new (...a: unknown[]) => { write: (c: string, o?: unknown) => void; exists: boolean; create: (o?: unknown) => void; uri: string } } | null)?.File;
+    const PathsMod = (mod as unknown as { Paths?: { cache?: { uri: string } } } | null)?.Paths;
+    if (!FileCls || !PathsMod?.cache) {
+      persistentLogQueue = [];
+      return;
+    }
+    if (persistentLogQueue.length === 0) return;
+    const lines = persistentLogQueue.splice(0, 100).join("\n") + "\n";
+    try {
+      const logFile = new FileCls(PathsMod.cache, "lyra-debug.log");
+      if (!logFile.exists) logFile.create({ intermediates: true } as unknown as never);
+      // Check size and rotate if >2MB
+      try {
+        const info = (logFile as unknown as { info: () => { size?: number } }).info();
+        if ((info.size ?? 0) > 2 * 1024 * 1024) {
+          // Rotate: delete and recreate
+          try { (logFile as unknown as { delete: () => void }).delete(); } catch {}
+          logFile.create({ intermediates: true } as unknown as never);
+        }
+      } catch {}
+      // Append
+      try {
+        (logFile as unknown as { write: (c: string, o?: unknown) => void }).write(lines, { append: true });
+      } catch {
+        // Fallback: try legacy (also via Function)
+        try {
+          let legacy: unknown = null;
+          try {
+            legacy = await (new Function('return import("expo-file-system/legacy")') as () => Promise<unknown>)().catch(() => null);
+          } catch { legacy = null; }
+          const LS = legacy as unknown as { writeAsStringAsync?: (uri: string, s: string, o: unknown) => Promise<void>; EncodingType?: { UTF8: string }; getInfoAsync?: (uri: string) => Promise<{ exists: boolean }> } | null;
+          if (LS?.writeAsStringAsync && (logFile as unknown as { uri?: string }).uri) {
+            // We can't append via legacy easily; just ignore
+          }
+        } catch {}
+      }
+    } catch {}
+    if (persistentLogQueue.length > 0) {
+      // More queued while we were flushing
+      setTimeout(() => void flushPersistentLog(), 100);
+    }
+  } finally {
+    persistentLogFlushing = false;
+  }
+}
+
+function isReactNativeEnv(): boolean {
+  try {
+    const g = globalThis as unknown as { navigator?: { product?: string } };
+    if (g.navigator?.product === "ReactNative") return true;
+  } catch {}
+  return false;
+}
+
 function emit(level: LogLevel, ns: string, msg: string, fields?: Record<string, unknown>) {
   if (!shouldLog(level)) return;
   const line = fmt(level, ns, msg, fields);
@@ -43,6 +109,21 @@ function emit(level: LogLevel, ns: string, msg: string, fields?: Record<string, 
   } else {
     console.log(line);
   }
+  // Persist to file on mobile for post-crash diagnostics (20MB+ crash leaves no logcat)
+  if (isReactNativeEnv()) {
+    persistentLogQueue.push(line);
+    if (persistentLogQueue.length >= 5 || level === "error" || level === "warn") {
+      void flushPersistentLog();
+    } else if (persistentLogQueue.length === 1) {
+      setTimeout(() => void flushPersistentLog(), 800);
+    }
+  }
+  // Also forward to Electron main log when available (desktop)
+  try {
+    const g = globalThis as unknown as { window?: { lyraDesktop?: { log?: (l: string, n: string, m: string, d?: unknown) => Promise<unknown> } }; lyraDesktop?: { log?: (l: string, n: string, m: string, d?: unknown) => Promise<unknown> } };
+    const fn = g.window?.lyraDesktop?.log ?? g.lyraDesktop?.log;
+    if (fn) void fn(level, ns, msg, fields);
+  } catch {}
 }
 
 export function createLogger(ns: string) {
