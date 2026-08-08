@@ -120,12 +120,25 @@ async function postJson<T = unknown>(
         data && typeof data === "object" && data !== null && "error" in data
           ? String((data as { error: unknown }).error)
           : `HTTP ${res.status}`;
-      forwardLog("error", "lyra net", `POST ${url} -> HTTP ${res.status}: ${err}`, { url, status: res.status, error: err });
+      const isProbe = init?.lane === 2 || url.includes("/lyra/info");
+      if (isProbe) {
+        if (typeof console.debug === "function") console.debug(`[lyra net] POST ${url} -> HTTP ${res.status}: ${err}`);
+      } else {
+        forwardLog("error", "lyra net", `POST ${url} -> HTTP ${res.status}: ${err}`, { url, status: res.status, error: err });
+      }
       return { ok: false, error: err, status: res.status };
     }
     return { ok: true, data: data as T, status: res.status };
   } catch (e) {
-    forwardLog("error", "lyra net", `POST ${url} failed: ${e instanceof Error ? e.message : String(e)}`, { url, error: e instanceof Error ? e.message : String(e) });
+    const isProbe = init?.lane === 2 || url.includes("/lyra/info");
+    const msg = e instanceof Error ? e.message : String(e);
+    const isCanceled = /canceled|cancelled|abort/i.test(msg);
+    if (isProbe) {
+      // Discovery probes fail for most hosts — don't spam error logs
+      if (!isCanceled && typeof console.debug === "function") console.debug(`[lyra net] POST ${url} failed: ${msg}`);
+    } else {
+      forwardLog("error", "lyra net", `POST ${url} failed: ${msg}`, { url, error: msg });
+    }
     return {
       ok: false,
       error: formatNetworkError(e, url),
@@ -155,12 +168,24 @@ async function getJson<T = unknown>(
       data = { raw: text };
     }
     if (!res.ok) {
-      forwardLog("error", "lyra net", `GET ${url} -> HTTP ${res.status}`, { url, status: res.status });
+      const isProbe = init?.lane === 2 || url.includes("/lyra/info");
+      if (isProbe) {
+        if (typeof console.debug === "function") console.debug(`[lyra net] GET ${url} -> HTTP ${res.status}`);
+      } else {
+        forwardLog("error", "lyra net", `GET ${url} -> HTTP ${res.status}`, { url, status: res.status });
+      }
       return { ok: false, error: `HTTP ${res.status} (url: ${url})`, status: res.status };
     }
     return { ok: true, data: data as T, status: res.status };
   } catch (e) {
-    forwardLog("error", "lyra net", `GET ${url} failed: ${e instanceof Error ? e.message : String(e)}`, { url, error: e instanceof Error ? e.message : String(e) });
+    const isProbe = init?.lane === 2 || url.includes("/lyra/info");
+    const msg = e instanceof Error ? e.message : String(e);
+    const isCanceled = /canceled|cancelled|abort/i.test(msg);
+    if (isProbe) {
+      if (!isCanceled && typeof console.debug === "function") console.debug(`[lyra net] GET ${url} failed: ${msg}`);
+    } else {
+      forwardLog("error", "lyra net", `GET ${url} failed: ${msg}`, { url, error: msg });
+    }
     return {
       ok: false,
       error: formatNetworkError(e, url),
@@ -174,8 +199,14 @@ export function formatNetworkError(e: unknown, url?: string): string {
   const raw = e instanceof Error ? e.message : String(e);
   const name = e instanceof Error ? e.name : "";
   const urlSuffix = url ? ` (url: ${url})` : "";
-  // Log to terminal/devtools with full context
-  forwardLog("error", "lyra net", `network error${urlSuffix}: ${raw}`, { url, error: raw, name, stack: e instanceof Error ? e.stack?.slice(0,500) : undefined });
+  const isProbe = url?.includes("/lyra/info");
+  const isCanceled = /canceled|cancelled|abort/i.test(raw);
+  // For discovery probes, don't spam error logs — caller handles summary
+  if (isProbe) {
+    if (!isCanceled && typeof console.debug === "function") console.debug(`[lyra net] network error${urlSuffix}: ${raw}`);
+  } else {
+    forwardLog("error", "lyra net", `network error${urlSuffix}: ${raw}`, { url, error: raw, name, stack: e instanceof Error ? e.stack?.slice(0,500) : undefined });
+  }
   if (/CLEARTEXT|cleartext|UnknownServiceException/i.test(raw)) {
     return (
       "Cleartext HTTP blocked by the OS network policy. " +

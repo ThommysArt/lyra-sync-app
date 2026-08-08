@@ -126,6 +126,19 @@ export async function fetchAsTransport(
       res = await fetch(url, fetchOpts as RequestInit);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+      const isProbe = init?.lane === 2 || (url.includes("/lyra/info") && init?.method !== "POST");
+      const isCanceled = /canceled|cancelled|abort/i.test(msg);
+      // Discovery probes are expected to fail for most hosts in /24 — don't spam logs
+      if (isProbe && isCanceled) {
+        // Silent for probe cancel — caller will handle summary
+        throw e;
+      }
+      if (isProbe) {
+        // For probe GETs, log at debug level only (throttled)
+        // Use console.debug to avoid WS HMR flood, and don't forward to main
+        if (typeof console.debug === "function") console.debug(`[lyra http] probe failed ${init?.method ?? "GET"} ${url}: ${msg}`);
+        throw e;
+      }
       forwardLog("error", "lyra http", `fetch failed ${init?.method ?? "GET"} ${url}: ${msg}`, { url, method: init?.method, error: msg, stack: e instanceof Error ? e.stack?.slice(0,500) : undefined });
       throw e;
     }
