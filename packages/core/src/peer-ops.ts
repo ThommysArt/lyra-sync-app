@@ -27,72 +27,21 @@ import type {
   ScreenShareAcceptPayload,
 } from "@lyra-sync-app/protocol";
 import { LYRA_DEFAULT_PORT } from "@lyra-sync-app/protocol";
+import type { LyraConnectionManager } from "@lyra-sync-app/net";
 
-// Safe loader for expo-file-system: Hermes does not support `new Function('return import(...)')` (throws 1:21:Invalid expression)
-// Try require first (works on RN/Hermes), then dynamic import
-async function loadExpoFS(): Promise<any> {
-  try {
-    const gReq = (globalThis as unknown as { require?: (id: string) => unknown }).require;
-    if (typeof gReq === "function") {
-      try {
-        const mod = gReq("expo-file-system");
-        if (mod) return mod;
-      } catch {}
-    }
-  } catch {}
-  try {
-    // Use Function with require to avoid static bundling for web
-    const reqFn = new Function('return typeof require !== "undefined" ? require : null') as () => ((id: string) => unknown) | null;
-    const req2 = reqFn();
-    if (typeof req2 === "function") {
-      try {
-        const mod = req2("expo-file-system");
-        if (mod) return mod;
-      } catch {}
-    }
-  } catch {}
-  try {
-    const mod = await (new Function('return import("expo-file-system")') as () => Promise<any>)();
-    if (mod) return mod;
-  } catch {}
-  try {
-    // @ts-ignore direct import as fallback (may be bundled on web and fail at runtime, caught)
-    const mod = await import("expo-file-system");
-    return mod;
-  } catch {}
-  return null;
+let globalConnectionManager: LyraConnectionManager | null = null;
+export function setGlobalConnectionManager(m: LyraConnectionManager | null): void {
+  globalConnectionManager = m;
 }
-async function loadExpoFSLegacy(): Promise<any> {
-  try {
-    const gReq = (globalThis as unknown as { require?: (id: string) => unknown }).require;
-    if (typeof gReq === "function") {
-      try {
-        const mod = gReq("expo-file-system/legacy");
-        if (mod) return mod;
-      } catch {}
-    }
-  } catch {}
-  try {
-    const reqFn = new Function('return typeof require !== "undefined" ? require : null') as () => ((id: string) => unknown) | null;
-    const req2 = reqFn();
-    if (typeof req2 === "function") {
-      try {
-        const mod = req2("expo-file-system/legacy");
-        if (mod) return mod;
-      } catch {}
-    }
-  } catch {}
-  try {
-    const mod = await (new Function('return import("expo-file-system/legacy")') as () => Promise<any>)();
-    if (mod) return mod;
-  } catch {}
-  try {
-    // @ts-ignore
-    const mod = await import("expo-file-system/legacy");
-    return mod;
-  } catch {}
-  return null;
+export function getGlobalConnectionManager(): LyraConnectionManager | null {
+  return globalConnectionManager;
 }
+
+// File reading is now platform-isolated via @lyra-sync-app/fs
+// web → File.slice, native → expo-file-system with held handle and stable cache copy
+// This keeps web builds free of native deps and Hermes-safe on native.
+async function loadExpoFS(): Promise<null> { return null; }
+async function loadExpoFSLegacy(): Promise<null> { return null; }
 
 /** Pick LAN vs Tailscale host based on preferredAddress / availability. */
 export function resolveDeviceHost(
@@ -278,6 +227,13 @@ export async function ensureSession(input: {
   identity: DeviceIdentity;
   privateKey: string;
 }): Promise<{ ok: true; sessionToken: string; endpoint: PeerUrl } | { ok: false; error: string }> {
+  // Prefer sticky manager (health-checked, backoff-aware) when available
+  if (globalConnectionManager) {
+    try {
+      const mRes = await globalConnectionManager.ensureConnection(input.device);
+      if (mRes.ok) return { ok: true, sessionToken: mRes.sessionToken, endpoint: mRes.endpoint };
+    } catch {}
+  }
   const candidates = deviceEndpointCandidates(input.device);
   if (candidates.length === 0) return { ok: false, error: "Peer has no host" };
 
@@ -488,7 +444,23 @@ export async function wireSendFiles(input: {
   if (!session.ok) return session;
 
   // Build streaming reader if not provided but file/uri present
+  // Platform-isolated reader: web uses File.slice, native uses held FileHandle + stable cache
   let readSlice = input.readFileSlice;
+  if (!readSlice) {
+    const needsStreamingEarly = input.files.some((f) => !f.bytes && (f.uri || f.file));
+    if (needsStreamingEarly) {
+      try {
+        const mod = await import("@lyra-sync-app/fs/fileReader");
+        const factory = (mod as unknown as { createReadSlice?: (files: unknown[]) => typeof readSlice }).createReadSlice;
+        if (factory) {
+          const candidate = factory(input.files as unknown as never);
+          if (candidate) readSlice = candidate;
+        }
+      } catch (e) {
+        console.warn("[lyra transfer] platform fileReader not available, falling back to inline", e instanceof Error ? e.message : String(e));
+      }
+    }
+  }
   if (!readSlice) {
     const needsStreaming = input.files.some((f) => !f.bytes && (f.uri || f.file));
     if (needsStreaming) {
@@ -508,8 +480,8 @@ export async function wireSendFiles(input: {
           (readSlice as unknown as { _normCache?: Map<number, string> })._normCache = normCache;
           // Verify file still exists (catches cache eviction) — fast path via modern File API
           try {
-            const FSNext = await loadExpoFS() as unknown as { File?: new (uri: string) => { exists: boolean; info: () => { exists: boolean; size?: number } | null; size?: number } };
-            if (FSNext.File) {
+            const FSNext = await loadExpoFS() as unknown as { File?: new (uri: string) => { exists: boolean; info: () => { exists: boolean; size?: number } | null; size?: number } } | null;
+            if (FSNext?.File) {
               try {
                 const probeU = normCache.get(idx) ?? f.uri!;
                 const probe = new FSNext.File(probeU);
@@ -532,11 +504,12 @@ export async function wireSendFiles(input: {
             if (didNormalize) return normalizedUri;
             didNormalize = true;
             try {
-              const modN = await loadExpoFS();
-              const FileClsN = modN.File;
-              const PathsN = modN.Paths;
+              const modN = await loadExpoFS() as unknown as { File?: unknown; Paths?: { cache?: unknown } } | null;
+              const FileClsN = (modN as unknown as { File?: unknown })?.File as unknown as any;
+              const PathsN = (modN as unknown as { Paths?: { cache?: unknown } })?.Paths as unknown as any;
               if (FileClsN && PathsN?.cache) {
-                const src = new FileClsN(f.uri!);
+                // @ts-ignore — File may take (uri) or (Directory, name)
+                const src: any = new FileClsN(f.uri!);
                 if (!src.exists) {
                   console.warn(`[lyra transfer] normalize: src not exists ${f.uri?.slice(0,60)}`);
                   return normalizedUri;
@@ -549,13 +522,14 @@ export async function wireSendFiles(input: {
                 // Copy to a temp file with proper name in cache for reliable reading
                 try {
                   const safeName = f.name.replace(/[^\w.\-]/g, "_") || `tmp_${Date.now()}`;
-                  const dest = new FileClsN(PathsN.cache, `lyra-send-${Date.now()}-${safeName}`);
+                  // @ts-ignore — File may take (Directory, name)
+                  const dest: any = new FileClsN(PathsN.cache, `lyra-send-${Date.now()}-${safeName}`);
                   // Ensure parent exists
                   try { dest.create({ overwrite: true }); } catch {}
-                  await src.copy(dest);
-                  if (dest.exists) {
-                    console.info(`[lyra transfer] normalized ${f.name} ${f.uri?.slice(0,50)} -> ${dest.uri.slice(0,50)}`);
-                    normalizedUri = dest.uri;
+                  await (src as any).copy(dest);
+                  if ((dest as any).exists) {
+                    console.info(`[lyra transfer] normalized ${f.name} ${f.uri?.slice(0,50)} -> ${(dest as any).uri.slice(0,50)}`);
+                    normalizedUri = (dest as any).uri;
                     normCache.set(idx, normalizedUri);
                     // Update original file entry so future chunks use normalized path directly
                     f.uri = normalizedUri;
@@ -581,8 +555,8 @@ export async function wireSendFiles(input: {
                   bytes: () => Promise<Uint8Array>;
                 };
                 FileMode?: { ReadOnly: string };
-              };
-              const FileCls = mod.File;
+              } | null;
+              const FileCls = mod?.File;
               if (FileCls) {
                 const fileObj = new FileCls(uriToUse);
                 if (!fileObj.exists) {
@@ -677,28 +651,51 @@ export async function wireSendFiles(input: {
             } else if (attempt === 0) {
               console.warn(`[lyra transfer] skip fetch fallback for large file ${f.name} size=${f.size} — will try normalize`);
             }
-            // 3) Last resort: legacy readAsStringAsync without position (read whole file as base64) — ONLY for <5MB
-            if ((f.size ?? 0) < 5 * 1024 * 1024) {
-              try {
-                const FS = await loadExpoFSLegacy() as { readAsStringAsync: (uri: string, opts: unknown) => Promise<string>; EncodingType: { Base64: string }; getInfoAsync: (uri: string) => Promise<{ exists: boolean; size?: number }> };
+            // 3) Legacy fallback: try position/length first (works for large files without OOM), then whole-file for <5MB
+            try {
+              const FS = await loadExpoFSLegacy() as unknown as { readAsStringAsync: (uri: string, opts: unknown) => Promise<string>; EncodingType: { Base64: string }; getInfoAsync: (uri: string) => Promise<{ exists: boolean; size?: number }> } | null;
+              if (FS?.readAsStringAsync) {
                 const info = await FS.getInfoAsync(uriToUse).catch(() => ({ exists: false }));
                 if (!info.exists) {
                   lastErr = new Error(`legacy getInfo not exists ${uriToUse.slice(0,50)}`);
                 } else {
-                  const b64 = await FS.readAsStringAsync(uriToUse, { encoding: FS.EncodingType.Base64 });
-                  const bin = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
-                  if (bin.byteLength > offset) {
-                    if (uriToUse !== f.uri) f.uri = uriToUse;
-                    console.info(`[lyra transfer] legacy whole-file fallback succeeded ${f.name} bytes=${bin.byteLength}`);
-                    return bin.subarray(offset, Math.min(bin.byteLength, offset + len));
+                  // Try chunked read with position/length (avoids OOM for large files)
+                  try {
+                    const b64Chunk = await FS.readAsStringAsync(uriToUse, { encoding: FS.EncodingType.Base64, position: offset, length: len });
+                    if (b64Chunk) {
+                      const bin = Uint8Array.from(atob(b64Chunk), c => c.charCodeAt(0));
+                      if (bin.byteLength > 0) {
+                        if (uriToUse !== f.uri) f.uri = uriToUse;
+                        console.info(`[lyra transfer] legacy chunked fallback succeeded ${f.name} @${offset}:${len} bytes=${bin.byteLength}`);
+                        return bin.subarray(0, Math.min(bin.byteLength, len));
+                      }
+                    }
+                  } catch (e) {
+                    // position/length not supported on this FS version — fallback to whole file for <5MB
+                    if ((f.size ?? 0) < 5 * 1024 * 1024) {
+                      try {
+                        const b64 = await FS.readAsStringAsync(uriToUse, { encoding: FS.EncodingType.Base64 });
+                        const bin = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+                        if (bin.byteLength > offset) {
+                          if (uriToUse !== f.uri) f.uri = uriToUse;
+                          console.info(`[lyra transfer] legacy whole-file fallback succeeded ${f.name} bytes=${bin.byteLength}`);
+                          return bin.subarray(offset, Math.min(bin.byteLength, offset + len));
+                        }
+                      } catch (e2) {
+                        lastErr = e2;
+                      }
+                    } else {
+                      lastErr = e;
+                    }
                   }
                 }
-              } catch (e) {
-                lastErr = e;
-                console.warn(`[lyra transfer] legacy fallback failed ${f.name} attempt ${attempt+1}`, e instanceof Error ? e.message : String(e));
               }
-            } else if (attempt === 0) {
-              console.warn(`[lyra transfer] skip legacy fallback for large file ${f.name} — will try normalize copy`);
+            } catch (e) {
+              lastErr = e;
+              console.warn(`[lyra transfer] legacy fallback failed ${f.name} attempt ${attempt+1}`, e instanceof Error ? e.message : String(e));
+            }
+            if ((f.size ?? 0) >= 5 * 1024 * 1024 && attempt === 0) {
+              console.warn(`[lyra transfer] large file ${f.name} File API failed — legacy chunked fallback will be retried after normalize`);
             }
             if (attempt < 2) await new Promise((r) => setTimeout(r, 250 * (attempt + 1)));
           }

@@ -11,9 +11,10 @@
   },
   "scripts": {
     "check-types": "tsc --noEmit",
-    "test": "tsx --test src/store.test.ts src/screen-frames.test.ts"
+    "test": "tsx --test src/store.test.ts src/screen-frames.test.ts src/comprehensive.test.ts src/large-file-fallback.test.ts"
   },
   "dependencies": {
+    "@lyra-sync-app/fs": "workspace:*",
     "@lyra-sync-app/net": "workspace:*",
     "@lyra-sync-app/protocol": "workspace:*",
     "zod": "catalog:"

@@ -10,6 +10,10 @@ export * from "./message-handlers";
 export * from "./peer-http-core";
 export * from "./httpCodec";
 export * from "./transport/priorityQueue";
+export * from "./transport/unifiedTransport";
+export * from "./connection/connectionManager";
+export * from "./discovery/unifiedDiscovery";
+export * from "./transfer/transferEngine";
 export * from "./logger";
 export {
   setHttpTransport,
