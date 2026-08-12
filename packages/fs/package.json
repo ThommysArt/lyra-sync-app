@@ -1,0 +1,28 @@
+{
+  "name": "@lyra-sync-app/fs",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "react-native": "src/index.native.ts",
+  "exports": {
+    ".": {
+      "react-native": "./src/index.native.ts",
+      "default": "./src/index.ts"
+    },
+    "./fileReader": {
+      "react-native": "./src/fileReader.native.ts",
+      "default": "./src/fileReader.web.ts"
+    }
+  },
+  "scripts": {
+    "check-types": "tsc --noEmit"
+  },
+  "dependencies": {
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@lyra-sync-app/config": "workspace:*",
+    "typescript": "^6"
+  }
+}

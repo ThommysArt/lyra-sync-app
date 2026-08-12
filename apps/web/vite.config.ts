@@ -14,6 +14,13 @@ export default defineConfig({
   ssr: {
     external: ["undici"],
   },
+  // After platform split (fs/fileReader.web vs .native, logger web vs native) web no longer imports expo/react-native.
+  // Keep undici external (Node-only for desktop peer server).
+  build: {
+    rollupOptions: {
+      external: (id) => id === "undici",
+    },
+  },
   server: {
     // Listen on 0.0.0.0 so LAN / Tailscale can reach the UI (same as `vite --host`).
     host: true,

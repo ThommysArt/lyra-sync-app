@@ -80,13 +80,11 @@ function estimateAvailableRam(): number | undefined {
   return undefined;
 }
 
-export function adaptiveWindowSize(opts: { totalBytes?: number; chunkSize?: number }): number {
+export function adaptiveWindowSize(_opts: { totalBytes?: number; chunkSize?: number }): number {
   if (isReactNative()) {
-    // Conservative concurrency on mobile: bridge + disk I/O bound, not CPU
-    const total = opts.totalBytes ?? 0;
-    if (total >= 100 * 1024 * 1024) return 3;
-    if (total >= 20 * 1024 * 1024) return 3;
-    return 3;
+    // v2: 4 concurrent chunks × 512 KiB = 2 MiB in-flight; at 30 ms RTT → 66 MB/s theoretical,
+    // comfortably above 3 MB/s SLA even on congested Wi-Fi. Previously 3 was too conservative.
+    return 4;
   }
   return hasSubtleSync() ? 8 : 4;
 }

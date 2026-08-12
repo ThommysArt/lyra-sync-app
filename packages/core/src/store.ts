@@ -5,10 +5,12 @@ import {
   expandLanCandidates,
   findPeerByPairingCode,
   isLikelyTailscaleHost,
+  LyraConnectionManager,
   probePeer,
   scanLanForPeers,
   type ProbeResult,
 } from "@lyra-sync-app/net";
+import { setGlobalConnectionManager } from "./peer-ops";
 import type {
   AppSettings,
   ClipboardItem,
@@ -974,6 +976,54 @@ export function createLyraStore(options?: {
     cancel: (transferId: string) => boolean;
   } | null = null;
 
+  /** Unified connection manager — sticky, health-checked, backoff-aware */
+  let connectionManager: LyraConnectionManager | null = null;
+  const ensureConnectionManager = (): LyraConnectionManager | null => {
+    if (connectionManager) return connectionManager;
+    if (!state.identity || !state.privateKey) return null;
+    const mgr = new LyraConnectionManager({
+      identity: state.identity,
+      privateKey: state.privateKey,
+      resolveAuthSecret: (deviceId: string) => state.devices.find((d) => d.id === deviceId)?.authSecret,
+      onStatusChange: (deviceId, online, endpoint) => {
+        set((s) => ({
+          ...s,
+          devices: s.devices.map((d) =>
+            d.id === deviceId
+              ? {
+                  ...d,
+                  online,
+                  lastSeenAt: online ? Date.now() : d.lastSeenAt,
+                  lastProbeLatencyMs: online ? d.lastProbeLatencyMs : d.lastProbeLatencyMs,
+                  ...(endpoint ? { lastReachableHost: endpoint.host, lastReachablePort: endpoint.port } : {}),
+                }
+              : d,
+          ),
+        }));
+      },
+    });
+    connectionManager = mgr;
+    setGlobalConnectionManager(mgr);
+    // Track existing non-demo devices
+    for (const d of state.devices) {
+      if (!d.id.startsWith("demo_")) mgr.track(d);
+    }
+    return mgr;
+  };
+  const syncConnectionManagerDevices = (): void => {
+    const mgr = ensureConnectionManager();
+    if (!mgr) return;
+    const tracked = new Set(mgr.getAllStates().keys());
+    for (const d of state.devices) {
+      if (d.id.startsWith("demo_")) continue;
+      if (!tracked.has(d.id)) mgr.track(d);
+    }
+    // Untrack removed devices
+    for (const id of tracked) {
+      if (!state.devices.some((d) => d.id === id)) mgr.untrack(id);
+    }
+  };
+
   const emit = () => {
     for (const l of listeners) l();
   };
@@ -981,6 +1031,11 @@ export function createLyraStore(options?: {
   const set = (fn: (s: LyraState) => LyraState) => {
     state = fn(state);
     emit();
+    // Keep connection manager in sync with paired devices
+    if (state.identity && state.privateKey) {
+      // Lazily ensure manager exists and track new devices
+      queueMicrotask(() => syncConnectionManagerDevices());
+    }
   };
 
   const getState = () => state;
@@ -1204,6 +1259,11 @@ export function createLyraStore(options?: {
     forwardLog("log", "lyra store", `hydrate done: identity=${identity.id.slice(0,8)} devices=${devices.length} transfers=${transfers.length}`, { identity: identity.id.slice(0,8), devices: devices.map(d=>`${d.name}:${d.id.slice(0,8)}`) });
     await persist();
     forwardLog("log", "lyra store", "hydrate persist done");
+    // Start sticky connection manager for all paired devices
+    try {
+      ensureConnectionManager();
+      syncConnectionManagerDevices();
+    } catch {}
   };
 
   const store: LyraStore = {

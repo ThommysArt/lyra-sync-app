@@ -85,8 +85,48 @@ if (!process.env.NODE_ENV) {
 
 console.log(`\n[lyra] Building ${variant} APK · version ${version} · ${buildType}\n`);
 
+function resolveAndroidSdk() {
+  const candidates = [
+    process.env.ANDROID_HOME,
+    process.env.ANDROID_SDK_ROOT,
+    process.env.ANDROID_SDK,
+    join(process.env.HOME || "", "Android/Sdk"),
+    "/opt/android-sdk",
+    "/usr/local/lib/android/sdk",
+    "/opt/android/sdk",
+  ].filter(Boolean);
+  for (const c of candidates) {
+    if (c && existsSync(join(c, "platform-tools", "adb"))) return c;
+  }
+  return null;
+}
+
+function ensureAndroidLocalProperties() {
+  const sdk = resolveAndroidSdk();
+  if (!sdk) {
+    console.warn("[lyra] ANDROID_HOME not found — gradle will need sdk.dir in android/local.properties");
+    return;
+  }
+  // Ensure env is set for child processes (Gradle + Expo prebuild)
+  if (!process.env.ANDROID_HOME) process.env.ANDROID_HOME = sdk;
+  if (!process.env.ANDROID_SDK_ROOT) process.env.ANDROID_SDK_ROOT = sdk;
+  const propsPath = join(androidRoot, "local.properties");
+  try {
+    const content = `sdk.dir=${sdk.replace(/\\/g, "\\\\")}\n`;
+    if (!existsSync(propsPath) || readFileSync(propsPath, "utf8") !== content) {
+      writeFileSync(propsPath, content, "utf8");
+      console.log(`[lyra] wrote android/local.properties → ${sdk}`);
+    }
+  } catch (e) {
+    console.warn("[lyra] could not write local.properties", e);
+  }
+}
+
 if (!skipPrebuild) {
   // --clean so package id / applicationId switches apply when flipping variants
+  // Ensure SDK is known to Expo prebuild (it creates local.properties from ANDROID_HOME)
+  ensureAndroidLocalProperties();
+  const sdkForPrebuild = resolveAndroidSdk();
   run(
     "pnpm",
     ["exec", "expo", "prebuild", "--platform", "android", "--clean", "--non-interactive"],
@@ -94,12 +134,17 @@ if (!skipPrebuild) {
       env: {
         APP_VARIANT: variant,
         NODE_ENV: process.env.NODE_ENV,
+        ...(sdkForPrebuild ? { ANDROID_HOME: sdkForPrebuild, ANDROID_SDK_ROOT: sdkForPrebuild } : {}),
       },
     },
   );
+  // Expo --clean deletes local.properties — recreate it for Gradle
+  ensureAndroidLocalProperties();
 } else if (!existsSync(androidRoot)) {
   console.error("[lyra] android/ missing — run without --skip-prebuild first");
   process.exit(1);
+} else {
+  ensureAndroidLocalProperties();
 }
 
 // Raise Gradle heap after prebuild (Expo default Metaspace often OOMs on CI)
@@ -127,6 +172,7 @@ if (existsSync(gradleProps) && process.env.CI === "true") {
 
 const gradleTask = buildType === "debug" ? "assembleDebug" : "assembleRelease";
 run("chmod", ["+x", "gradlew"], { cwd: androidRoot });
+const sdkForGradle = resolveAndroidSdk();
 run("./gradlew", [gradleTask], {
   cwd: androidRoot,
   env: {
@@ -135,6 +181,7 @@ run("./gradlew", [gradleTask], {
     EXPO_PUBLIC_LYRA_ENV:
       process.env.EXPO_PUBLIC_LYRA_ENV ||
       (variant === "development" ? "development" : variant === "preview" ? "preview" : "production"),
+    ...(sdkForGradle ? { ANDROID_HOME: sdkForGradle, ANDROID_SDK_ROOT: sdkForGradle } : {}),
   },
 });
 
